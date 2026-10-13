@@ -12,7 +12,20 @@ Writes:    archive/, needs_review/, logs/archive.log, data/p1_last_run.txt
 Changed 13 Oct 2026 for the new folder layout: paths now start from the
 project folder (one level above src/), the log moved to logs/, the
 last-run time moved to data/, and the API key is read from outside the
-project folder. The pipeline logic itself is unchanged from 22 Sep.
+project folder.
+
+Changed 13 Oct 2026 (evening) after the first backlog run:
+  - Dates: three independent signals (page text, model, filename). A date is
+    used only if at least two agree; future dates are thrown out. Before,
+    one signal was trusted alone when the other was missing, which filed a
+    10 Oct Mint under 18 Oct.
+  - Page-text dates now also read "October 10 2026" / "October 10, 2026".
+  - New publishers: Times of India, Business Standard (English).
+  - Hindi editions are skipped (by filename or by the model's answer).
+  - Business Line is no longer mistaken for The Hindu (its masthead reads
+    "The Hindu BusinessLine").
+  - Editions: International and School editions keep an edition suffix,
+    e.g. 2026-10-12_The Hindu_School.pdf. No suffix = main (Delhi) edition.
 """
 
 import logging
@@ -20,7 +33,8 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime, timedelta
+from collections import Counter
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pdfplumber
@@ -58,31 +72,61 @@ logger = logging.getLogger(__name__)
 MAX_PAGES_TO_CHECK = 5
 
 MONTHS = "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER"
-DATE_PATTERN = re.compile(rf'(\d{{1,2}})({MONTHS})(\d{{4}})', re.IGNORECASE)
+# "10 October 2026", "10OCTOBER2026" (day first) and "October 10 2026", "October 10, 2026" (month first)
+DATE_DAY_FIRST = re.compile(rf'(?<!\d)(\d{{1,2}})\s*({MONTHS})\s*,?\s*(\d{{4}})(?!\d)', re.IGNORECASE)
+DATE_MONTH_FIRST = re.compile(rf'({MONTHS})\s*(\d{{1,2}})\s*,?\s*(\d{{4}})(?!\d)', re.IGNORECASE)
+# dates in filenames, Indian order: 07-10-2026, 11~10~2026, 10_10_2026
+FILENAME_DATE = re.compile(r'(?<!\d)(\d{1,2})[-~_. ](\d{1,2})[-~_. ](\d{4})(?!\d)')
 SAFE_NAME = re.compile(r'^[A-Za-z0-9 ,.\-_]{1,80}$')
 SAFE_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 KNOWN_PUBLISHERS = {
-    "economic times": "Economic Times", "et": "Economic Times",
+    "economic times": "Economic Times", "the economic times": "Economic Times", "et": "Economic Times",
     "mint": "Mint",
     "the hindu": "The Hindu", "th": "The Hindu",
     "business line": "Business Line", "businessline": "Business Line", "bl": "Business Line",
+    "the hindu businessline": "Business Line", "the hindu business line": "Business Line",
+    "times of india": "Times of India", "the times of india": "Times of India", "toi": "Times of India",
+    "business standard": "Business Standard", "bs": "Business Standard",
     "financial express": "Financial Express", "fe": "Financial Express",
     "indian express": "Indian Express", "ie": "Indian Express",
 }
 
+# Non-main editions get a suffix in the archive name. No suffix = main (Delhi) edition.
+EDITIONS = {"international": "International", "school": "School"}
+
+
+def _find_publisher(text):
+    """Longest known publisher name that appears as a whole word in the text."""
+    text = text.lower()
+    for key in sorted(KNOWN_PUBLISHERS, key=len, reverse=True):
+        if re.search(rf'(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])', text):
+            return KNOWN_PUBLISHERS[key]
+    return None
+
 
 def canonicalize_name(raw_name):
-    return KNOWN_PUBLISHERS.get(raw_name.strip().lower())
+    # exact match first; otherwise look for a known name inside the model's answer,
+    # e.g. "Bennett, Coleman & Co. Ltd. (The Times of India)" -> Times of India.
+    # "Bennett, Coleman & Co. Ltd." alone stays unknown: that company also owns ET.
+    key = raw_name.strip().lower()
+    return KNOWN_PUBLISHERS.get(key) or _find_publisher(key)
 
 
 def filename_hint_name(filename):
+    return _find_publisher(filename)
+
+
+def edition_from_filename(filename):
     stem = filename.lower()
-    for key in sorted(KNOWN_PUBLISHERS, key=len, reverse=True):
-        pattern = rf'(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])'
-        if re.search(pattern, stem):
-            return KNOWN_PUBLISHERS[key]
+    for key, label in EDITIONS.items():
+        if re.search(rf'(?<![a-z0-9]){key}(?![a-z0-9])', stem):
+            return label
     return None
+
+
+def is_hindi(*texts):
+    return any("hindi" in (t or "").lower() for t in texts)
 
 
 def get_last_run_time():
@@ -118,13 +162,64 @@ def extract_page_text(pdf_path, max_pages=MAX_PAGES_TO_CHECK):
     return "", None
 
 
-def regex_extract_date(text):
-    match = DATE_PATTERN.search(text)
-    if not match:
+def _iso(day, month, year):
+    """Return YYYY-MM-DD, or None if it isn't a real date (e.g. 31 February)."""
+    try:
+        return datetime.strptime(f"{int(day)} {month} {year}", "%d %B %Y").strftime("%Y-%m-%d")
+    except ValueError:
         return None
-    day, month, year = match.groups()
-    parsed = datetime.strptime(f"{day} {month.capitalize()} {year}", "%d %B %Y")
-    return parsed.strftime("%Y-%m-%d")
+
+
+def regex_extract_date(text):
+    """Earliest date written out in words on the page (the masthead date is near the top)."""
+    found = []
+    for m in DATE_DAY_FIRST.finditer(text):
+        found.append((m.start(), _iso(m.group(1), m.group(2).capitalize(), m.group(3))))
+    for m in DATE_MONTH_FIRST.finditer(text):
+        found.append((m.start(), _iso(m.group(2), m.group(1).capitalize(), m.group(3))))
+    found = [f for f in found if f[1]]
+    return min(found)[1] if found else None
+
+
+def filename_date(filename):
+    m = FILENAME_DATE.search(filename)
+    if not m:
+        return None
+    day, month, year = m.groups()
+    try:
+        return date(int(year), int(month), int(day)).isoformat()
+    except ValueError:
+        return None
+
+
+def decide_date(signals, pdf_name):
+    """Majority vote over independent date signals.
+
+    signals: {"page text": "2026-10-10" or None, "model": ..., "filename": ...}
+    A date is accepted only if at least two signals agree on it. Malformed and
+    future dates are thrown out first. Returns (date, None) or (None, reason).
+    """
+    today = date.today().isoformat()
+    usable = {}
+    for source, value in signals.items():
+        if not value:
+            continue
+        if not SAFE_DATE.match(value):
+            logger.warning(f"{pdf_name}: {source} date {value!r} is malformed, ignored.")
+            continue
+        if value > today:
+            logger.warning(f"{pdf_name}: {source} date {value} is in the future, ignored.")
+            continue
+        usable[source] = value
+    if not usable:
+        return None, "no usable date from any signal"
+    best, votes = Counter(usable.values()).most_common(1)[0]
+    if votes < 2:
+        return None, f"fewer than two date signals agree: {usable}"
+    outvoted = {s: v for s, v in usable.items() if v != best}
+    if outvoted:
+        logger.warning(f"{pdf_name}: date {best} agreed by {votes} signals; outvoted: {outvoted}")
+    return best, None
 
 
 def llm_extract(text):
@@ -183,8 +278,19 @@ def safe_destination(base_dir, date_str, filename):
     return dest
 
 
+def _flag(pdf_path):
+    """Move a doubtful file to needs_review/ (a no-op if it is already there)."""
+    REVIEW_ROOT.mkdir(exist_ok=True)
+    shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
+    return "flagged"
+
+
 def process_pdf(pdf_path):
     pdf_path = Path(pdf_path)
+    if is_hindi(pdf_path.name):
+        logger.info(f"{pdf_path.name}: Hindi edition, not supported — skipping.")
+        return "skipped"
+
     text, page_num = extract_page_text(pdf_path)
     if not text.strip():
         logger.error(f"No extractable text in first {MAX_PAGES_TO_CHECK} pages of {pdf_path.name} — skipping.")
@@ -202,38 +308,39 @@ def process_pdf(pdf_path):
         logger.info(f"{pdf_path.name}: not a newspaper — leaving untouched in Downloads.")
         return "ignored"
 
-    llm_date = llm_result.get("date")
-    raw_name = llm_result.get("newspaper_name", "")
+    raw_name = llm_result.get("newspaper_name") or ""
+    if is_hindi(raw_name):
+        logger.info(f"{pdf_path.name}: model says '{raw_name}', a Hindi edition, not supported — skipping.")
+        return "skipped"
     text_name = canonicalize_name(raw_name)
     hint_name = filename_hint_name(pdf_path.name)
 
-    if regex_date and llm_date and regex_date != llm_date:
-        logger.warning(f"Date mismatch for {pdf_path.name}: regex={regex_date} vs llm={llm_date}. Flagging.")
-        REVIEW_ROOT.mkdir(exist_ok=True)
-        shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
-        return "flagged"
+    # Business Line's masthead reads "The Hindu BusinessLine", so the model sometimes
+    # answers "The Hindu". When the filename clearly says Business Line, trust it.
+    if text_name == "The Hindu" and hint_name == "Business Line":
+        logger.info(f"{pdf_path.name}: model said 'The Hindu', filename says Business Line — using Business Line.")
+        text_name = "Business Line"
 
     if text_name and hint_name and text_name != hint_name:
         logger.warning(f"Name mismatch for {pdf_path.name}: page text said '{text_name}', filename suggests '{hint_name}'. Flagging.")
-        REVIEW_ROOT.mkdir(exist_ok=True)
-        shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
-        return "flagged"
+        return _flag(pdf_path)
 
     name = text_name or hint_name
     if name is None:
         logger.warning(f"Could not determine publisher for {pdf_path.name} (page text: '{raw_name}'). Flagging for review.")
-        REVIEW_ROOT.mkdir(exist_ok=True)
-        shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
-        return "flagged"
+        return _flag(pdf_path)
 
-    final_date = regex_date or llm_date
-    if not final_date:
-        logger.warning(f"No date found at all for {pdf_path.name} — flagging.")
-        REVIEW_ROOT.mkdir(exist_ok=True)
-        shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
-        return "flagged"
+    final_date, problem = decide_date(
+        {"page text": regex_date, "model": llm_result.get("date"), "filename": filename_date(pdf_path.name)},
+        pdf_path.name,
+    )
+    if final_date is None:
+        logger.warning(f"Date problem for {pdf_path.name}: {problem}. Flagging.")
+        return _flag(pdf_path)
 
-    new_filename = f"{final_date}_{name}.pdf".replace("/", "-")
+    edition = edition_from_filename(pdf_path.name)
+    suffix = f"_{edition}" if edition else ""
+    new_filename = f"{final_date}_{name}{suffix}.pdf".replace("/", "-")
     try:
         dest = safe_destination(ARCHIVE_ROOT, final_date, new_filename)
     except ValueError as e:
@@ -243,9 +350,7 @@ def process_pdf(pdf_path):
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         logger.warning(f"Destination already exists for {pdf_path.name} -> {dest}. Flagging as possible duplicate.")
-        REVIEW_ROOT.mkdir(exist_ok=True)
-        shutil.move(str(pdf_path), str(REVIEW_ROOT / pdf_path.name))
-        return "flagged"
+        return _flag(pdf_path)
 
     shutil.move(str(pdf_path), str(dest))
     logger.info(f"Archived: {pdf_path.name} -> {dest}")
