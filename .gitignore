@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+archive/
+needs_review/
+data/
+review/
+output/
+logs/
+_old/
+.env
+.DS_Store
