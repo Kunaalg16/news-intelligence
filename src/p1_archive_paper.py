@@ -1,4 +1,22 @@
+"""
+p1_archive_paper.py -- Phase 1 (Archive): newspaper PDFs saved from WhatsApp
+into ~/Downloads are checked, renamed and filed into archive/<date>/.
+
+Lives in:  ~/news-intel/src/
+Run with:  cd ~/news-intel && .venv/bin/python src/p1_archive_paper.py
+           (add a path to a PDF to process just that one file)
+Reads:     ~/Downloads (PDFs newer than the last run), data/p1_last_run.txt,
+           API key from ~/.config/news-intel/.env
+Writes:    archive/, needs_review/, logs/archive.log, data/p1_last_run.txt
+
+Changed 13 Oct 2026 for the new folder layout: paths now start from the
+project folder (one level above src/), the log moved to logs/, the
+last-run time moved to data/, and the API key is read from outside the
+project folder. The pipeline logic itself is unchanged from 22 Sep.
+"""
+
 import logging
+import os
 import re
 import shutil
 import sys
@@ -9,15 +27,23 @@ import pdfplumber
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent   # ~/news-intel (this file is in src/)
+ENV_FILE = Path.home() / ".config" / "news-intel" / ".env"
+
+load_dotenv(ENV_FILE)
+if not os.environ.get("ANTHROPIC_API_KEY"):
+    sys.exit(f"No ANTHROPIC_API_KEY found. Expected it in {ENV_FILE}")
 client = Anthropic()
 
-ARCHIVE_ROOT = Path(__file__).parent / "archive"
-REVIEW_ROOT = Path(__file__).parent / "needs_review"
-LOG_PATH = Path(__file__).parent / "archive.log"
-STATE_FILE = Path(__file__).parent / "last_run.txt"
+ARCHIVE_ROOT = PROJECT_ROOT / "archive"
+REVIEW_ROOT = PROJECT_ROOT / "needs_review"
+LOG_PATH = PROJECT_ROOT / "logs" / "archive.log"
+STATE_FILE = PROJECT_ROOT / "data" / "p1_last_run.txt"
 DOWNLOADS_DIR = Path.home() / "Downloads"
 FIRST_RUN_LOOKBACK_HOURS = 24
+
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
