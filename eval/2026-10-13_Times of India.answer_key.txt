@@ -1,0 +1,33 @@
+# 2026-10-13_Times of India · gold set v1 · labelled by Kunaal (voice), written by Claude, 13 Oct 2026
+# One line per story: its blocks. Gn = chart/infographic belonging to story n (same story when scoring grouping; kept out of body text).
+# NOT = not an article (ads, captions, teasers, labels, data tables not tied to a story, credits).
+# Block ids come from p2_extract.py v2 (blocks sorted by 40-pt column band, then top to bottom).
+
+[page 5] TUNE  # WORD-LEVEL LOSS: one line each in b35, b42, b49 (S2). LINE-LEVEL: bold lines 'Police denied claims of beatings...' inside b54 (S7) went to S4
+S1: b55 b56 b57 b58 b63 b64 b65 b69 b70 b71 b79 b80 b81 b82 b83
+G1: b87 b88 b89 b90 b91 b92 b93 b94 b95 b96
+S2: b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b30 b35 b42 b43 b44 b49 b50
+S3: b1 b2 b3 b4 b5 b6 b7
+S5: b59 b60 b61 b62 b66 b67 b72 b73 b74 b75 b76 b77 b78 b84 b85 b86
+S6: b28 b29 b31 b32 b36 b37 b38 b39 b40 b45 b46
+S7: b51 b52 b53 b54
+S8: b10 b11 b12 b13
+NOT: b8 b9 b14 b15 b16 b33 b34 b41 b47 b48 b68
+
+[page 12] TUNE  # S1 was only the page heading 'TIMES CITY' (no block); the two rain stories were entirely unassigned
+S2: b2 b3 b4 b15
+S3: b24 b25 b26 b27 b28 b34 b37 b38 b39 b42 b46 b47
+S4: b29 b30 b31 b32 b33 b35 b40 b41 b43 b48 b49
+NOT: b1 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b16 b17 b18 b19 b20 b21 b22 b23 b36 b44 b45
+
+[page 15] HELD-BACK  # WORD-LEVEL LOSS: 3 lines above b70 in b56/b58 column (S1); one line each near b63, b67 (S4)
+S1: b47 b48 b49 b50 b51 b57 b58 b68 b69 b70 b73 b74
+S2: b2 b3 b4 b5 b6 b7 b8
+S3: b20 b21 b22 b23 b24 b25 b26 b27 b35 b36 b37 b38 b43 b44 b45 b46
+S4: b52 b53 b54 b55 b56 b59 b60 b61 b63 b67 b71 b75 b76 b77
+G4: b62 b64 b65 b66 b72
+S5: b9 b10 b11 b12 b13
+S6: b28 b29 b30 b31 b32 b33 b34 b39 b40 b41 b42
+S7: b14 b15 b16 b17 b18
+S8: b19
+NOT: b1

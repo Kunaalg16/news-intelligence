@@ -1,0 +1,26 @@
+# 2026-10-13_Mint · gold set v1 · labelled by Kunaal (voice), written by Claude, 13 Oct 2026
+# One line per story: its blocks. Gn = chart/infographic belonging to story n (same story when scoring grouping; kept out of body text).
+# NOT = not an article (ads, captions, teasers, labels, data tables not tied to a story, credits).
+# Block ids come from p2_extract.py v2 (blocks sorted by 40-pt column band, then top to bottom).
+
+[page 5] TUNE  # was HELD-BACK; gate used once on 14 Oct (failed), now a tuning page
+S1: b2 b3 b4 b6 b7 b8 b9 b20 b26 b27 b46 b47 b48 b61
+G1: b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b49 b50 b51 b52 b53 b55 b56 b57 b59 b60
+S2: b64 b65 b67 b68 b69 b85 b86 b98 b99 b104 b105 b108 b111
+S4: b71 b72 b73 b74 b75 b87 b101 b106 b107 b112
+S5: b10 b11
+S6: b12 b13 b14 b15 b16 b17 b18 b19
+S7: b28 b29
+NOT: b1 b5 b21 b22 b23 b24 b25 b30 b54 b58 b62 b63 b66 b70 b76 b77 b78 b79 b80 b81 b82 b83 b84 b88 b89 b90 b91 b92 b93 b94 b95 b96 b97 b100 b102 b103 b109 b110
+
+[page 16] TUNE  # Long Story feature: one article; infographic = G1; Kunaal suggests a vision model for such pages to keep the data points
+S1: b2 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b27 b28 b29 b30 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b43 b54 b56 b57 b58 b59 b60 b61 b62 b63 b64 b65 b66 b67 b68 b69 b70 b71 b72 b73 b76 b77 b78 b82 b83 b84 b85 b86 b87 b88 b89 b90 b91 b92 b93 b94 b95 b96 b97 b98 b99 b100 b101
+G1: b42 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b74 b75 b80 b81
+NOT: b1 b3 b26 b55 b79
+
+[page 14] TUNE  # S2 'Zelensky running afoul...' was S1's sub-headline read as a headline
+S1: b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b62 b63 b72 b73 b74 b75 b76 b83 b84 b85 b102 b103 b104 b105 b106 b107 b108
+S3: b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b22 b23 b24 b25 b26 b28 b29
+S4: b46 b47 b48 b49 b50 b55 b56 b57 b65 b77 b78 b82 b92 b93 b99 b109 b110
+S5: b14 b15 b16 b17 b18 b19 b30 b31 b32 b33 b51 b52 b53 b54 b59 b60 b66 b67 b79 b80 b81 b95 b98 b100 b101 b111 b112 b113
+NOT: b1 b20 b21 b27 b58 b61 b64 b68 b69 b70 b71 b86 b87 b88 b89 b90 b91 b94 b96 b97

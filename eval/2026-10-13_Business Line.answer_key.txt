@@ -1,0 +1,36 @@
+# 2026-10-13_Business Line · gold set v1 · labelled by Kunaal (voice), written by Claude, 13 Oct 2026
+# One line per story: its blocks. Gn = chart/infographic belonging to story n (same story when scoring grouping; kept out of body text).
+# NOT = not an article (ads, captions, teasers, labels, data tables not tied to a story, credits).
+# Block ids come from p2_extract.py v2 (blocks sorted by 40-pt column band, then top to bottom).
+
+[page 1] TUNE  # WORD-LEVEL LOSS: first two lines of b5 under the photo. Pages 15-16 excluded: data pages (Market Radar).
+S1: b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b19 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30
+S2: b42 b43 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b54
+S3: b4 b5
+S4: b31 b32 b33 b34
+S5: b35 b36 b37 b38
+S6: b6 b7
+NOT: b1 b2 b3 b8 b20 b39 b40 b41
+
+[page 5] TUNE  # was HELD-BACK; gate used once on 14 Oct (failed), now a tuning page  # WORD-LEVEL LOSS: first 3 lines of S4 (b4); top line of b35 and b45 under the photo
+S1: b17 b18 b19 b20 b21 b22 b35 b36 b45 b46 b56 b57 b58
+S2: b70 b71 b72 b73 b74 b75 b76 b77 b78 b79 b80 b81
+S3: b62 b63 b64 b65 b66
+S4: b3 b4
+S6: b5 b6 b7 b23 b24 b25 b37 b38 b47 b48 b49 b59 b60 b61 b67 b68 b69
+S7: b8 b9 b10 b11 b26 b27 b39 b40 b41 b50 b51 b52
+S8: b28 b29 b30 b31 b32 b33 b42 b43 b44 b53 b54 b55
+S9: b12 b13 b14 b15
+NOT: b1 b2 b16 b34
+
+[page 2] TUNE  # WORD-LEVEL LOSS: one line each in b110, b38, b102
+S1: b20 b21 b22 b23 b24 b25 b26 b27 b36 b37 b48 b49 b60 b61 b62 b63 b64 b81 b82 b83 b84
+S2: b92 b93 b94 b95 b96 b97 b110 b111 b112
+S3: b2 b3 b4 b5 b6 b7
+S5: b8 b9 b10 b11 b29 b30 b38 b39 b50 b51 b52
+S6: b65 b66 b67 b68 b69 b86 b87 b88 b98 b99 b100 b113 b114 b115 b116
+S7: b12 b13 b14 b15 b16 b17 b31 b32 b33 b34 b35
+S8: b40 b41 b42 b53 b54 b55 b70 b71 b72 b73 b74 b75 b76 b77 b78 b89 b102 b103 b117 b118 b119
+S9: b56 b57 b58 b59 b80 b90 b91 b104 b105 b106 b107 b108 b120 b121 b122
+S10: b43 b44 b45 b46 b47
+NOT: b1 b18 b19 b28 b79 b85 b101 b109

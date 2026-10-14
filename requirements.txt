@@ -10,6 +10,7 @@ httpcore2==2.13.0
 httpx2==2.13.0
 idna==3.20
 jiter==0.17.0
+numpy==2.5.4
 pdfminer.six==20260107
 pdfplumber==0.11.10
 pillow==12.3.0

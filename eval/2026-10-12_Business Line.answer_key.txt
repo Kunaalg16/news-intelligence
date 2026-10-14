@@ -1,0 +1,16 @@
+# 2026-10-12_Business Line · fresh gate page · labelled by Kunaal (voice), written by Claude, 14 Oct 2026
+# Picked by pre-registered rule (12 Oct; no front/ad/data pages; >=300 words; random.Random(15)). Scored once with v3.1.
+# Block ids from p2_extract.py page_blocks (40-pt column band, then top to bottom).
+# Crossword = NOT. Twenty Years Ago Today = 3 separate briefs. NEW READS = 3 separate blurbs. Writer note (b84) belongs to its article.
+
+[page 5] HELD-BACK
+S1: b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b20 b21 b22 b23 b24 b25 b26 b27 b28
+S2: b29 b30 b31 b32 b33 b34 b35 b36 b53 b54 b55 b56 b61 b62 b63 b71 b72 b73 b74 b75 b76 b78 b79 b80 b81 b82
+S3: b15
+S4: b16
+S5: b17
+S6: b38 b39 b40 b41 b42 b57 b58 b68 b69 b70 b83 b84
+S7: b48 b49 b50 b51
+S8: b64 b65 b66 b67
+S9: b85 b86 b87 b88
+NOT: b1 b13 b14 b18 b19 b37 b43 b44 b45 b46 b47 b52 b59 b60 b77
