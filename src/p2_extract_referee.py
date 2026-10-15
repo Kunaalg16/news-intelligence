@@ -15,6 +15,12 @@ USAGE (from ~/news-intel) -- referee the gold-set pages of one paper and save th
     .venv/bin/python src/p2_extract_referee.py "archive/2026-10-13/2026-10-13_Business Line.pdf" --pages 1 2 5
     writes review/<stem>/referee_pNN.json  (block -> story, the model's raw answer, tokens, cost)
     and appends one line per call to logs/referee.log
+
+APPLYING THE VERDICT (added 15 Oct)
+    p2_extract.py --referee "Business Line" uses make_page_referee() + articles_from_verdict() below: for each
+    non-ad page of that paper, the referee's verdict replaces the rules' grouping and the page's articles are rebuilt
+    from WHOLE blocks (no lines lost inside a block). Saved answers are re-used, so a page is never paid for twice.
+    Articles built this way carry "method": "referee" in the JSON; rules articles have no "method" field.
 """
 
 import argparse
@@ -30,6 +36,7 @@ import pymupdf
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from p2_extract import page_blocks, assign_blocks          # same block ids as the answer keys
 from p2_extract_rules import segment_page
+import p2_extract_rules as R
 
 MODEL = "claude-haiku-4-5-20251001"
 PRICE_IN, PRICE_OUT = 1.0, 5.0         # US$ per million tokens (Haiku), for the cost log
@@ -120,6 +127,14 @@ def validate(answer, blocks):
     ids = [b["id"] for b in blocks]
     known, label, problems = set(ids), {}, Counter()
     arts, nots = _as_list(answer.get("articles")), _as_list(answer.get("not_article", []))
+    if arts is None and isinstance(answer.get("articles"), str):
+        # Repair (D8, 15 Oct): the model sometimes writes its WHOLE answer inside the 'articles' field as text,
+        # e.g. '[{...}, {...}], "not_article": ["b9", ...]'. Read that text as the full form and retry once.
+        try:
+            whole = json.loads('{"articles": ' + answer["articles"].strip().rstrip(",") + "}")
+            arts, nots = _as_list(whole.get("articles")), _as_list(whole.get("not_article", nots or []))
+        except ValueError:
+            pass
     if arts is None or nots is None:
         raise ValueError(f"answer shape: articles={type(answer.get('articles')).__name__}")
     for k, art in enumerate(arts, 1):
@@ -186,6 +201,150 @@ def referee_page(page, client, rules_res=None):
     return {"ok": True, "labels": labels, "problems": problems, "answer": answer, "tokens_in": tin,
             "tokens_out": tout, "cost_usd": round(cost, 5), "seconds": round(time.time() - t0, 1),
             "stop_reason": getattr(resp, "stop_reason", None)}
+
+
+# ----------------------------------------------------------------------------- apply the verdict (15 Oct)
+def _blocks_with_spans(page):
+    """Same blocks, same order, same ids as p2_extract.page_blocks, plus each block's text pieces (size, bold)."""
+    blocks = []
+    for b in page.get_text("dict")["blocks"]:
+        if b["type"] != 0:
+            continue
+        lines = [l for l in b["lines"] if abs(l["dir"][1]) <= 0.1]
+        text = " ".join(s["text"] for l in lines for s in l["spans"]).strip()
+        if text:
+            spans = [(s["text"], s["size"], bool(s["flags"] & 16) or "Bold" in s["font"] or "Black" in s["font"])
+                     for l in lines for s in l["spans"] if s["text"].strip()]
+            sizes = Counter()
+            for t, sz, _ in spans:
+                sizes[round(sz * 2) / 2] += len(t)
+            bold_chars = sum(len(t) for t, _, bo in spans if bo)
+            blocks.append({"bbox": pymupdf.Rect(b["bbox"]), "text": text,
+                           "size": sizes.most_common(1)[0][0] if sizes else 0,
+                           "bold": bold_chars > 0.5 * max(1, sum(len(t) for t, _, _ in spans))})
+    blocks.sort(key=lambda b: (round(b["bbox"].x0 / 40), b["bbox"].y0))
+    for i, b in enumerate(blocks, 1):
+        b["id"] = f"b{i}"
+    return blocks
+
+
+def _reading_order(blocks):
+    """Columns from where blocks start (left to right), then top to bottom inside each column."""
+    cols, out = [], []
+    for b in sorted(blocks, key=lambda b: b["bbox"].x0):
+        if not cols or b["bbox"].x0 - cols[-1][0]["bbox"].x0 > R.COLUMN_MERGE:
+            cols.append([b])
+        else:
+            cols[-1].append(b)
+    for c in cols:
+        out.append(sorted(c, key=lambda b: b["bbox"].y0))
+    return out
+
+
+def articles_from_verdict(page, out, rules_res):
+    """Rebuild one page's articles from the referee's verdict (block -> story), in the same shape the rules produce,
+    so the runner (jump joining, block map, summary, JSON) treats them exactly like rules articles.
+      - blocks labelled rN form article N; blocks the referee left out ('d:sK') form a group of their own;
+        NOT / d:other blocks are dropped; d:grey blocks stay grey (unplaced body text)
+      - headline = the group's largest-text blocks if at least HEADLINE_RATIO x body size; else the headline the
+        referee wrote for that article; deck = mid-size blocks just under the headline; byline = a short bold block
+        right after; body = ALL text of the remaining blocks, in reading order (whole blocks: no lines lost)"""
+    body_size = rules_res.get("body_size") or 0
+    blocks = _blocks_with_spans(page)
+    groups, grey = {}, []
+    for b in blocks:
+        lab = out["labels"].get(b["id"], "NOT")
+        if lab in ("NOT", "d:other"):
+            continue
+        if lab == "d:grey":
+            grey.append({"bbox": b["bbox"], "text": b["text"]})
+            continue
+        groups.setdefault(lab, []).append(b)
+    ref_heads = {}
+    for k, art in enumerate((out.get("answer") or {}).get("articles") or [], 1):
+        if isinstance(art, dict) and isinstance(art.get("headline"), str):
+            ref_heads[f"r{k}"] = art["headline"]
+    articles, labels = [], []
+    for lab, bl in groups.items():
+        letters = [b for b in bl if len(b["text"].strip()) <= 2]           # drop caps: never a headline
+        big = max((b["size"] for b in bl if b not in letters), default=0)
+        heads = [b for b in bl if b not in letters and body_size and b["size"] >= R.HEADLINE_RATIO * body_size
+                 and abs(b["size"] - big) < 1.5]
+        heads.sort(key=lambda b: (b["bbox"].y0, b["bbox"].x0))
+        rest = [b for b in bl if b not in heads]
+        hbox = pymupdf.Rect(heads[0]["bbox"]) if heads else pymupdf.Rect(min(bl, key=lambda b: b["bbox"].y0)["bbox"])
+        for h in heads[1:]:
+            hbox |= h["bbox"]
+        deck = [b for b in rest if heads and body_size + R.BODY_SIZE_TOL <= b["size"] < big
+                and 0 <= b["bbox"].y0 - hbox.y1 < R.DECK_GAP_MAX + 20]
+        rest = [b for b in rest if b not in deck]
+        cols = _reading_order(rest)
+        ordered = [b for c in cols for b in c]
+        brief_head = []
+        if not heads and ordered and ordered[0]["bold"] and len(ordered[0]["text"].split()) <= 14:
+            brief_head = [ordered.pop(0)]       # a brief: its headline is bold text at body size
+            hbox = pymupdf.Rect(brief_head[0]["bbox"])
+        byline = []
+        if ordered and ordered[0]["bold"] and len(ordered[0]["text"].split()) <= 6:
+            byline = [ordered.pop(0)]
+        parts = []
+        for b in ordered:                       # a drop cap joins the text after it: "T" + "he abbreviation" = "The ..."
+            if parts and parts[-1][1] and len(parts[-1][0]) <= 2:
+                parts[-1] = (parts[-1][0] + b["text"].lstrip(), False)
+            else:
+                parts.append((b["text"], b in letters))
+        info = R._clean(" ".join(t for t, _ in parts))
+        headline = " ".join(h["text"] for h in heads + brief_head) or ref_heads.get(lab, "")
+        entry = {"headline": re.sub(r"\s+", " ", headline).strip(), "deck": " ".join(b["text"] for b in deck),
+                 "byline": " ".join(b["text"] for b in byline), "body": info["text"],
+                 "words": len(info["text"].split()), "continues_to": info["continues_to"],
+                 "see_also_page": info["see_also_page"], "method": "referee",
+                 "_hbox": hbox, "_boxes": [b["bbox"] for b in rest + deck + byline],
+                 "_pieces": [" ".join(b["text"] for b in c) for c in cols]}
+        (articles if entry["words"] >= R.MIN_ARTICLE_WORDS else labels).append(entry)
+    articles.sort(key=lambda a: (a["_hbox"].y0, a["_hbox"].x0))
+    return {"body_size": rules_res.get("body_size"), "articles": articles, "grey": grey, "labels": labels}
+
+
+def make_page_referee(root, stem, fresh=False):
+    """-> function(page, page_number, rules_res) -> (res, info) used by p2_extract.py --referee.
+    Re-uses a saved answer (review/<stem>/referee_pNN.json) when one exists, so a page is never paid for twice;
+    otherwise calls Haiku once and saves the answer. Any failure -> the rules' result (fail-closed)."""
+    rev = Path(root) / "review" / stem
+    rev.mkdir(parents=True, exist_ok=True)
+    (Path(root) / "logs").mkdir(exist_ok=True)
+    state = {"client": None}
+
+    def run(page, pn, rules_res):
+        f = rev / f"referee_p{pn:02d}.json"
+        if f.exists() and not fresh:
+            out, paid = json.loads(f.read_text(encoding="utf-8")), 0.0
+            if not out.get("ok") and isinstance(out.get("answer"), dict):     # saved before a repair existed
+                try:
+                    lab, prob = validate(out["answer"], page_blocks(page))
+                    out.update(ok=True, labels=lab, problems=prob)
+                except ValueError:
+                    pass
+        else:
+            try:
+                if state["client"] is None:
+                    state["client"] = make_client()
+                out = referee_page(page, state["client"], rules_res)
+            except Exception as e:              # no key / SDK problem: fail-closed, don't save, don't stop the run
+                return rules_res, {"ok": False, "paid": 0.0, "error": str(e)[:200]}
+            paid = out.get("cost_usd", 0) or 0
+            f.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+            with open(Path(root) / "logs" / "referee.log", "a", encoding="utf-8") as fh:
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {stem} p{pn}: ok={out['ok']} "
+                         f"in={out.get('tokens_in')} out={out.get('tokens_out')} ${paid:.4f} "
+                         f"problems={out.get('problems', out.get('error'))}\n")
+        if not out.get("ok"):
+            return rules_res, {"ok": False, "paid": paid}
+        try:
+            return articles_from_verdict(page, out, rules_res), {"ok": True, "paid": paid}
+        except Exception as e:                  # fail-closed: never lose a page to a rebuild bug
+            return rules_res, {"ok": False, "paid": paid, "error": str(e)[:200]}
+    return run
 
 
 def main():

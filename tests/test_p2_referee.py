@@ -8,7 +8,8 @@ WHAT IT DOES
       2. echo    : fake model repeats the rules' draft       -> must score exactly like the rules at block level
       3. garbage : fake model sends invented ids, duplicates -> page must fall back to the rules (same as echo)
       4. crash   : the API call fails                        -> page must fall back to the rules (same as echo)
-    plus 5 malformed answer shapes (the 15 Oct crash: 'articles' sent as a string) -> handled or fail-closed.
+    plus 6 malformed answer shapes (incl. the 15 Oct Mint p7 answer) -> handled or fail-closed,
+    plus the apply step (15 Oct): a perfect verdict rebuilt into articles never crashes and keeps >= 99% of the words.
     Prints PASS / FAIL per check and exits with an error if any check fails.
 
 WHY IT EXISTS
@@ -24,6 +25,7 @@ USAGE (from ~/news-intel)
 """
 
 import glob
+import re
 import sys
 import types
 from pathlib import Path
@@ -104,6 +106,27 @@ def main():
             q = [(f"{stem}p{pn}:{t}", f"{stem}p{pn}:{p}" if p else None)
                  for t, p in page_words_referee(page, labels, out["labels"])]
             results[mode] += q
+    # apply step (15 Oct): a perfect verdict, rebuilt into articles, must keep all article text and never crash
+    import numpy as np
+    from p2_check import _inside
+    rebuilt_ok, art_words, kept = True, 0, 0
+    for stem, pn, page, labels in pages:
+        try:
+            out = RF.referee_page(page, FakeClient(fakes(page, labels)["oracle"]))
+            res = RF.articles_from_verdict(page, out, segment_page(page))
+        except Exception as e:
+            rebuilt_ok = False
+            print(f"  rebuild crashed on {stem} p{pn}: {e}")
+            continue
+        text = " ".join(a["headline"] + " " + a["deck"] + " " + a["byline"] + " " + a["body"] for a in res["articles"]) + \
+               " " + " ".join(l.get("headline", "") + " " + l.get("body", "") for l in res["labels"])
+        norm = lambda t: re.findall(r"\w+", re.sub(r"(\w)- (\w)", r"\1\2", t).lower())   # rejoin "validi- ty"
+        have = set(norm(text))
+        for b in page_blocks(page):
+            if labels.get(b["id"], "NOT") != "NOT":
+                for w in norm(b["text"]):
+                    art_words += 1
+                    kept += w in have
     s = {m: score(q) for m, q in results.items()}
     key = lambda d: (round(d["coverage"], 4), round(d["precision"], 4), round(d["recall"], 4))
     checks = [
@@ -112,6 +135,9 @@ def main():
         ("garbage falls back to the rules (within 1 point of echo)",
          all(abs(a - b) <= 0.01 for a, b in zip(key(s["garbage"]), key(s["echo"])))),
     ]
+    checks.append(("apply step: perfect verdict rebuilt into articles without a crash", rebuilt_ok))
+    checks.append((f"apply step: rebuilt articles keep >= 99% of article words ({kept / max(1, art_words):.1%})",
+                   kept >= 0.99 * art_words))
     blocks = [{"id": "b1", "story": "s1"}, {"id": "b2", "story": "s1"}, {"id": "b3", "story": "other"}]
     shapes = {
         "articles sent as a string": {"articles": "S1: b1 b2", "not_article": ["b3"]},
@@ -119,6 +145,8 @@ def main():
         "article entry is a string": {"articles": ["b1 b2", {"headline": "x", "blocks": ["b1"]}], "not_article": ["b3"]},
         "ids not strings": {"articles": [{"headline": "x", "blocks": [1, ["b2"], "b1"]}], "not_article": [None, "b3"]},
         "no articles key": {"not_article": ["b3"]},
+        "whole answer inside 'articles' (Mint p7, 15 Oct)":
+            {"articles": '[{"headline": "x", "blocks": ["b1", "b2"]}],\n"not_article": ["b3"]\n'},
     }
     for name, ans in shapes.items():
         try:

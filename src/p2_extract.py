@@ -8,6 +8,8 @@ USAGE (from ~/news-intel)
     options:  --root DIR       project root (default: the folder above src/)
               --all-editions   also process _International / _School etc.
               --no-pictures    skip the overlay pictures (faster)
+              --referee PAPER  also run the AI referee on that paper (first pass: "Business Line"); see
+                               p2_extract_referee.py. Articles it rebuilt carry "method": "referee".
 
 WRITES (names trace back to the PDF)
     data/articles/<date>/<date>_<Publisher>.json   list of articles
@@ -28,6 +30,10 @@ PAGE JUMPS
     an ad wrap makes PDF page = printed page + offset. A cut on PDF page s pointing to printed page T pairs with
     a resume-marker on PDF page t saying "from printed page S" only if t - T == s - S (same offset).
     Without resume-markers (The Hindu), the repeated headline on the target page decides (>= 50% key words).
+    Pointers (front-page teasers, 15 Oct): a line ending in "p3"/"P 11" set in bold, alone on its line, or after a cue
+    word ("Interview on p3", "Details p4"). The teaser is linked (related_id) to the story on that page sharing the
+    most key words, if >= 20% of the teaser's key words, >= 10 words, and >= 2x the runner-up. Boxes or ads pointing
+    to 2+ pages are not linked. Pointers are never glued.
 """
 
 import argparse
@@ -50,6 +56,9 @@ STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "at", "by", "fro
 GREY_FLAG, LONG_FLAG, SHORT_FLAG = 0.15, 1500, 40
 AD_IMAGE_FRAC = 0.45     # page with images over >= 45% of its area and < 250 body words = ad page
 MAX_OFFSET = 4           # fallback (no resume marker): try PDF page = printed page + 0..4
+PTR_MIN_SHARE = 0.2      # 15 Oct: a teaser links to a story sharing >= 20% of the teaser's key words ...
+PTR_MARGIN = 2.0         # ... and scoring >= 2x the next-best story on that page ...
+PTR_MIN_WORDS = 10       # ... and sharing >= 10 key words (wrong link seen: 4 shared; correct links: 19+)
 KNOWN = {"The Hindu", "Business Line", "Mint", "Economic Times", "Times of India", "Business Standard"}
 
 # --- jump-marker patterns (case-insensitive, matched on one line or a line + the next) ---
@@ -58,6 +67,8 @@ P_FROM = re.compile(r"(?:continued\s+from|contd\.?\s+from|\bfrom)\s*[»>]?\s*(?:
 P_PTR = [re.compile(r"[»>]\s*(?:pages?|p)\.?\s*(\d{1,2})\b", re.I),           # » PAGE 10, >P5
          re.compile(r"\bsee\s+page\s+(\d{1,2})\b", re.I),
          re.compile(r"[.,;:|’”'\")\]]\s*\|?\s*p\s?(\d{1,2})\s*[»>]?\s*$", re.I)]  # "...Bhubaneswar. P 10"
+P_TAIL = re.compile(r"(?:^|[\s.,;:|’”'\")\]])p\s?(\d{1,2})\s*[»>]?\s*$", re.I)   # line ends in "p3" / "P 11"
+P_CUE = re.compile(r"\b(?:on|details|read|see|story|more|interview)\s+p\s?\d{1,2}\s*$", re.I)
 INLINE_PTR = re.compile(r"(?<=[.,;:’”'\")\]])\s*\|?\s*\bP\s?\d{1,2}\b\s*[»>]?(?=\s|$)")
 
 
@@ -160,12 +171,22 @@ def is_ad_page(page, res):
 # ----------------------------------------------------------------------------- jump markers
 def find_markers(page):
     """All jump markers on a page, any text size: [{'kind': cut|ptr|from, 'page': printed N, 'rect': Rect}]."""
-    lines = []
+    lines, tails = [], []
     for b in page.get_text("dict")["blocks"]:
         for l in b.get("lines", []):
             t = "".join(s["text"] for s in l["spans"]).replace("\x01", " ").replace("\x02", " ").strip()
             if t:
                 lines.append((t, pymupdf.Rect(l["bbox"])))
+                # 15 Oct: a line ending in "p3"/"P 11" is a pointer if that tail is set in BOLD on its own (BL, TOI),
+                # or the line is only the pointer (Mint's "P12"), or a cue word precedes it ("Interview on p3")
+                sp = [x for x in l["spans"] if x["text"].strip()]
+                m = P_TAIL.search(t)
+                if m and len(t) <= 120 and sp:
+                    last = sp[-1]
+                    bold = bool(last["flags"] & 16) or any(k in last["font"] for k in ("Bold", "Black", "Heavy"))
+                    tail_alone = re.fullmatch(r"\W*p\s?\d{1,2}\W*", last["text"].strip(), re.I) is not None
+                    if (bold and tail_alone) or re.fullmatch(r"\W*p\s?\d{1,2}\W*", t, re.I) or P_CUE.search(t):
+                        tails.append((int(m.group(1)), pymupdf.Rect(l["bbox"])))
     out = []
     for i, (t, r) in enumerate(lines):
         nxt = lines[i + 1] if i + 1 < len(lines) and -6 <= lines[i + 1][1].y0 - r.y1 < 14 and abs(lines[i + 1][1].x0 - r.x0) < 60 else None
@@ -185,6 +206,9 @@ def find_markers(page):
             if m:
                 out.append({"kind": "ptr", "page": int(m.group(1)), "rect": r})
                 break
+    for pg, r in tails:                         # add bold/bare/cue pointers the patterns above missed
+        if not any(o["rect"].intersects(r) for o in out):
+            out.append({"kind": "ptr", "page": pg, "rect": r})
     # a "CONTINUED ON" line followed by a "» PAGE 10" line gives one cut, not cut + ptr
     cuts = [m for m in out if m["kind"] == "cut"]
     return [m for m in out if not (m["kind"] == "ptr" and any(c["rect"].contains(m["rect"]) for c in cuts))]
@@ -243,7 +267,35 @@ def join_jumps(pages, by_page):
         used_a.add(id(a)); used_b.add(id(b)); offsets[o] += 1; joined += 1
     # 2) no resume marker: repeated headline on the target page (The Hindu style)
     order = [offsets.most_common(1)[0][0]] if offsets else list(range(0, MAX_OFFSET + 1))
+    # 2a) pointers ("...says Ajay Seth p3", "Details p4"): link the teaser to the story on THAT page (hard filter:
+    #     printed page + learned offset) sharing the most key words with the teaser's text -- only if it holds
+    #     >= PTR_MIN_SHARE of the teaser's key words AND >= PTR_MARGIN x the runner-up. No link beats a wrong link:
+    #     a missed link is a duplicate that tagging can group later; a wrong one misleads.
+    ptr_pages = {}
     for m, a, s in sources:
+        if m["kind"] == "ptr":
+            ptr_pages.setdefault(id(a), set()).add(m["page"])
+    for m, a, s in sources:
+        if m["kind"] != "ptr" or "related_id" in a or "joined_into" in a:
+            continue
+        if len(ptr_pages[id(a)]) > 1:          # pointers to 2+ pages: a teaser box ("DON'T MISS") or an ad -> no link
+            continue
+        tk = _key_words(a["headline"] + " " + a["body"])
+        if len(tk) < 3:
+            continue
+        for o in order:
+            cands = [c for c in by_page.get(m["page"] + o, []) if c is not a and c["page"] != s]
+            shared = [len(tk & _key_words(c["headline"] + " " + " ".join(c["body"].split()[:200]))) for c in cands]
+            sc = sorted(((n / len(tk), n, i) for i, n in enumerate(shared)), reverse=True)
+            if sc and sc[0][0] >= PTR_MIN_SHARE and sc[0][1] >= PTR_MIN_WORDS \
+                    and (len(sc) == 1 or sc[0][0] >= PTR_MARGIN * sc[1][0]):
+                a["related_id"] = cands[sc[0][2]]["id"]
+                linked += 1
+                used_a.add(id(a))
+                break
+    for m, a, s in sources:
+        if m["kind"] == "ptr":
+            continue                           # pointers handled above, never glued
         if id(a) in used_a or "joined_into" in a or len(_key_words(a["headline"])) < 3:
             continue                           # 1-2 word labels ("QUICKLY.") match anything
         best, best_score = None, 0.5
@@ -272,8 +324,11 @@ def _glue(a, b):
 
 
 # ----------------------------------------------------------------------------- one paper
-def process_pdf(pdf: Path, root: Path, pictures=True) -> dict:
+def process_pdf(pdf: Path, root: Path, pictures=True, referee=None) -> dict:
+    """referee: None (rules only) or a function from p2_extract_referee.make_page_referee (BL in the first pass)."""
     date, publisher, edition = parse_name(pdf.stem)
+    ref_pages = ref_ok = 0
+    ref_paid = 0.0
     doc = pymupdf.open(pdf)
     rev = root / "review" / pdf.stem
     rev.mkdir(parents=True, exist_ok=True)
@@ -285,6 +340,9 @@ def process_pdf(pdf: Path, root: Path, pictures=True) -> dict:
             res, error = segment_page(page), None
         except Exception as e:
             res, error = {"body_size": None, "articles": [], "grey": [], "labels": []}, str(e)
+        if referee and not error and not is_ad_page(page, res):
+            res, rinfo = referee(page, pn, res)
+            ref_pages, ref_ok, ref_paid = ref_pages + 1, ref_ok + rinfo["ok"], ref_paid + rinfo["paid"]
         for k, a in enumerate(res["articles"], start=1):
             a["id"], a["page"], a["number"] = f"p{pn:02d}-a{k:02d}", pn, k
             a["body"] = re.sub(r"\s+", " ", INLINE_PTR.sub("", a["body"])).strip()   # drop "... P 10" pointers
@@ -315,6 +373,16 @@ def process_pdf(pdf: Path, root: Path, pictures=True) -> dict:
         by_page.setdefault(a["page"], []).append(a)
     joined, linked, offset = join_jumps(pages, by_page)
 
+    # a link to a story that was glued onto another as a jump follows it there
+    ids = {a["id"]: a for a in all_articles}
+    for a in all_articles:
+        r = a.get("related_id")
+        while r in ids and "joined_into" in ids[r]:
+            r = ids[r]["joined_into"]
+        if r and r != a["id"]:
+            a["related_id"] = r
+        elif r:
+            del a["related_id"]                # it pointed at its own continuation: no separate story to link
     # ---- articles JSON (each article stands alone: paper, date, publisher on every row) ----
     final = []
     for a in all_articles:
@@ -348,10 +416,13 @@ def process_pdf(pdf: Path, root: Path, pictures=True) -> dict:
         t = p["assigned_words"] + p["grey_words"]
         s.append(f"page {p['page']:2d}: {len(p['res']['articles']):2d} articles | grey {p['grey_words'] / t if t else 0:4.0%}"
                  + (" | AD PAGE" if p["ad"] else "") + (f" | {'; '.join(p['flags'])}" if p["flags"] else ""))
+    if referee:
+        s.insert(1, f"referee: {ref_ok}/{ref_pages} pages corrected, ${ref_paid:.4f} paid this run")
     (rev / "summary.txt").write_text("\n".join(s) + "\n", encoding="utf-8")
 
     fc = Counter(f.split()[0] for p in pages for f in p["flags"])
     return {"pdf": pdf.name, "articles": len(final), "joined": joined, "linked": linked, "offset": offset,
+            "referee": (ref_ok, ref_pages, ref_paid) if referee else None,
             "coverage": cov, "pages": len(pages), "ads": n_ad,
             "flagged": [p["page"] for p in pages if p["flags"]], "flag_counts": dict(fc)}
 
@@ -388,6 +459,10 @@ def main():
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--all-editions", action="store_true")
     ap.add_argument("--no-pictures", action="store_true")
+    ap.add_argument("--referee", action="append", default=[], metavar="PAPER",
+                    help='also run the AI referee on this paper\'s non-ad pages, e.g. --referee "Business Line" '
+                         "(costs ~$0.01/page; saved answers are re-used, never paid twice)")
+    ap.add_argument("--referee-fresh", action="store_true", help="ignore saved referee answers and call the model again")
     args = ap.parse_args()
     target, root = Path(args.target), Path(args.root)
     pdfs = sorted(target.rglob("*.pdf")) if target.is_dir() else [target]
@@ -396,7 +471,13 @@ def main():
     if not pdfs:
         sys.exit(f"No PDFs found in {target}")
     for pdf in pdfs:
-        r = process_pdf(pdf, root, pictures=not args.no_pictures)
+        referee = None
+        if parse_name(pdf.stem)[1] in args.referee:
+            from p2_extract_referee import make_page_referee
+            referee = make_page_referee(root, pdf.stem, fresh=args.referee_fresh)
+        r = process_pdf(pdf, root, pictures=not args.no_pictures, referee=referee)
+        if r["referee"]:
+            print(f"{'':36s} referee: {r['referee'][0]}/{r['referee'][1]} pages corrected, ${r['referee'][2]:.4f} paid")
         print(f"{r['pdf']:36s} {r['articles']:4d} articles | coverage {r['coverage']:.1%} | jumps {r['joined']} joined, "
               f"{r['linked']} linked (offset {r['offset']}) | ads {r['ads']} | flagged {len(r['flagged'])}/{r['pages']} "
               f"{r['flag_counts']}")
