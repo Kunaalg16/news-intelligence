@@ -1,0 +1,14 @@
+# 2026-09-16_Mint · gold v2 gate page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes NOT.
+
+[page 10] HELD-BACK
+# Gold v2 gate G10 (sheet page 30). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. b129-b135 and Himalayan pull quote b102-b105 -> S4; b153-b157 -> S5; "Valuation trap" chart = G2; "Growth worries" box -> S2.
+S1: b2 b3 b4 b5 b6 b7 b8 b9 b21 b22 b24 b25 b26 b27 b28 b29 b37
+S2: b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b68 b69 b70 b71 b82 b83 b98 b99 b100 b101 b118 b122 b123 b124 b125 b126 b127 b128
+S3: b141 b142 b143 b144 b145 b146 b147 b148 b149 b150 b151 b152
+S4: b10 b11 b12 b13 b14 b30 b31 b32 b49 b50 b51 b55 b56 b57 b84 b85 b86 b87 b88 b102 b103 b104 b105 b108 b109 b110 b112 b119 b129 b130 b131 b132 b133 b134 b135
+S5: b15 b16 b17 b18 b19 b20 b33 b34 b35 b36 b52 b53 b54 b59 b60 b89 b113 b114 b115 b120 b121 b136 b137 b138 b139 b140 b153 b154 b155 b156 b157
+G2: b61 b62 b63 b64 b65 b66 b67 b72 b73 b74 b75 b76 b77 b78 b79 b80 b81 b90 b91 b92 b93 b94 b95 b96 b97 b106 b107 b116 b117
+NOT: b1 b23 b48 b58 b111

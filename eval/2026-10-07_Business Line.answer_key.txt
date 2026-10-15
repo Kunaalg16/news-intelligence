@@ -1,0 +1,17 @@
+# 2026-10-07_Business Line · gold v2 gate page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes NOT.
+
+[page 4] HELD-BACK
+# Gold v2 gate G8 (sheet page 23). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. QUICKLY split: b3-b4 (S2), b5-b6 (S10); b2 heading NOT. DATA FOCUS (b83-b88) is part of S3. b38 sidebar head -> S1.
+S1: b19 b20 b21 b22 b23 b24 b25 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b48 b57 b58 b59 b68 b69 b70 b71 b72
+S2: b3 b4
+S3: b80 b81 b82 b83 b84 b85 b86 b87 b88 b98 b99 b108
+S5: b7 b8 b9 b26 b27 b49 b50 b51 b60 b61 b73 b74
+S6: b10 b11 b12 b13 b14 b15 b16
+S7: b100 b102 b103 b104 b105 b106 b107 b109 b110 b111 b112
+S8: b28 b29 b30 b31 b52 b62 b63 b75 b76 b77 b78 b79 b89 b90 b91 b92 b93 b94 b95 b96 b97
+S9: b32 b33 b34 b35 b36 b37 b53 b54 b55 b56 b64 b65 b66 b67
+S10: b5 b6
+NOT: b1 b2 b17 b18 b101

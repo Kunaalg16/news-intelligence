@@ -1,0 +1,17 @@
+# 2026-10-11_Business Line · gold v2 gate page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes NOT.
+
+[page 12] HELD-BACK
+# Gold v2 gate G7 (sheet page 22). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct as drafted.
+S1: b2 b3 b4 b5 b6 b7 b8 b25 b26 b27 b43 b44 b51 b52 b53 b54
+S2: b64 b65 b66 b67 b76 b77 b78 b91 b92 b93
+S3: b9 b10 b11 b12 b13 b14 b15 b16 b28 b29 b30
+S4: b79 b80 b81 b82 b94 b95 b96 b97
+S5: b37 b38 b39 b40 b49 b50 b62 b63
+S6: b83 b84 b85 b86 b98 b99 b100
+S7: b17 b18 b19 b20 b21 b32 b33 b34 b41 b42 b45 b46 b47 b48
+S8: b68 b69 b70 b71 b72 b73 b74 b75 b87 b88
+S9: b55 b56 b57 b58 b59 b60 b61
+NOT: b1 b22 b23 b24 b31 b35 b36 b89 b90

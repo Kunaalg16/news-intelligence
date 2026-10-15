@@ -1,0 +1,15 @@
+# 2026-10-08_The Hindu · gold v2 gate page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes NOT.
+
+[page 8] HELD-BACK
+# Gold v2 gate G1 (sheet page 1). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. S6 + b28 (subhead); b6, b8 bylines -> S6. S7 THE GIST kept separate. Charts have no text blocks (2.1b).
+S1: b2 b3 b4
+S2: b40 b41
+S3: b26 b27
+S4: b33 b34
+S5: b19 b20
+S6: b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b16 b17 b22 b23 b24 b28 b29 b30 b31 b35 b36 b37 b38 b39
+S7: b44 b46 b48
+NOT: b1 b15 b18 b21 b25 b32 b42 b43 b45 b47

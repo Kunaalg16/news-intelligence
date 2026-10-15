@@ -24,3 +24,22 @@ S3: b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b22 b23 b24 b25 b26 b28 b29
 S4: b46 b47 b48 b49 b50 b55 b56 b57 b65 b77 b78 b82 b92 b93 b99 b109 b110
 S5: b14 b15 b16 b17 b18 b19 b30 b31 b32 b33 b51 b52 b53 b54 b59 b60 b66 b67 b79 b80 b81 b95 b98 b100 b101 b111 b112 b113
 NOT: b1 b20 b21 b27 b58 b61 b64 b68 b69 b70 b71 b86 b87 b88 b89 b90 b91 b94 b96 b97
+
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes NOT.
+[page 6] HELD-BACK
+# Gold v2 gate G9 (sheet page 29). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. S2 = b123-b131; b132-b138 -> S8; b112-b115 -> S11; Corrections box b139-b143 NOT; "Pricey food" chart = G8; callouts and bylines with their story.
+S1: b2 b18
+S2: b123 b124 b125 b126 b127 b128 b129 b130 b131
+S3: b28 b29 b30 b31 b32 b34 b35 b36 b37 b50 b51 b52 b53 b62 b63 b64 b65 b66 b67 b68 b80 b81 b82 b83 b91 b92 b93 b94 b95 b96 b97 b98 b99 b100 b116 b117 b118
+S4: b19 b20
+S5: b3 b4
+S6: b21 b22
+S7: b38 b39 b40 b41 b42 b43 b44 b47 b48 b49 b54 b55 b56 b57 b58
+S8: b69 b70 b71 b72 b73 b74 b75 b76 b79 b85 b86 b87 b109 b110 b111 b132 b133 b136 b137 b138
+S9: b5 b6
+S10: b7 b8
+S11: b9 b10 b11 b12 b13 b14 b23 b24 b25 b26 b46 b59 b60 b77 b78 b88 b89 b90 b112 b113 b114 b115
+G8: b101 b102 b103 b104 b105 b106 b107 b108 b119 b120 b121 b122 b134 b135
+NOT: b1 b15 b16 b17 b27 b33 b45 b61 b84 b139 b140 b141 b142 b143
