@@ -1,0 +1,25 @@
+# 2026-10-09_Times of India · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 36] TUNE
+# Gold v2 tuning T8 (sheet page 12). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Grouping correct; lines lost inside b30, b32 (word-level, D9).
+S1: b2 b3 b4 b5 b15 b16 b23 b24 b30 b31 b32 b34 b35 b36 b38 b39
+S2: b6 b7 b8 b9 b10 b18
+S3: b25 b26 b27 b28 b33 b37 b40 b41
+S4: b11 b12 b13 b14 b19 b20
+NOT: b1 b17 b21 b22 b29 b42 b43
+
+[page 25] TUNE
+# Gold v2 tuning T9 (sheet page 13). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Deck b3-b4-b29 and 'How are medicines priced?' b89 belong to S1; 'Purchase price vs MRP' chart = G1. S8 'MRP' is the red word of S7's headline. b100 -> S9. Pull quotes with their pieces. Bottom INQUIZITIVE quiz strip (S10, b106) = Screen zone, NOT. S1 headline is an umbrella over the page's six pieces; pieces kept separate.
+S1: b2 b3 b4 b21 b26 b29 b64 b89 b90 b91 b101 b102 b103 b104 b105 b107 b108
+S2: b110 b111 b112 b113 b114 b115 b116 b117 b118 b119 b120 b121 b131 b132
+S3: b92 b93 b94
+S4: b13 b14 b15 b16 b17 b18 b19 b44 b45 b46 b47
+S5: b65 b66 b67 b75 b78 b79 b83 b84 b85 b95 b96 b97
+S6: b109 b122 b123 b124 b125 b126 b127 b128 b129 b130 b133
+S7: b20 b22 b23 b24 b25 b39 b48 b49 b50 b51 b52 b53
+S9: b40 b68 b69 b70 b71 b72 b73 b74 b80 b81 b82 b86 b87 b88 b98 b99 b100
+G1: b5 b6 b7 b8 b9 b10 b11 b12 b30 b31 b32 b33 b34 b35 b36 b37 b38 b42 b43 b54 b55 b56 b57 b58 b59 b60 b61 b62 b63 b76 b77
+NOT: b1 b27 b28 b41 b106

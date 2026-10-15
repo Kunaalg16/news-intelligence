@@ -1,0 +1,16 @@
+# 2026-09-22_The Hindu · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 8] TUNE
+# Gold v2 tuning T4 (sheet page 6). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct. S7 THE GIST summarises S6 (kept separate). Grey b26, b47 = social-media bar, NOT.
+S1: b2 b3 b4
+S2: b63 b64
+S3: b37 b38
+S4: b49 b50
+S5: b24 b25
+S6: b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b23 b27 b28 b29 b30 b31 b39 b40 b41 b42 b51 b52 b53 b54 b55 b56 b57
+S7: b66 b68 b70 b72
+S8: b15 b16 b17 b18 b19 b20 b21 b32 b33 b34 b35 b43 b44 b45 b46 b58 b59 b60 b61 b62 b73 b74 b75 b76 b77 b78
+NOT: b1 b22 b26 b36 b47 b48 b65 b67 b69 b71

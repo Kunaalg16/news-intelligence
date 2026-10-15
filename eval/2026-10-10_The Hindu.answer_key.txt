@@ -1,0 +1,17 @@
+# 2026-10-10_The Hindu · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 4] TUNE
+# Gold v2 tuning T1 (sheet page 3). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct. b2-b3 'Distance to Delhi' photo feature = NOT (caption-type text).
+S1: b4 b5 b6 b7 b8 b9 b21 b22 b26 b27 b33 b34 b35
+S2: b39 b40 b41 b42 b43 b44 b54 b55 b61 b62 b63 b64 b71 b72
+S3: b10 b11 b12 b23 b24 b25 b28 b29 b30 b36 b37
+S4: b45 b46 b47 b48 b57 b65 b66 b67
+S5: b73 b74 b75 b76
+S6: b31 b49 b50 b51 b52 b58 b59 b60
+S7: b68 b69 b70 b78
+S8: b14 b15
+S9: b16 b17
+NOT: b1 b2 b3 b13 b18 b19 b20 b32 b38 b53 b56 b77

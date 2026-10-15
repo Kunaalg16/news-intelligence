@@ -1,0 +1,17 @@
+# 2026-10-14_Times of India · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 24] TUNE
+# Gold v2 tuning T6 (sheet page 10). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct. Grey b24, b30-b36 = tender notices/ads in the lower left (Screen zone), NOT.
+S1: b2 b3 b4 b5 b6 b7 b8 b18 b19 b20 b25 b26 b27 b37 b38 b39
+S2: b60 b61 b62 b63 b64 b65 b77 b78 b79 b80 b100 b101 b102
+S3: b42 b43 b44 b45 b46 b47 b48
+S4: b9 b10 b11 b12 b22 b28 b29 b40 b41
+S5: b66 b67 b68 b69 b70 b71 b72 b81 b82 b83 b84 b85
+S6: b91 b92 b93 b94 b95 b103 b104
+S7: b49 b50 b51 b52 b53 b54
+S8: b55 b56 b57 b58 b59 b74 b75 b86 b87 b88 b89
+S9: b96 b97 b98 b99
+NOT: b1 b13 b14 b15 b16 b17 b21 b23 b24 b30 b31 b32 b33 b34 b35 b36 b73 b76 b90

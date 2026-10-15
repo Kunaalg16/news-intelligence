@@ -1,0 +1,20 @@
+# 2026-10-09_Mint · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 8] TUNE
+# Gold v2 tuning T21 (sheet page 31). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Old S4/S5 mixed two articles: 'Retail inflation may hit 23-month high of 5.6% in Sep: Mint poll' (S4, with 'Pricey boost' chart G4) and 'Colombia to deepen security ties with India' (new S11, incl. pull quote). Mint Shorts: b13-b14-b21-b38 (UPI fee) and b15-b16-b45 (India-Singapore corridor) are separate pieces; MINT SHORTS label NOT. Photo caption b100 NOT. Corrections box b141 NOT.
+S1: b22 b23 b24 b25 b26 b27 b28 b29 b30 b40 b41 b49 b50 b63 b64 b65 b66 b76 b77 b91 b92 b93 b94 b95 b96 b97 b98 b99 b104 b105 b106
+S2: b115 b116 b117 b118 b119 b120 b121 b122 b129 b130 b131 b132
+S3: b3 b4 b6 b7 b8 b9 b10 b11 b12
+S4: b31 b32 b33 b34 b35 b36 b37 b39 b42 b43 b44 b71 b72 b73 b74
+S6: b13 b14 b21 b38
+S7: b107 b108
+S8: b81 b82
+S9: b46 b47 b69
+S10: b109 b110
+S11: b83 b84 b85 b86 b87 b88 b89 b90 b101 b102 b111 b112 b113 b114 b123 b124 b125 b126 b127 b133 b134 b135 b136 b137 b138 b139
+S12: b15 b16 b45
+G4: b51 b52 b53 b54 b55 b56 b57 b58 b59 b60 b61 b67 b68 b70 b75 b78 b79 b80
+NOT: b1 b2 b5 b17 b18 b19 b20 b48 b62 b100 b103 b128 b140 b141 b142 b143 b144 b145

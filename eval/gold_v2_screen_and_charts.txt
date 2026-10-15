@@ -1,0 +1,35 @@
+# Gold v2: pages and zones NOT scored for splitting (Screen test cases) and charts/graphics (2.1b test list).
+# Written by Claude from Kunaal's labels, 15 Oct 2026. Not an answer key (p2_check.py reads only *.answer_key.txt).
+
+## Screen PAGES (whole page skipped before splitting; no splitting key)
+G4  2026-10-11_Times of India p49   leisure page (fashion, horoscope, games)
+G5  2026-10-12_Business Standard p18  demand notice + public notices
+T10 2026-10-14_Times of India p17   ads and notices only
+T14 2026-10-15_Business Standard p17  tenders, e-auction notices
+T15 2026-10-09_Business Standard p17  public notices
+T22 2026-10-09_Mint p6   'The week in charts': chart page; needs vision (2.1b); 3 'Best of the week' briefs b41-b42, b48-b49, b81-b82
+
+## Screen ZONES (labelled NOT in the page's answer key)
+T5   2026-10-09_The Hindu p14   bottom: crossword b10-b11, b19, b31-b56, b65; sudoku b72-b73
+T6   2026-10-14_Times of India p24   lower-left ads and tender notices (b13-b17, b21, b23-b24, b30-b36)
+T9   2026-10-09_Times of India p25   bottom INQUIZITIVE quiz strip
+T12  2026-10-14_Business Standard p10   bottom-right sudoku
+T13  2026-10-14_Business Standard p14   left half ads
+T17  2026-09-20_Business Line p12   lower half ad
+T18  2026-09-21_Business Line p5   bottom crossword strip (b20, b47-b51, b56, b64-b65, b96-b97)
+
+## Charts / graphics (2.1b test list)
+G1  2026-10-08_The Hindu p8   'Trade-off on the cards' charts and diagram (no text blocks)
+G8  2026-10-07_Business Line p4   'Policy rate transmission' chart (no text blocks)
+G9  2026-10-13_Mint p6   'Pricey food' chart (text blocks, G8)
+G10 2026-09-16_Mint p10   'Valuation trap' chart (text blocks, G2)
+T5   2026-10-09_The Hindu p14   S1 Nana Patekar info-graphic (image, no text layer)
+T9   2026-10-09_Times of India p25   S1 'Purchase price vs MRP' bar chart (text blocks, G1)
+T11  2026-10-14_Business Standard p6   S4 IMF table + bar chart; S10 'September tally' 4 bar charts (all with text blocks)
+T12  2026-10-14_Business Standard p10   Datanomics Nobel infographics (G2)
+T16  2026-09-17_Business Line p7   S6 critical-minerals table (no text blocks)
+T20  2026-10-12_Business Line p10   S5 'Sombre mood' bar chart (no text blocks)
+T21  2026-10-09_Mint p8   S4 'Pricey boost' line chart (G4)
+T24  2026-10-13_Mint p4   5 charts with text blocks (G1)
+T22 2026-10-09_Mint p6   whole page of charts
+T24 2026-10-13_Mint p4   5 charts (text blocks, G1)

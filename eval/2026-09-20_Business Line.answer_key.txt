@@ -1,0 +1,12 @@
+# 2026-09-20_Business Line · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 12] TUNE
+# Gold v2 tuning T17 (sheet page 25). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct. Lower half = ad (Screen zone), NOT.
+S1: b2 b3 b4 b5 b6 b12 b13 b14 b19 b20 b24 b25 b29 b30 b31
+S2: b35 b36 b37 b38 b39 b40 b41 b42
+S3: b43 b45 b46 b47 b49 b50
+S4: b7 b8 b9 b15 b16 b17 b21 b22 b23 b26 b27 b28 b32 b33 b34
+NOT: b1 b10 b11 b18 b44 b48 b51

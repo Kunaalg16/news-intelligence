@@ -43,3 +43,9 @@ S10: b7 b8
 S11: b9 b10 b11 b12 b13 b14 b23 b24 b25 b26 b46 b59 b60 b77 b78 b88 b89 b90 b112 b113 b114 b115
 G8: b101 b102 b103 b104 b105 b106 b107 b108 b119 b120 b121 b122 b134 b135
 NOT: b1 b15 b16 b17 b27 b33 b45 b61 b84 b139 b140 b141 b142 b143
+
+[page 4] TUNE
+# Gold v2 tuning T24 (sheet page 34). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. PLAIN FACTS: one story; section heads (Risk, reward / Costs uncontained / Commodity constraints / Supply gains) are subheads of S1; all 5 charts = G1.
+S1: b1 b2 b3 b15 b16 b17 b18 b19 b31 b32 b33 b34 b47 b52 b53 b54 b55 b56 b57 b58 b59 b60
+G1: b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b48 b49 b50 b51 b61 b62 b63 b64 b65 b66 b67 b68 b69 b70 b71 b72 b73 b74 b75 b76 b77 b78 b79 b80 b81 b82 b83 b84 b85
+NOT: b46

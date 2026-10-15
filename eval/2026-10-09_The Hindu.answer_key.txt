@@ -9,3 +9,19 @@ S1: b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b20 b23 b25 b26 b27 b32 b33 b34 b35 b
 S2: b46 b48 b50 b52
 S3: b2 b3 b4 b5 b6 b7 b8 b21 b22 b29 b30 b37 b38 b43 b44 b45 b53 b54 b55 b56
 NOT: b1 b19 b24 b28 b31 b47 b49 b51
+
+[page 14] TUNE
+# Gold v2 tuning T5 (sheet page 7). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Old S4 'The Hindu Sustainability Dialogues' is the 2nd half of S5's headline: one story. Crossword (b10-b11, b19, b31-b56, b65) and sudoku (b72-b73) = NOT, Screen zone. Nana Patekar info-graphic inside S1 has no text blocks (2.1b).
+S1: b20 b21 b22 b23 b24 b25 b26 b27 b57 b58 b59 b60 b67 b68 b74 b75 b78 b79 b80 b81 b88 b89 b90 b91 b92
+S2: b3 b4
+S3: b5 b6
+S5: b61 b62 b63 b64 b69 b70 b71 b76 b77 b82 b83 b93 b94 b95
+S6: b7 b8 b9
+S7: b14 b15 b16 b17 b18 b28 b29 b30
+S8: b85 b86 b87
+NOT: b1 b2 b10 b11 b12 b13 b19 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b54 b55 b56 b65 b66 b72 b73 b84
+
+[page 6] TUNE
+# Gold v2 tuning T3 (sheet page 5). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. One article: S2 'in Bundelkhand' is the 2nd line of S1's headline; deck b3+b15, drop cap b4, pull quote b18-b19 join it. Captions b2, b27 NOT.
+S1: b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b15 b16 b17 b18 b19 b21 b22 b23 b24 b25 b26 b28 b29 b30 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43
+NOT: b1 b2 b14 b20 b27

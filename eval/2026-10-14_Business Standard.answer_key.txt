@@ -1,0 +1,42 @@
+# 2026-10-14_Business Standard · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 6] TUNE
+# Gold v2 tuning T11 (sheet page 17). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. S3 'on Oct 16' is the end of S2's headline: one story. S4 'In focus' table + 'Cautious optimism' bar chart = G4. S10 'The September tally' charts = G10 (rules had put many of their labels in S9).
+S1: b20 b21 b22 b23 b51 b52 b53 b54 b79 b80 b96 b97 b98 b110 b111 b124 b125 b126
+S2: b3 b4 b14
+S4: b25 b26 b27 b28 b29 b30 b31 b32 b55 b59 b60 b61 b82 b83 b84 b99 b100 b101 b102 b103
+S5: b113 b114 b115 b116 b117 b118 b119 b127 b128 b129 b130 b131 b132 b133
+S6: b5 b6
+S7: b15
+S8: b7 b8 b16
+S9: b34 b35 b36 b62 b63 b64 b85 b86 b104 b105
+S10: b9 b10 b11 b12 b17 b18 b19 b41
+S11: b88 b89 b90 b91 b92 b93 b106 b107 b108 b109 b121 b122 b123 b134 b135 b136 b137
+G10: b37 b38 b39 b40 b42 b43 b44 b45 b46 b47 b48 b49 b50 b65 b66 b67 b68 b69 b70 b72 b73 b77 b78
+G4: b56 b57 b58 b71 b74 b75 b76 b81 b94 b95
+NOT: b1 b2 b13 b24 b33 b87 b112 b120
+
+[page 10] TUNE
+# Gold v2 tuning T12 (sheet page 18). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. b58-b63, b75-b77 = companion piece 'ICICI Life Insurance net rises 25%' (new S10), not Bagchi. Datanomics: S3 is part of S2; its infographics (b95-b103, b105-b106) = G2. Sudoku b109-b110 = Screen zone, NOT.
+S1: b2 b3 b4 b5 b6 b7 b8 b29 b30 b31 b42 b43 b44 b45 b46
+S2: b85 b86 b87 b88 b89 b90 b91 b92 b93 b94 b104 b111 b112 b113 b114 b115 b116 b117 b118 b119 b120 b121 b122 b123 b124 b129 b130
+S4: b10 b11 b12 b13 b14 b22 b23 b24 b25 b32 b33 b34 b35 b47 b48 b49 b50
+S5: b64 b65 b66 b67 b68
+S6: b16 b17 b18 b19 b20 b21 b26 b27 b28
+S7: b36 b37 b38 b39 b40 b41
+S8: b52 b53 b69 b70 b71 b78 b79 b107 b108 b125 b126 b127 b128
+S9: b54 b55 b56 b57 b72 b73 b74 b80 b81 b82 b83
+S10: b58 b59 b60 b61 b62 b63 b75 b76 b77
+G2: b95 b96 b97 b98 b99 b100 b101 b102 b103 b105 b106
+NOT: b1 b9 b15 b51 b84 b109 b110
+
+[page 14] TUNE
+# Gold v2 tuning T13 (sheet page 19). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. Rules output correct. Left half = ads (Screen zone), NOT.
+S1: b58 b59 b60 b61 b62 b63 b64 b65 b80 b81 b82 b90 b91 b92 b93
+S2: b102 b103 b104 b105 b106 b107 b108
+S3: b67 b68 b69 b70 b71 b72 b83 b84 b85 b94 b95 b96 b97 b98 b109 b110 b111 b112 b113
+S4: b74 b75 b76 b77 b78 b87 b88 b89 b99 b100 b101 b114 b115 b116 b117 b118
+NOT: b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b54 b55 b56 b57 b66 b73 b79 b86

@@ -1,0 +1,22 @@
+# 2026-10-15_Times of India · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 6] TUNE
+# Gold v2 tuning T7 (sheet page 11). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. S4 photo story: first lines inside b10 lost (word-level, D9). b108 = Daily Planet photo caption, NOT. b120 (NYC horse carriages) and b121 (Mont Blanc) are two separate briefs, not S6.
+S1: b1 b2 b3 b4 b5 b6 b7 b8 b21 b22 b23
+S2: b96 b97 b98 b99 b100 b102 b114 b116
+S3: b33 b34 b35 b36 b37 b38 b39 b40 b52 b53 b54 b57 b70 b71 b72 b79 b87 b88 b89 b90
+S4: b9 b10
+S5: b55 b56 b58 b59 b66 b67 b73 b74 b75 b76 b80 b81
+S6: b103 b104 b105 b106 b117 b118 b119
+S7: b24 b25 b26 b27 b28 b29 b41 b42 b43 b44 b45
+S8: b11 b12 b13 b14 b15
+S9: b60 b61 b62 b63 b77 b78 b82 b84
+S10: b109 b110 b111 b112
+S11: b16 b17 b18 b19 b30 b31 b47 b48 b49 b50 b64 b68 b69
+S12: b85 b86 b91 b92 b93
+S13: b120
+S14: b121
+NOT: b20 b32 b46 b51 b65 b83 b94 b95 b101 b107 b108 b113 b115 b122

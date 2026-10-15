@@ -1,0 +1,17 @@
+# 2026-09-17_Business Line · gold v2 tuning page(s) · picked by p2_dev_pick_gold.py (seeded), labelled 15 Oct 2026
+# Block ids from p2_extract.py page_blocks. Labels: Sn story, Gn chart text of story n, NOT not an article.
+# Conventions (15 Oct): captions NOT; pull quotes/callouts + attribution = their article; bylines = their article;
+# chart text with blocks = G of its story; section labels, page headers, ads, stock boxes, puzzles NOT.
+
+[page 7] TUNE
+# Gold v2 tuning T16 (sheet page 24). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. QUICKLY: b2-b3 (RBI absorbs) and b4-b5 (NZ Parliament) are two briefs. S7 'The auctioned mines...' is part of S5. Table inside S6 has no text blocks (2.1b).
+S1: b2 b3
+S2: b20 b21 b22 b23 b24 b25 b26 b34 b35 b36 b44 b45 b46 b56 b57 b58 b59 b72 b73
+S3: b85 b86 b87 b88 b89 b90 b91 b92 b100 b101 b102 b103 b104
+S4: b6 b7 b8 b27 b28 b37 b38 b47 b48 b49 b60 b61 b74
+S5: b75 b76 b77 b78 b79 b80 b81 b93 b94 b95 b96 b105 b106 b107 b108
+S6: b9 b10 b11 b12 b13 b14 b29 b30 b39 b40 b41 b50 b51 b52 b62 b63 b64 b65 b66 b67
+S8: b15 b16 b17 b18 b31 b32 b33 b42 b43 b53 b54 b55
+S9: b68 b69 b70 b71 b82 b83 b84 b97 b98 b109 b110 b111
+S10: b4 b5
+NOT: b1 b19 b99
