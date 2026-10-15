@@ -104,20 +104,37 @@ def block_lines(page, blocks):
     return out
 
 
+def _as_list(x):
+    """The schema says list; a model can still send a JSON string of one, or something else entirely."""
+    if isinstance(x, str):
+        try:
+            x = json.loads(x)
+        except ValueError:
+            return None
+    return x if isinstance(x, list) else None
+
+
 def validate(answer, blocks):
-    """Model answer -> {block_id: 'r1'.. | 'NOT'}; ids it left out keep the draft label (prefixed 'd:')."""
+    """Model answer -> {block_id: 'r1'.. | 'NOT'}; ids it left out keep the draft label (prefixed 'd:').
+    Raises ValueError if the answer's shape is unusable (the caller then keeps the rules' output)."""
     ids = [b["id"] for b in blocks]
     known, label, problems = set(ids), {}, Counter()
-    for k, art in enumerate(answer.get("articles", []), 1):
-        for i in art.get("blocks", []):
-            if i not in known:
+    arts, nots = _as_list(answer.get("articles")), _as_list(answer.get("not_article", []))
+    if arts is None or nots is None:
+        raise ValueError(f"answer shape: articles={type(answer.get('articles')).__name__}")
+    for k, art in enumerate(arts, 1):
+        if not isinstance(art, dict):
+            problems["bad article entry"] += 1
+            continue
+        for i in (_as_list(art.get("blocks")) or []):
+            if not isinstance(i, str) or i not in known:
                 problems["unknown id"] += 1
             elif i in label:
                 problems["used twice"] += 1
             else:
                 label[i] = f"r{k}"
-    for i in answer.get("not_article", []):
-        if i not in known:
+    for i in nots:
+        if not isinstance(i, str) or i not in known:
             problems["unknown id"] += 1
         elif i in label:
             problems["used twice"] += 1
@@ -161,7 +178,11 @@ def referee_page(page, client, rules_res=None):
     if not answer:
         return {"ok": False, "error": "no tool answer", "labels": {b["id"]: "d:" + b["story"] for b in blocks},
                 "tokens_in": tin, "tokens_out": tout, "cost_usd": cost}
-    labels, problems = validate(answer, blocks)
+    try:
+        labels, problems = validate(answer, blocks)
+    except ValueError as e:                 # fail-closed: unusable shape -> keep the rules' output
+        return {"ok": False, "error": str(e), "answer": answer, "labels": {b["id"]: "d:" + b["story"] for b in blocks},
+                "tokens_in": tin, "tokens_out": tout, "cost_usd": round(cost, 5)}
     return {"ok": True, "labels": labels, "problems": problems, "answer": answer, "tokens_in": tin,
             "tokens_out": tout, "cost_usd": round(cost, 5), "seconds": round(time.time() - t0, 1),
             "stop_reason": getattr(resp, "stop_reason", None)}
