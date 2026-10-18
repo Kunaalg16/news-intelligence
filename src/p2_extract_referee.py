@@ -315,7 +315,7 @@ def make_page_referee(root, stem, fresh=False):
     (Path(root) / "logs").mkdir(exist_ok=True)
     state = {"client": None}
 
-    def run(page, pn, rules_res):
+    def run(page, pn, rules_res, zones=()):
         f = rev / f"referee_p{pn:02d}.json"
         if f.exists() and not fresh:
             out, paid = json.loads(f.read_text(encoding="utf-8")), 0.0
@@ -341,6 +341,13 @@ def make_page_referee(root, stem, fresh=False):
         if not out.get("ok"):
             return rules_res, {"ok": False, "paid": paid}
         try:
+            if zones:                           # 18 Oct: Screen's zones win over the verdict (a block inside one = NOT)
+                labels = dict(out["labels"])
+                for b in page_blocks(page):
+                    c = (b["bbox"].tl + b["bbox"].br) / 2
+                    if any(z.contains(c) for z in zones):
+                        labels[b["id"]] = "NOT"
+                out = dict(out, labels=labels)
             return articles_from_verdict(page, out, rules_res), {"ok": True, "paid": paid}
         except Exception as e:                  # fail-closed: never lose a page to a rebuild bug
             return rules_res, {"ok": False, "paid": paid, "error": str(e)[:200]}

@@ -10,6 +10,8 @@ USAGE (from ~/news-intel)
               --no-pictures    skip the overlay pictures (faster)
               --referee PAPER  also run the AI referee on that paper (first pass: "Business Line"); see
                                p2_extract_referee.py. Articles it rebuilt carry "method": "referee".
+              --pipeline       (18 Oct) THE DAILY SETUP: Screen on every page + the per-paper SETTINGS table below
+                               (referee on/off, whole-blocks on/off). Use this for the daily run and re-extraction.
               --whole-blocks   (D9, 15 Oct) build each article's text from the WHOLE text blocks the rules
                                gave it, not only the lines the rules kept. Recovers lines lost inside a block
                                (a headline's 2nd line, the first lines of a column). Off = output unchanged.
@@ -67,6 +69,19 @@ COLORS = [(0.90, 0.20, 0.20), (0.10, 0.50, 0.90), (0.10, 0.70, 0.30), (0.95, 0.6
 STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "at", "by", "from", "with", "as", "is", "be",
         "said", "that", "this", "was", "were", "has", "have", "are", "its", "his", "her", "their", "will", "not"}
 GREY_FLAG, LONG_FLAG, SHORT_FLAG = 0.15, 1500, 40
+# 18 Oct (task 5): the daily setup per publisher, decided from practice-page measurements (drafts/2026-10-18_task5_results.md).
+#   referee      BL only: 7 of 9 BL pages better; Mint 4 better / 4 worse (spoiled a near-perfect page) -> off until a
+#                router (H3) sends only the pages the rules fail; BS, TOI worse (H2).
+#   whole_blocks on except Mint (it pulled neighbouring text into 3 Mint stories).
+#   Screen (2.1a) runs on every page of every paper.
+SETTINGS = {
+    "Business Line":     {"referee": True,  "whole_blocks": True},
+    "Mint":              {"referee": False, "whole_blocks": False},
+    "The Hindu":         {"referee": False, "whole_blocks": True},
+    "Times of India":    {"referee": False, "whole_blocks": True},
+    "Business Standard": {"referee": False, "whole_blocks": True},
+    "Economic Times":    {"referee": False, "whole_blocks": False},   # dropped (D6); extracted, excluded at Tag
+}
 AD_IMAGE_FRAC = 0.45     # page with images over >= 45% of its area and < 250 body words = ad page
 MAX_OFFSET = 4           # fallback (no resume marker): try PDF page = printed page + 0..4
 PTR_MIN_SHARE = 0.2      # 15 Oct: a teaser links to a story sharing >= 20% of the teaser's key words ...
@@ -402,8 +417,9 @@ def _glue(a, b):
 
 
 # ----------------------------------------------------------------------------- one paper
-def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks=False) -> dict:
-    """referee: None (rules only) or a function from p2_extract_referee.make_page_referee (BL in the first pass)."""
+def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks=False, screen=False) -> dict:
+    """referee: None (rules only) or a function from p2_extract_referee.make_page_referee (BL in the first pass).
+    screen (18 Oct): run 2.1a Screen first -- skip junk pages, blank junk zones on a copy before splitting."""
     date, publisher, edition = parse_name(pdf.stem)
     ref_pages = ref_ok = 0
     ref_paid = 0.0
@@ -414,20 +430,43 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks
     (root / "data" / "articles" / date).mkdir(parents=True, exist_ok=True)
 
     pages, all_articles, block_map = [], [], {}
+    screened_pages, needs_ocr = [], []
     for pn, page in enumerate(doc, start=1):
+        verdict, seg_page, keep = {"skip_page": False, "zones": [], "why": []}, page, None
+        if screen:
+            from p2_screen import screen_page
+            from p2_check import _screened_copy
+            try:
+                verdict = screen_page(page)
+            except Exception as e:                # fail-open: a Screen bug never loses a page
+                verdict = {"skip_page": False, "zones": [], "why": [f"screen failed: {e}"]}
+            if verdict.get("no_text_layer"):
+                needs_ocr.append(pn)
+            if verdict["skip_page"] or verdict["zones"]:
+                screened_pages.append(f"p{pn} " + "; ".join(verdict["why"])[:80])
+            if verdict["zones"] and not verdict["skip_page"]:
+                keep, seg_page = _screened_copy(page, verdict)
         try:
-            res, error = segment_page(page), None
+            if verdict["skip_page"]:
+                res, error = {"body_size": None, "articles": [], "grey": [], "labels": []}, None
+            else:
+                res, error = segment_page(seg_page), None
         except Exception as e:
             res, error = {"body_size": None, "articles": [], "grey": [], "labels": []}, str(e)
-        if referee and not error and not is_ad_page(page, res):
-            res, rinfo = referee(page, pn, res)
+        if referee and not error and not verdict["skip_page"] and not is_ad_page(page, res):
+            res, rinfo = referee(page, pn, res, zones=verdict["zones"])
             ref_pages, ref_ok, ref_paid = ref_pages + 1, ref_ok + rinfo["ok"], ref_paid + rinfo["paid"]
         for k, a in enumerate(res["articles"], start=1):
             a["number"] = k                       # numbered before assign_blocks (labels blocks 'sN')
         blocks = page_blocks(page)
         assign_blocks(blocks, res)
         if whole_blocks and not error:
-            wb_gained += rebuild_from_blocks(page, blocks, res)
+            if seg_page is page:
+                wb_gained += rebuild_from_blocks(page, blocks, res)
+            else:                                 # screened page: rebuild from the screened copy's blocks
+                sb = page_blocks(seg_page)
+                assign_blocks(sb, res)
+                wb_gained += rebuild_from_blocks(seg_page, sb, res)
         for a in res["articles"]:
             del a["number"]                       # re-set below with id/page, so the JSON field order is unchanged
         for k, a in enumerate(res["articles"], start=1):
@@ -506,12 +545,16 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks
         s.insert(1, f"referee: {ref_ok}/{ref_pages} pages corrected, ${ref_paid:.4f} paid this run")
     if whole_blocks:
         s.insert(1, f"whole blocks: {wb_gained} words recovered")
+    if screen:
+        s.insert(1, f"screen: {len(screened_pages)} pages changed" + (f" ({' | '.join(screened_pages)})" if screened_pages else "")
+                 + (f"; no text layer (needs_ocr): pages {', '.join(map(str, needs_ocr))}" if needs_ocr else ""))
     (rev / "summary.txt").write_text("\n".join(s) + "\n", encoding="utf-8")
 
     fc = Counter(f.split()[0] for p in pages for f in p["flags"])
     return {"pdf": pdf.name, "articles": len(final), "joined": joined, "linked": linked, "offset": offset,
             "referee": (ref_ok, ref_pages, ref_paid) if referee else None,
             "whole_blocks": wb_gained if whole_blocks else None,
+            "screened": len(screened_pages) if screen else None, "needs_ocr": needs_ocr,
             "coverage": cov, "pages": len(pages), "ads": n_ad,
             "flagged": [p["page"] for p in pages if p["flags"]], "flag_counts": dict(fc)}
 
@@ -554,6 +597,8 @@ def main():
     ap.add_argument("--whole-blocks", action="store_true",
                     help="D9: build article text from the whole blocks the rules assigned (recovers lost lines)")
     ap.add_argument("--referee-fresh", action="store_true", help="ignore saved referee answers and call the model again")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="18 Oct: the daily setup -- Screen on every page + the per-paper SETTINGS table (referee, whole blocks)")
     args = ap.parse_args()
     target, root = Path(args.target), Path(args.root)
     pdfs = sorted(target.rglob("*.pdf")) if target.is_dir() else [target]
@@ -562,16 +607,21 @@ def main():
     if not pdfs:
         sys.exit(f"No PDFs found in {target}")
     for pdf in pdfs:
+        pub = parse_name(pdf.stem)[1]
+        cfg = SETTINGS.get(pub, {"referee": False, "whole_blocks": False}) if args.pipeline else {}
         referee = None
-        if parse_name(pdf.stem)[1] in args.referee:
+        if pub in args.referee or cfg.get("referee"):
             from p2_extract_referee import make_page_referee
             referee = make_page_referee(root, pdf.stem, fresh=args.referee_fresh)
-        r = process_pdf(pdf, root, pictures=not args.no_pictures, referee=referee, whole_blocks=args.whole_blocks)
+        r = process_pdf(pdf, root, pictures=not args.no_pictures, referee=referee,
+                        whole_blocks=args.whole_blocks or cfg.get("whole_blocks", False), screen=args.pipeline)
         if r["referee"]:
             print(f"{'':36s} referee: {r['referee'][0]}/{r['referee'][1]} pages corrected, ${r['referee'][2]:.4f} paid")
         print(f"{r['pdf']:36s} {r['articles']:4d} articles | coverage {r['coverage']:.1%} | jumps {r['joined']} joined, "
               f"{r['linked']} linked (offset {r['offset']}) | ads {r['ads']} | flagged {len(r['flagged'])}/{r['pages']} "
-              f"{r['flag_counts']}" + (f" | whole blocks +{r['whole_blocks']} words" if r["whole_blocks"] is not None else ""))
+              f"{r['flag_counts']}" + (f" | whole blocks +{r['whole_blocks']} words" if r["whole_blocks"] is not None else "")
+              + (f" | screen {r['screened']} pages" if r["screened"] is not None else "")
+              + (f" | NO TEXT LAYER p{','.join(map(str, r['needs_ocr']))}" if r["needs_ocr"] else ""))
 
 
 if __name__ == "__main__":

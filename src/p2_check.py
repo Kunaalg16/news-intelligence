@@ -18,6 +18,9 @@ USAGE (on the Mac add  --root . --papers archive)
     python src/p2_check.py --whole-blocks  # D9: score the whole-block text (17 Oct)
     python src/p2_check.py --screen        # 2.1a Screen v0 first, then split (17 Oct)
     python src/p2_check.py --screen --whole-blocks --tune-only   # both; task 5 runs tuning pages only
+    python src/p2_check.py --pipeline      # 18 Oct: each page graded exactly as the daily run makes it
+                                           # (Screen + per-paper SETTINGS in p2_extract.py: BL from saved referee
+                                           #  answers with Screen's zones applied; whole blocks per paper)
 
 MODES (17 Oct; WRITTEN, NOT RUN on gold -- run together in task 5, decision D11)
   --whole-blocks  a block the rules already kept >= WB_KEPT_SHARE of goes to that story whole (as p2_extract
@@ -188,6 +191,32 @@ def page_words_referee(page, key_labels, ref_labels):
     return out
 
 
+def page_words_pipeline(page, key_labels, stem, pn, root, info=None):
+    """18 Oct: grade the page the way `p2_extract.py --pipeline` processes it."""
+    from p2_extract import SETTINGS, parse_name
+    from p2_screen import screen_page
+    pub = parse_name(stem)[1]
+    cfg = SETTINGS.get(pub, {"referee": False, "whole_blocks": False})
+    rf = Path(root) / "review" / stem / f"referee_p{pn:02d}.json"
+    if cfg["referee"] and rf.exists():
+        ref = json.loads(rf.read_text(encoding="utf-8"))
+        if ref.get("ok"):
+            verdict = screen_page(page)
+            labels = dict(ref["labels"])
+            if verdict["skip_page"]:
+                labels = {k: "NOT" for k in labels}
+            for b in page_blocks(page):
+                c = (b["bbox"].tl + b["bbox"].br) / 2
+                if any(z.contains(c) for z in verdict["zones"]):
+                    labels[b["id"]] = "NOT"
+            if info is not None:
+                info["why"] = ["referee"] + verdict["why"]
+            return page_words_referee(page, key_labels, labels)
+    if info is not None and cfg["referee"]:
+        info["why"] = ["no saved referee answer: rules"]
+    return page_words(page, key_labels, whole_blocks=cfg["whole_blocks"], screen=True, info=info)
+
+
 def c2(n):
     return n * (n - 1) // 2
 
@@ -227,6 +256,8 @@ def main():
                     help="score the referee's answers (review/<stem>/referee_pNN.json) instead of the rules")
     ap.add_argument("--whole-blocks", action="store_true", help="D9: score whole-block text against the base")
     ap.add_argument("--screen", action="store_true", help="2.1a: Screen v0 before splitting, against the base")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="18 Oct: grade each page as the daily run (p2_extract.py --pipeline) makes it, against the base")
     ap.add_argument("--tune-only", action="store_true",
                     help="skip held-back (gate) pages; automatic with --whole-blocks / --screen unless --held-back")
     args = ap.parse_args()
@@ -254,7 +285,7 @@ def main():
                 rows.append((stem[5:], pn, split, score(q)))
         for (name, split), q in sorted(per.items(), key=lambda x: (x[0][0] == "POOLED", x[0])):
             rows.append((name, "ALL", split, score(q)))
-    modes = args.whole_blocks or args.screen
+    modes = args.whole_blocks or args.screen or args.pipeline
     tune_only = not args.held_back       # 18 Oct: practice pages unless --held-back is given (protects the exam)
     pooled = defaultdict(lambda: defaultdict(list))                 # variant -> split -> pairs (all papers)
     info_all = defaultdict(dict)
@@ -279,7 +310,10 @@ def main():
             variants = [("base", {})] + ([("mode", {"whole_blocks": args.whole_blocks, "screen": args.screen})] if modes else [])
             for var, kw in variants:
                 inf = info_all[(stem, pn, var)]
-                wp = page_words(doc[pn - 1], info["labels"], info=inf, **kw)
+                if var == "mode" and args.pipeline:
+                    wp = page_words_pipeline(doc[pn - 1], info["labels"], stem, pn, args.root, info=inf)
+                else:
+                    wp = page_words(doc[pn - 1], info["labels"], info=inf, **kw)
                 q = [(f"{stem}p{pn}:{t}", f"{stem}p{pn}:{p}" if p else None) for t, p in wp]
                 per[var][split] += q
                 pooled[var][split] += q
