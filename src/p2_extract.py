@@ -441,7 +441,13 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks
             except Exception as e:                # fail-open: a Screen bug never loses a page
                 verdict = {"skip_page": False, "zones": [], "why": [f"screen failed: {e}"]}
             if verdict.get("no_text_layer"):
-                needs_ocr.append(pn)
+                # 18 Oct: a page that is mostly pictures is a picture ad, not news printed as an image
+                area = page.rect.width * page.rect.height
+                img = sum(pymupdf.Rect(i["bbox"]).intersect(page.rect).get_area() for i in page.get_image_info())
+                if img / area >= AD_IMAGE_FRAC:
+                    verdict["why"] = [w.replace("-> needs_ocr list", "-> picture ad") for w in verdict["why"]]
+                else:
+                    needs_ocr.append(pn)
             if verdict["skip_page"] or verdict["zones"]:
                 screened_pages.append(f"p{pn} " + "; ".join(verdict["why"])[:80])
             if verdict["zones"] and not verdict["skip_page"]:
