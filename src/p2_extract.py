@@ -10,6 +10,9 @@ USAGE (from ~/news-intel)
               --no-pictures    skip the overlay pictures (faster)
               --referee PAPER  also run the AI referee on that paper (first pass: "Business Line"); see
                                p2_extract_referee.py. Articles it rebuilt carry "method": "referee".
+              --whole-blocks   (D9, 15 Oct) build each article's text from the WHOLE text blocks the rules
+                               gave it, not only the lines the rules kept. Recovers lines lost inside a block
+                               (a headline's 2nd line, the first lines of a column). Off = output unchanged.
 
 WRITES (names trace back to the PDF)
     data/articles/<date>/<date>_<Publisher>.json   list of articles
@@ -23,6 +26,16 @@ FREE CHECKS (no model, no labels; they show where to look). Ad pages are not che
     long    an article of 1,500+ words (probably two merged)
     short   an article under 40 words (probably a fragment)
     order   a column break inside an article where the text doesn't flow on
+
+WHOLE BLOCKS (D9, --whole-blocks)
+    Each PDF text block already goes to one story (assign_blocks: the story covering most of it, as on the
+    overlay). With the flag, a rules-built article's body is rebuilt block by block, in block order (column band,
+    then top to bottom), leaving out its headline/deck and byline blocks: a block the rules already kept >= half
+    of gives ALL its text (the lost lines come back); a block they kept less of gives only the words they kept
+    (captions, chart labels, puzzles touching the story stay out). Safety: if the result has FEWER words than the
+    rules' body, the rules' body is kept (never lose words). Refereed pages are already
+    built from whole blocks and are left alone. Grey text inside a block that now belongs to a story stops
+    counting as grey. Measured with: p2_check.py --whole-blocks (scores block-level grouping, same keys).
 
 PAGE JUMPS
     Markers are read from ANY text size: "Continued on Page N", "Turn to Page N", "» PAGE N", "...text. P 10"
@@ -107,7 +120,10 @@ def page_blocks(page):
         lines = [l for l in b["lines"] if abs(l["dir"][1]) <= 0.1]
         text = " ".join(s["text"] for l in lines for s in l["spans"]).strip()
         if text:
-            blocks.append({"bbox": pymupdf.Rect(b["bbox"]), "text": text})
+            # 'full' (D9): spans inside a line are joined WITHOUT a space (a word split across two spans stays
+            # one word); lines are joined with a space. 'text' is kept as before (blocks.json, block ids).
+            full = " ".join("".join(s["text"] for s in l["spans"]).strip() for l in lines).strip()
+            blocks.append({"bbox": pymupdf.Rect(b["bbox"]), "text": text, "full": full})
     blocks.sort(key=lambda b: (round(b["bbox"].x0 / 40), b["bbox"].y0))
     for i, b in enumerate(blocks, 1):
         b["id"] = f"b{i}"
@@ -142,6 +158,68 @@ def assign_blocks(blocks, res):
             b["story"] = labels[int(M[i].argmax())]
         else:
             b["story"] = "grey" if grey[i] > 0.15 else "other"
+
+
+WB_KEPT_SHARE = 0.5       # D9: take a block's full text only if the rules already kept >= this share of its words
+
+
+def rebuild_from_blocks(page, blocks, res):
+    """D9: rules-built articles get the full text of blocks the rules mostly kept (see WHOLE BLOCKS above).
+    A block the rules kept >= WB_KEPT_SHARE of = this story's own text with a few lines lost: take all of it.
+    A block they kept less of (a caption, chart labels, a puzzle next door that touches the story's area):
+    take only the words the rules kept. Needs assign_blocks(blocks, res) first. Returns words recovered."""
+    from p2_extract_rules import _clean
+    words = [w for w in page.get_text("words") if w[4].strip()]
+    cen = [((w[0] + w[2]) / 2, (w[1] + w[3]) / 2) for w in words]
+    gained = 0
+    for a in res["articles"]:
+        if a.get("method") == "referee":
+            continue
+        hb, by = a["_hbox"], a.get("byline", "").strip()
+        boxes = a["_boxes"]
+        parts = []
+        for b in blocks:
+            if b.get("story") != f"s{a['number']}":
+                continue
+            r = b["bbox"]
+            if (r & hb).get_area() > 0.5 * max(r.get_area(), 1):      # its headline / deck
+                continue
+            if by and b["full"].strip() in (by, by.rstrip(".")):       # its byline on its own
+                continue
+            if b["full"].strip() and b["full"].strip() in a["headline"]:  # its headline repeated in a block
+                continue
+            inb = [i for i, c in enumerate(cen) if r.x0 - 0.5 <= c[0] <= r.x1 + 0.5 and r.y0 - 0.5 <= c[1] <= r.y1 + 0.5]
+            if not inb:
+                continue
+            kept = [i for i in inb if any(x.x0 - 0.5 <= cen[i][0] <= x.x1 + 0.5 and x.y0 - 0.5 <= cen[i][1] <= x.y1 + 0.5
+                                          for x in boxes)]
+            if len(kept) >= WB_KEPT_SHARE * len(inb):
+                t = b["full"]
+            elif kept:
+                t = " ".join(words[i][4] for i in kept)
+            else:
+                continue
+            if parts and len(parts[-1]) == 1 and parts[-1].isalpha():  # a drop cap joins the next word
+                parts[-1] += t
+            else:
+                parts.append(t)
+        info = _clean(" ".join(parts))
+        new = re.sub(r"\s+", " ", INLINE_PTR.sub("", info["text"])).strip()
+        old_n = len(a["body"].split())
+        if len(new.split()) > old_n:
+            a["body"] = new
+            a["whole_blocks"] = True
+            gained += len(new.split()) - old_n
+            for k in ("continues_to", "see_also_page"):
+                if info[k] and not a.get(k):
+                    a[k] = info[k]
+    # grey text sitting inside a block whose text now went to a story is no longer lost
+    owned = [b["bbox"] for b in blocks if b.get("story", "").startswith("s")]
+    def inside(s):
+        c = (s["bbox"].tl + s["bbox"].br) / 2
+        return any(r.contains(c) for r in owned)
+    res["grey"] = [s for s in res["grey"] if not inside(s)]
+    return gained
 
 
 # ----------------------------------------------------------------------------- free checks
@@ -324,11 +402,12 @@ def _glue(a, b):
 
 
 # ----------------------------------------------------------------------------- one paper
-def process_pdf(pdf: Path, root: Path, pictures=True, referee=None) -> dict:
+def process_pdf(pdf: Path, root: Path, pictures=True, referee=None, whole_blocks=False) -> dict:
     """referee: None (rules only) or a function from p2_extract_referee.make_page_referee (BL in the first pass)."""
     date, publisher, edition = parse_name(pdf.stem)
     ref_pages = ref_ok = 0
     ref_paid = 0.0
+    wb_gained = 0
     doc = pymupdf.open(pdf)
     rev = root / "review" / pdf.stem
     rev.mkdir(parents=True, exist_ok=True)
@@ -344,12 +423,18 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None) -> dict:
             res, rinfo = referee(page, pn, res)
             ref_pages, ref_ok, ref_paid = ref_pages + 1, ref_ok + rinfo["ok"], ref_paid + rinfo["paid"]
         for k, a in enumerate(res["articles"], start=1):
+            a["number"] = k                       # numbered before assign_blocks (labels blocks 'sN')
+        blocks = page_blocks(page)
+        assign_blocks(blocks, res)
+        if whole_blocks and not error:
+            wb_gained += rebuild_from_blocks(page, blocks, res)
+        for a in res["articles"]:
+            del a["number"]                       # re-set below with id/page, so the JSON field order is unchanged
+        for k, a in enumerate(res["articles"], start=1):
             a["id"], a["page"], a["number"] = f"p{pn:02d}-a{k:02d}", pn, k
             a["body"] = re.sub(r"\s+", " ", INLINE_PTR.sub("", a["body"])).strip()   # drop "... P 10" pointers
             a["words"] = len(a["body"].split())
             all_articles.append(a)
-        blocks = page_blocks(page)
-        assign_blocks(blocks, res)
         block_map[pn] = blocks
         ad = is_ad_page(page, res)
         assigned = sum(a["words"] for a in res["articles"])
@@ -384,6 +469,7 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None) -> dict:
         elif r:
             del a["related_id"]                # it pointed at its own continuation: no separate story to link
     # ---- articles JSON (each article stands alone: paper, date, publisher on every row) ----
+    # an article rebuilt from whole blocks (D9) carries "whole_blocks": true, as refereed ones carry "method"
     final = []
     for a in all_articles:
         if "joined_into" in a:
@@ -418,11 +504,14 @@ def process_pdf(pdf: Path, root: Path, pictures=True, referee=None) -> dict:
                  + (" | AD PAGE" if p["ad"] else "") + (f" | {'; '.join(p['flags'])}" if p["flags"] else ""))
     if referee:
         s.insert(1, f"referee: {ref_ok}/{ref_pages} pages corrected, ${ref_paid:.4f} paid this run")
+    if whole_blocks:
+        s.insert(1, f"whole blocks: {wb_gained} words recovered")
     (rev / "summary.txt").write_text("\n".join(s) + "\n", encoding="utf-8")
 
     fc = Counter(f.split()[0] for p in pages for f in p["flags"])
     return {"pdf": pdf.name, "articles": len(final), "joined": joined, "linked": linked, "offset": offset,
             "referee": (ref_ok, ref_pages, ref_paid) if referee else None,
+            "whole_blocks": wb_gained if whole_blocks else None,
             "coverage": cov, "pages": len(pages), "ads": n_ad,
             "flagged": [p["page"] for p in pages if p["flags"]], "flag_counts": dict(fc)}
 
@@ -462,6 +551,8 @@ def main():
     ap.add_argument("--referee", action="append", default=[], metavar="PAPER",
                     help='also run the AI referee on this paper\'s non-ad pages, e.g. --referee "Business Line" '
                          "(costs ~$0.01/page; saved answers are re-used, never paid twice)")
+    ap.add_argument("--whole-blocks", action="store_true",
+                    help="D9: build article text from the whole blocks the rules assigned (recovers lost lines)")
     ap.add_argument("--referee-fresh", action="store_true", help="ignore saved referee answers and call the model again")
     args = ap.parse_args()
     target, root = Path(args.target), Path(args.root)
@@ -475,12 +566,12 @@ def main():
         if parse_name(pdf.stem)[1] in args.referee:
             from p2_extract_referee import make_page_referee
             referee = make_page_referee(root, pdf.stem, fresh=args.referee_fresh)
-        r = process_pdf(pdf, root, pictures=not args.no_pictures, referee=referee)
+        r = process_pdf(pdf, root, pictures=not args.no_pictures, referee=referee, whole_blocks=args.whole_blocks)
         if r["referee"]:
             print(f"{'':36s} referee: {r['referee'][0]}/{r['referee'][1]} pages corrected, ${r['referee'][2]:.4f} paid")
         print(f"{r['pdf']:36s} {r['articles']:4d} articles | coverage {r['coverage']:.1%} | jumps {r['joined']} joined, "
               f"{r['linked']} linked (offset {r['offset']}) | ads {r['ads']} | flagged {len(r['flagged'])}/{r['pages']} "
-              f"{r['flag_counts']}")
+              f"{r['flag_counts']}" + (f" | whole blocks +{r['whole_blocks']} words" if r["whole_blocks"] is not None else ""))
 
 
 if __name__ == "__main__":

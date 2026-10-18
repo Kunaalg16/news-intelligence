@@ -11,13 +11,28 @@ Scores WORDS, not blocks, so lines lost inside a correctly placed block still co
   intact     real stories that came out >= 90% in one piece, with that piece >= 90% this story
 Pair counts come from a contingency table: sum of C(n,2) over cells / rows / columns.
 
-USAGE
-    python src/p2_check.py                 # all answer keys, tuning + held-back pages
-    python src/p2_check.py --held-back     # gate pages only
+USAGE (on the Mac add  --root . --papers archive)
+    python src/p2_check.py                 # tuning (practice) pages only -- the default since 18 Oct
+    python src/p2_check.py --held-back     # gate (exam) pages only: task 7, once, after the freeze
     python src/p2_check.py --referee       # pages the referee has answered (review/<stem>/referee_pNN.json)
+    python src/p2_check.py --whole-blocks  # D9: score the whole-block text (17 Oct)
+    python src/p2_check.py --screen        # 2.1a Screen v0 first, then split (17 Oct)
+    python src/p2_check.py --screen --whole-blocks --tune-only   # both; task 5 runs tuning pages only
+
+MODES (17 Oct; WRITTEN, NOT RUN on gold -- run together in task 5, decision D11)
+  --whole-blocks  a block the rules already kept >= WB_KEPT_SHARE of goes to that story whole (as p2_extract
+                  --whole-blocks builds the text). "moved" counts words taken from another story that way.
+  --screen        p2_screen.screen_page decides first; a skipped page has no stories, a screened zone's text is
+                  blacked out on a copy of the page BEFORE splitting (as extraction will do it). "screened art"
+                  = true article words removed by Screen: the H1 line (coverage drop <= 0.5 on every page).
+  With any mode, each row is printed twice, base and mode, plus the D7 verdict: weighted average (coverage x2,
+  precision x2, recall x1, intact share x1) rises >= 0.5 AND no metric falls > 1 point.
+  Pages listed in eval/gold_v2_screen_and_charts.txt as not scored for splitting are skipped as before (they
+  have no [page] section in a key).
 """
 
 import argparse
+import os
 import glob
 import json
 import re
@@ -29,10 +44,14 @@ import numpy as np
 import pymupdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from p2_extract import page_blocks
+import p2_extract
+from p2_extract import page_blocks, assign_blocks
 from p2_extract_rules import segment_page
 
+WB_KEPT_SHARE = getattr(p2_extract, "WB_KEPT_SHARE", 0.5)   # same knob as extraction once D9 is installed
+
 GATE = 0.90
+DROPPED = {"Economic Times"}   # 18 Oct: publishers out of the first pass (D6) are not scored or pooled
 INTACT = 0.90   # a story is intact if one piece holds >= 90% of it and is >= 90% pure
 
 
@@ -61,8 +80,20 @@ def _inside(centres, rects):
     return (x >= R[:, 0] - 0.5) & (x <= R[:, 2] + 0.5) & (y >= R[:, 1] - 0.5) & (y <= R[:, 3] + 0.5)
 
 
-def page_words(page, key_labels):
-    """Words of the page with (truth, predicted) labels."""
+def _screened_copy(page, verdict):
+    """A one-page copy of `page` with the screened zones' text removed (redaction), for splitting."""
+    doc = pymupdf.open()
+    doc.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
+    p = doc[0]
+    for z in verdict["zones"]:
+        p.add_redact_annot(z)
+    if verdict["zones"]:
+        p.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
+    return doc, p
+
+
+def page_words(page, key_labels, whole_blocks=False, screen=False, info=None):
+    """Words of the page with (truth, predicted) labels. info (dict) collects mode counters."""
     words = [w for w in page.get_text("words") if w[4].strip()]
     if not words:
         return []
@@ -70,22 +101,61 @@ def page_words(page, key_labels):
     # truth: the block (as numbered by p2_extract.page_blocks) containing the word
     blocks = page_blocks(page)
     IB = _inside(C, [tuple(b["bbox"]) for b in blocks])
-    truth = []
+    truth, home = [], []
     for i in range(len(words)):
         hits = np.flatnonzero(IB[i])
         if len(hits):                                    # smallest containing block wins
             h = min(hits, key=lambda j: blocks[j]["bbox"].get_area())
             truth.append(key_labels.get(blocks[h]["id"], "NOT"))
+            home.append(h)
         else:
             truth.append("NOT")
+            home.append(None)
     # predicted: the story whose span boxes / headline box contain the word
-    res = segment_page(page)
     pred = [None] * len(words)
+    seg_page, keep = page, None
+    if screen:
+        from p2_screen import screen_page
+        verdict = screen_page(page)
+        if verdict["skip_page"]:
+            if info is not None:
+                info["screened_art"] = info.get("screened_art", 0) + sum(t != "NOT" for t in truth)
+                info["why"] = verdict["why"]
+            return list(zip(truth, pred))
+        if verdict["zones"]:
+            keep, seg_page = _screened_copy(page, verdict)       # keep: hold the copy open while used
+            if info is not None:
+                info["why"] = verdict["why"]
+    res = segment_page(seg_page)
     for k, a in enumerate(res["articles"], 1):
         IN = _inside(C, [tuple(r) for r in a["_boxes"]] + [tuple(a["_hbox"])])
         for i in np.flatnonzero(IN.any(axis=1)):
             if pred[i] is None:
                 pred[i] = f"P{k}"
+    if screen and info is not None and keep is not None:
+        gone = {w[:4] for w in words} - {w[:4] for w in seg_page.get_text("words") if w[4].strip()}
+        info["screened_art"] = info.get("screened_art", 0) + sum(
+            1 for i, w in enumerate(words) if w[:4] in gone and truth[i] != "NOT")
+    if whole_blocks and res["articles"]:
+        for k, a in enumerate(res["articles"], 1):
+            a["number"] = k
+        sb = page_blocks(seg_page)
+        assign_blocks(sb, res)
+        moved = 0
+        for b in sb:
+            st = b.get("story", "")
+            if not st.startswith("s"):
+                continue
+            lab = "P" + st[1:]
+            r = b["bbox"]
+            inb = [i for i in range(len(words)) if r.x0 - 0.5 <= C[i, 0] <= r.x1 + 0.5 and r.y0 - 0.5 <= C[i, 1] <= r.y1 + 0.5]
+            if inb and sum(pred[i] == lab for i in inb) >= WB_KEPT_SHARE * len(inb):
+                for i in inb:
+                    if pred[i] != lab:
+                        moved += pred[i] is not None
+                        pred[i] = lab
+        if info is not None:
+            info["moved"] = info.get("moved", 0) + moved
     return list(zip(truth, pred))
 
 
@@ -148,6 +218,10 @@ def main():
     ap.add_argument("--held-back", action="store_true")
     ap.add_argument("--referee", action="store_true",
                     help="score the referee's answers (review/<stem>/referee_pNN.json) instead of the rules")
+    ap.add_argument("--whole-blocks", action="store_true", help="D9: score whole-block text against the base")
+    ap.add_argument("--screen", action="store_true", help="2.1a: Screen v0 before splitting, against the base")
+    ap.add_argument("--tune-only", action="store_true",
+                    help="skip held-back (gate) pages; automatic with --whole-blocks / --screen unless --held-back")
     args = ap.parse_args()
     rows = []
     if args.referee:
@@ -164,35 +238,97 @@ def main():
                     continue
                 ref = json.loads(rf.read_text(encoding="utf-8"))
                 split = "held" if info["split"] == "HELD-BACK" else "tune"
+                if split == "held" and not args.held_back:
+                    continue                       # 18 Oct: exam pages only with --held-back
                 q = [(f"{stem}p{pn}:{t}", f"{stem}p{pn}:{p}" if p else None)
                      for t, p in page_words_referee(doc[pn - 1], info["labels"], ref["labels"])]
-                per[(stem[11:], split)] += q
-                rows.append((stem[11:], pn, split, score(q)))
-        for (name, split), q in sorted(per.items()):
+                per[(stem[5:], split)] += q
+                per[("POOLED", split)] += q
+                rows.append((stem[5:], pn, split, score(q)))
+        for (name, split), q in sorted(per.items(), key=lambda x: (x[0][0] == "POOLED", x[0])):
             rows.append((name, "ALL", split, score(q)))
-        args.held_back = False
+    modes = args.whole_blocks or args.screen
+    tune_only = not args.held_back       # 18 Oct: practice pages unless --held-back is given (protects the exam)
+    pooled = defaultdict(lambda: defaultdict(list))                 # variant -> split -> pairs (all papers)
+    info_all = defaultdict(dict)
+    skipped = []
     for kp in ([] if args.referee else sorted(glob.glob(f"{args.root}/eval/*.answer_key.txt"))):
         stem = Path(kp).name.replace(".answer_key.txt", "")
-        pdf = glob.glob(f"{args.papers}/*/{stem}.pdf")[0]
-        doc = pymupdf.open(pdf)
-        per = defaultdict(list)
+        if stem.split("_", 1)[1] in DROPPED:
+            skipped.append(f"{stem} (publisher dropped)")
+            continue
+        pdfs = glob.glob(f"{args.papers}/*/{stem}.pdf")
+        if not pdfs:                       # 18 Oct: say which paper is missing instead of crashing
+            skipped.append(f"{stem} (no PDF at {args.papers}/*/{stem}.pdf)")
+            continue
+        doc = pymupdf.open(pdfs[0])
+        per = defaultdict(lambda: defaultdict(list))
         for pn, info in read_key(kp).items():
             split = "held" if info["split"] == "HELD-BACK" else "tune"
-            wp = page_words(doc[pn - 1], info["labels"])
-            per[split] += [(f"p{pn}:{t}", f"p{pn}:{p}" if p else None) for t, p in wp]
-            s = score([(f"p{pn}:{t}", f"p{pn}:{p}" if p else None) for t, p in wp])
-            rows.append((stem[11:], pn, split, s))
+            if tune_only and split == "held":
+                continue
+            if not args.held_back and split == "held":
+                continue
+            variants = [("base", {})] + ([("mode", {"whole_blocks": args.whole_blocks, "screen": args.screen})] if modes else [])
+            for var, kw in variants:
+                inf = info_all[(stem, pn, var)]
+                wp = page_words(doc[pn - 1], info["labels"], info=inf, **kw)
+                q = [(f"{stem}p{pn}:{t}", f"{stem}p{pn}:{p}" if p else None) for t, p in wp]
+                per[var][split] += q
+                pooled[var][split] += q
+                rows.append((stem[5:], pn, split, var, score(q), inf))
         for split in ("tune", "held"):
-            if per[split]:
-                rows.append((stem[11:], "ALL", split, score(per[split])))
-    print(f"{'paper':18s} {'page':>4s} {'set':5s} {'words':>6s} {'cover':>6s} {'prec':>6s} {'recall':>6s} {'intact':>8s}  gate")
-    for name, pn, split, s in rows:
+            for var in per:
+                if per[var][split]:
+                    rows.append((stem[5:], "ALL", split, var, score(per[var][split]), {}))
+    for split in ("tune", "held"):
+        for var in pooled:
+            if pooled[var][split]:
+                rows.append(("POOLED", "ALL", split, var, score(pooled[var][split]), {}))
+    if args.referee:
+        rows = [(n, pn, sp, "base", s, {}) for n, pn, sp, s in rows]
+    print("(gate / exam pages only)" if args.held_back else "(tuning pages only: gate / exam pages not scored)")
+    for x in skipped:
+        print(f"skipped: {x}")
+    print(f"{'paper':24s} {'page':>4s} {'set':5s} {'var':4s} {'words':>6s} {'cover':>6s} {'prec':>6s} {'recall':>6s} {'intact':>8s}  gate"
+          + ("  D7   notes" if modes else ""))
+    last = {}
+    for name, pn, split, var, s, inf in rows:
         if args.held_back and split != "held":
             continue
         ok = all(s[k] >= GATE for k in ("coverage", "precision", "recall"))
-        bold = pn == "ALL"
-        print(f"{name:18s} {str(pn):>4s} {split:5s} {s['words']:6d} {s['coverage']:6.1%} {s['precision']:6.1%} {s['recall']:6.1%} {str(s['intact']) + '/' + str(s['stories']):>8s}  "
-              f"{'PASS' if ok else 'fail'}{'  <== paper' if bold else ''}")
+        line = (f"{name:24s} {str(pn):>4s} {split:5s} {var:4s} {s['words']:6d} {s['coverage']:6.1%} {s['precision']:6.1%} "
+                f"{s['recall']:6.1%} {str(s['intact']) + '/' + str(s['stories']):>8s}  {'PASS' if ok else 'fail'}")
+        if modes and var == "mode" and (name, pn, split) in last:
+            line += f"  {d7(last[(name, pn, split)], s):4s}"
+            notes = []
+            if inf.get("moved"):
+                notes.append(f"moved {inf['moved']}")
+            if inf.get("screened_art"):
+                notes.append(f"screened art {inf['screened_art']} ({inf['screened_art'] / max(1, s['words']):.1%})")
+            if inf.get("why"):
+                notes.append("; ".join(inf["why"])[:60])
+            line += "  " + " | ".join(notes)
+        last[(name, pn, split)] = s
+        print(line + ("  <== paper" if pn == "ALL" and var == "base" and not modes else ""))
+
+
+def d7(base, new):
+    """D7 pass rule: weighted average (coverage x2, precision x2, recall x1, intact share x1) up >= 0.5 point,
+    and no single metric down by more than 1 point."""
+    def m(s):
+        return {"coverage": s["coverage"], "precision": s["precision"], "recall": s["recall"],
+                "intact": s["intact"] / max(1, s["stories"])}
+    b, n = m(base), m(new)
+    w = {"coverage": 2, "precision": 2, "recall": 1, "intact": 1}
+    avg = lambda x: sum(w[k] * x[k] for k in w) / sum(w.values())
+    up = (avg(n) - avg(b)) * 100
+    worst = min((n[k] - b[k]) * 100 for k in w)
+    if worst < -1:
+        return "DROP"          # a metric fell by more than 1 point: fails D7 whatever the gain
+    if up >= 0.5:
+        return "PASS"
+    return "same" if abs(up) < 0.05 else "<0.5"   # moved, but by less than the D7 bar
 
 
 if __name__ == "__main__":
