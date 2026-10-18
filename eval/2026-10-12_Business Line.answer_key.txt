@@ -6,14 +6,11 @@
 [page 5] HELD-BACK
 S1: b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b20 b21 b22 b23 b24 b25 b26 b27 b28
 S2: b29 b30 b31 b32 b33 b34 b35 b36 b53 b54 b55 b56 b61 b62 b63 b71 b72 b73 b74 b75 b76 b78 b79 b80 b81 b82
-S3: b15
-S4: b16
-S5: b17
 S6: b38 b39 b40 b41 b42 b57 b58 b68 b69 b70 b83 b84
 S7: b48 b49 b50 b51
 S8: b64 b65 b66 b67
 S9: b85 b86 b87 b88
-NOT: b1 b13 b14 b18 b19 b37 b43 b44 b45 b46 b47 b52 b59 b60 b77
+NOT: b1 b13 b14 b15 b16 b17 b18 b19 b37 b43 b44 b45 b46 b47 b52 b59 b60 b77
 
 [page 10] TUNE
 # Gold v2 tuning T20 (sheet page 28). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. QUICKLY heading b2 NOT; b4's first lines lost (word-level, D9). S5 'Sombre mood' bar chart has no text blocks (2.1b).
