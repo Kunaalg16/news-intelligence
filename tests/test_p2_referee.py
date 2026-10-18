@@ -2,7 +2,7 @@
 test_p2_referee.py -- TEST (free, no API key, no internet). Checks the referee's plumbing and safety, not its quality.
 
 WHAT IT DOES
-    Runs src/p2_extract_referee.py on the gold pages with a FAKE model instead of Haiku, and checks four things:
+    Runs src/p2_extract_referee.py on the PRACTICE (TUNE) gold pages with a FAKE model instead of Haiku, and checks four things:
       1. oracle  : fake model answers with your answer key   -> must score 100/100/100 (proves the pipeline from
                    answer to score loses nothing; block level is not a hidden limit on these pages)
       2. echo    : fake model repeats the rules' draft       -> must score exactly like the rules at block level
@@ -22,6 +22,9 @@ WHEN TO RUN
 
 USAGE (from ~/news-intel)
     .venv/bin/python tests/test_p2_referee.py
+
+18 Oct 2026: uses practice (TUNE) pages only. The checks are about plumbing, so they need no exam pages, and the
+pooled line it prints must not show exam-page numbers (they stay sealed until the frozen gate run).
 """
 
 import glob
@@ -62,6 +65,8 @@ def gold_pages():
         if pdfs:
             doc = pymupdf.open(pdfs[0])
             for pn, info in read_key(kp).items():
+                if info["split"] != "TUNE":       # 18 Oct: practice pages only -- exam pages stay sealed
+                    continue
                 yield stem, pn, doc[pn - 1], info["labels"]
 
 
@@ -157,7 +162,7 @@ def main():
         except Exception as e:                                # anything else = crash = FAIL
             ok = False
         checks.append((f"malformed answer handled: {name}", ok))
-    print(f"{len(pages)} gold pages · scores (cov/prec/rec): " +
+    print(f"{len(pages)} practice pages · scores (cov/prec/rec): " +
           " · ".join(f"{m} {key(v)[0]:.1%}/{key(v)[1]:.1%}/{key(v)[2]:.1%}" for m, v in s.items()))
     for name, ok in checks:
         print(f"{'PASS' if ok else 'FAIL'}  {name}")

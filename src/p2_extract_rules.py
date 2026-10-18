@@ -22,6 +22,9 @@ How it decides, in plain terms:
 Nothing here refers to a specific newspaper's font names, so it should carry over to other publishers.
 The numbers below are the knobs to adjust when the scorer (p2_check.py) shows a systematic mistake.
 v3 (14 Oct 2026): fixes F1-F6 below; each can be switched off for an ablation run with env NI_OFF=F1,F3.
+v3.2 (18 Oct 2026): F11 -- a headline set in two sizes (2nd line bigger or smaller, same font family, stacked
+tightly) is one headline, not two stories. Tried and rejected the same day: "F12" (small headlines under a much
+bigger one = subheadings): fixed Mint's Plain Facts page but merged separate stories elsewhere (precision 95.4 -> 87.9).
 """
 
 import os
@@ -48,6 +51,7 @@ PHOTO_FRAME = 60         # v3: printed lines from a photo's top to this far belo
 BRIEF_MIN_LINES = 4      # v3: ... with at least this many lines of body text running directly under it
 NUMBER_TABLE_SHARE = 0.5 # v3: a text block with >= this share of number words is a data table, not article text
 MID_MIN = 1.0            # v3: a bold line in another font this much above body size = a brief's headline
+STACK_SIZE_RATIO = 1.35  # v3.2 (F11): stacked headline lines in one font family join even if sizes differ up to this x
 # ---------------------------------------------------------------------------
 
 CALLOUT = re.compile(r"^[₹$€£~]?\s*[\d][\d.,%]*")
@@ -56,6 +60,7 @@ OFF = set(filter(None, os.environ.get("NI_OFF", "").split(",")))
 # F4 section headings                 F5 left-over text adoption        F6 mid-size text: decks + brief headlines
 # F7 photo borders are not separators     F8 numeric callouts are not headlines
 # F9 number-table blocks dropped     F10 kicker labels inside a story are not headlines
+# F11 (18 Oct) headline lines stacked in one font family join even when their sizes differ (TH 9 Oct p6: 62 + 76 pt)
 
 
 def _family(font: str) -> str:
@@ -116,6 +121,11 @@ def _merge_headlines(heads, body=()):
         for m in merged:
             same_size = abs(h["size"] - m["size"]) < 1.5
             stacked = -2 <= h["bbox"].y0 - m["bbox"].y1 < h["size"] * 1.3
+            if not same_size and "F11" not in OFF and h.get("font") and m.get("font") \
+                    and _family(h["font"]) == _family(m["font"]) \
+                    and max(h["size"], m["size"]) <= STACK_SIZE_RATIO * min(h["size"], m["size"]) \
+                    and -2 <= h["bbox"].y0 - m["bbox"].y1 < 0.4 * min(h["size"], m["size"]):
+                same_size = True                  # v3.2 F11: one headline set in two sizes
             same_line = abs(h["bbox"].y0 - m["bbox"].y0) < max(2, 0.3 * h["size"]) and 0 <= h["bbox"].x0 - m["bbox"].x1 < 15
             if same_size and ((stacked and _overlaps_x(h["bbox"], m["bbox"])) or same_line):
                 m["bbox"] |= h["bbox"]
@@ -123,7 +133,7 @@ def _merge_headlines(heads, body=()):
                 break
         else:
             merged.append({"bbox": pymupdf.Rect(h["bbox"]), "text": h["text"], "size": h["size"], "deck": [],
-                           "minor": h.get("minor", False)})
+                           "minor": h.get("minor", False), "font": h.get("font")})
     for m in merged:
         m["own_y1"] = m["bbox"].y1          # bottom of the headline itself, before any deck is folded in
     # fold sub-headlines (decks) into the bigger headline above them
