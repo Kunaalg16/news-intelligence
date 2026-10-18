@@ -34,3 +34,20 @@ S8: b40 b41 b42 b53 b54 b55 b70 b71 b72 b73 b74 b75 b76 b77 b78 b89 b102 b103 b1
 S9: b56 b57 b58 b59 b80 b90 b91 b104 b105 b106 b107 b108 b120 b121 b122
 S10: b43 b44 b45 b46 b47
 NOT: b1 b18 b19 b28 b79 b85 b101 b109
+
+[page 8] TUNE
+# gold v2 sheet C: C14 (two_fonts pick). QUICKLY = 2 briefs (S3, S13); Broker's Call = 2 picks (S8, S10); day-trading guide + movers = Screen zone
+S1: b19 b20 b21 b22 b23 b24 b41 b42 b43 b44 b45 b57 b68 b69 b104 b105 b106
+S2: b112 b113 b114 b115 b116 b117 b127 b128 b129
+S3: b3 b4
+S4: b70 b71 b72 b107 b108 b109 b119 b120 b130 b131 b132
+S5: b25 b26 b27 b28 b29 b46 b47 b48 b58 b59 b60
+S6: b7 b8 b9 b10 b11 b30 b31 b32 b33 b34
+S7: b73 b74 b75 b76 b77 b110
+S8: b62 b63
+S9: b49 b50 b51 b52 b53
+S10: b64 b65
+S11: b35 b36 b37 b38 b39 b40 b54 b55 b56
+S12: b12 b13 b14 b15 b16 b17
+S13: b5 b6
+NOT: b1 b2 b18 b61 b66 b67 b78 b79 b80 b81 b82 b83 b84 b85 b86 b87 b88 b89 b90 b91 b92 b93 b94 b95 b96 b97 b98 b99 b100 b101 b102 b103 b111 b118 b121 b122 b123 b124 b125 b126

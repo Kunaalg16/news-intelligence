@@ -1,0 +1,8 @@
+# Answer key: 2026-09-21_The Hindu
+
+[page 9] TUNE
+# gold v2 sheet C: C10 (briefs pick). From the Archives (50 / 100 years ago) = Screen zone (date lines are dropped by the rules, so they would read as current news); b17, b18, b30, b44 added (byline, pull quotes, email)
+S1: b2 b3 b4 b5 b6 b7 b17 b18 b23 b24 b25 b26 b27 b28 b29 b30
+S2: b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b59 b60 b61 b62
+S3: b8 b9 b10 b11 b12 b13 b14 b15 b19 b20 b21 b22
+NOT: b1 b16 b31 b48 b49 b50 b51 b52 b53 b54 b55 b56 b57 b58

@@ -15,3 +15,19 @@ S7: b95 b96 b97 b98 b99 b100 b101 b108 b109 b110 b111 b112
 S8: b11 b12 b27
 S9: b14 b15 b16 b17 b18 b28 b29 b30 b31 b32 b33 b34 b35 b36 b51 b52 b61 b62 b63 b71 b72 b73 b74 b87 b88
 NOT: b1 b2 b3 b4 b13 b19 b20 b21 b22 b37 b38 b45 b53 b54 b55 b56 b64 b75 b76 b77 b89 b90 b94 b102 b103 b104
+
+[page 10] TUNE
+# gold v2 sheet C: C2 (puzzles pick). Sudoku = Screen zone; charts as G (G1 Loans get costlier, G2 Price pressures box, G3 Datanomics charts)
+S1: b2 b3 b4 b5 b6 b23 b25 b26 b35 b36 b37 b38 b39 b40
+S2: b50 b51 b52 b53 b54 b55 b56 b57 b58 b88 b89 b90
+S3: b100 b101
+S6: b8 b9 b10 b11 b33 b34 b47 b48 b49 b65 b66 b67 b68 b69 b70 b91 b92 b93
+S7: b59 b60 b61 b62 b63 b64
+S8: b13 b14 b15 b16 b21 b27 b28 b29 b41 b42 b43
+S9: b71 b72 b73 b98 b99 b122 b123
+S10: b75 b76 b77 b78 b94 b95 b96
+S11: b17 b18 b19 b20 b30 b31 b32 b44 b45 b46
+G1: b22 b24
+G2: b79 b80 b81 b82 b83 b84 b85 b86 b87
+G3: b102 b103 b104 b105 b106 b107 b108 b109 b110 b111 b112 b113 b114 b115 b116 b117 b118 b119 b120 b124 b125 b126 b129 b130 b131 b132 b133 b134 b135 b136 b137 b138
+NOT: b1 b7 b12 b74 b97 b121 b127 b128

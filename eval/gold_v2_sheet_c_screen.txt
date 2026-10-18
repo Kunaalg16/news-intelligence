@@ -1,0 +1,30 @@
+# Gold v2 sheet C (C1-C20): Screen labels from Kunaal's review, 18 Oct 2026. NOT an answer key (p2_check ignores it).
+# Page numbers = PDF pages (as in gold_v2_manifest.csv). Block ids = p2_extract.page_blocks.
+# PAGE = whole page skipped (no answer key written). ZONE = part of a page; its blocks are NOT in that page's key.
+# Kinds: notices, ads, tenders, classifieds, puzzles, market_data, faith, archive_column, promo.
+
+PAGE  C5   2026-10-09_Times of India p23      tenders/notices (no text layer)                      TUNE
+PAGE  C6   2026-10-09_Business Standard p9    ads/advertorial (no text layer)                      TUNE
+PAGE  C7   2026-10-07_Business Line p16       market_data (stock tables, market.radar section)     HELD-BACK
+PAGE  C8   2026-10-12_Business Standard p21   ads (full-page ad)                                   HELD-BACK
+PAGE  C9   2026-10-09_Business Standard p28   market_data (BS stocks page, incl. NEWS blurbs)      TUNE
+PAGE  C18  2026-10-13_Mint p13                ads + tenders/notices                                TUNE
+
+ZONE  C1   2026-10-11_Times of India p19      notices   b6-b16 b28-b39 (obituaries, remembrance, Times Tribute)
+ZONE  C2   2026-10-09_Business Standard p10   puzzles   b74 b121 b127 b128 (BS Sudoku)
+ZONE  C3   2026-10-15_The Hindu p18           puzzles   b12-b14 b20 b28-b30 b40 b49 b50 (crossword, Sudoku)
+ZONE  C3   2026-10-15_The Hindu p18           faith     b65-b68 (FAITH column)
+ZONE  C4   2026-10-07_The Hindu p14           puzzles   b12 b14 b18 b32-b34 b42 b49 b50 (crossword, Sudoku)
+ZONE  C4   2026-10-07_The Hindu p14           faith     b72-b75 (FAITH column)
+ZONE  C10  2026-09-21_The Hindu p9            archive_column  b48-b58 (From the Archives: 50 / 100 years ago)
+ZONE  C11  2026-09-17_Business Line p11       archive_column  b11-b15 (Twenty Years Ago Today)
+ZONE  C11  2026-09-17_Business Line p11       puzzles   b16 b36-b40 b42 b46 b47 b51 (BL two-way crossword)
+ZONE  C13  2026-10-12_Times of India p12      notices   everything except S1 (tenders, classifieds, PUBLIC NOTICE)
+ZONE  C14  2026-10-13_Business Line p8        market_data  b78-b103 b121-b126 (day trading guide, Nifty movers)
+ZONE  C15  2026-10-09_Business Line p6        market_data  b74-b99 b111-b116 (day trading guide, Nifty movers)
+ZONE  C16  2026-10-14_Times of India p28      promo     b62-b66 b74-b92 b102-b109 b126-b130 (webinar, podcast, event, instruction-set box)
+ZONE  C20  2026-10-14_Times of India p9       ads       b76-b79 (land sale ad)
+
+# Notes:
+#   Sources ("PTI", "TNN", "Bloomberg", "(c)2026 Dow Jones") sit inside the story's last block, so the keys count them.
+# Charts with no text blocks (seen, not labelled): C2 S1, C10 S3, C11 S1, C14 S1/S5/S7/S11, C15 S1, C19 S2 -> 2.1b.
