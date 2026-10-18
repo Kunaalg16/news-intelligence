@@ -133,9 +133,16 @@ def page_words(page, key_labels, whole_blocks=False, screen=False, info=None):
             if pred[i] is None:
                 pred[i] = f"P{k}"
     if screen and info is not None and keep is not None:
-        gone = {w[:4] for w in words} - {w[:4] for w in seg_page.get_text("words") if w[4].strip()}
+        # 18 Oct: a word counts as removed only if no word with the same text sits within 2 pt of it on the
+        # screened copy (redaction can shift surviving words' boxes by a fraction of a point)
+        left = defaultdict(list)
+        for w in seg_page.get_text("words"):
+            if w[4].strip():
+                left[w[4]].append((w[0], w[1]))
+        def kept(w):
+            return any(abs(w[0] - x) < 2 and abs(w[1] - y) < 2 for x, y in left.get(w[4], ()))
         info["screened_art"] = info.get("screened_art", 0) + sum(
-            1 for i, w in enumerate(words) if w[:4] in gone and truth[i] != "NOT")
+            1 for i, w in enumerate(words) if truth[i] != "NOT" and not kept(w))
     if whole_blocks and res["articles"]:
         for k, a in enumerate(res["articles"], 1):
             a["number"] = k

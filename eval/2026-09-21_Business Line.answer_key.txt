@@ -11,7 +11,4 @@ S4: b42 b43 b44 b45 b46 b61 b62 b63 b67 b68 b69 b70 b93 b94 b95
 S7: b52 b53 b54 b55
 S8: b84 b85 b86 b87
 S9: b98 b99 b100 b101
-S10: b17
-S11: b18
-S12: b19
-NOT: b1 b15 b16 b20 b21 b41 b47 b48 b49 b50 b51 b56 b64 b65 b96 b97
+NOT: b1 b15 b16 b20 b21 b41 b47 b48 b49 b50 b51 b56 b64 b65 b96 b97 b17 b18 b19

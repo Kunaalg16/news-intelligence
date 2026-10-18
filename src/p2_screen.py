@@ -21,11 +21,21 @@ v0 TIERS (each found on TUNING pages only, 17 Oct; gate pages unseen)
                         so it is listed (scorer notes; later the runner's summary -> needs_ocr/), never dropped silently.
   Number tables are already dropped per block by the rules (F9). Puzzles without a frame (TH, BL crosswords) and
   label-less zones (TOI "TIMES TRIBUTE" printed as a picture) are NOT handled in v0: next tier, after labels.
+S4 (18 Oct, v0.2) PRINTED LABELS, per paper (from review/zone_labels.csv: labels seen in >= 3 issues of a paper
+       across the archive = house style, not fitted to a page):
+         page labels  a junk-page header at the top of the page -> skip the page (BS "24 STOCKS", TOI "ADVERTORIAL",
+                      "PROMOTIONAL FEATURE")
+         zone labels  SUDOKU, CROSSWORD, FAITH, FROM THE ARCHIVES, TWENTY YEARS AGO, QUIZ, day-trading tables ... ->
+                      blank a strip: from the label down to the page bottom (or the first printed line across it),
+                      over the column(s) whose text starts under the label
+       The paper comes from the PDF's file name (<date>_<Publisher>.pdf). Off-switch: NI_OFF=S4.
 KNOBS  the constants below; the label list becomes per-paper once review/zone_labels.csv (p2_dev_zone_labels.py)
        has been read over the whole archive.
 """
 
+import os
 import re
+from pathlib import Path
 
 import numpy as np
 import pymupdf
@@ -42,6 +52,73 @@ SCREEN_LABELS = re.compile(
     r"CORRIGENDUM|SUDOKU|CROSSWORD|QUIZ|SOLUTION TO|MARKETING INITIATIVE|ADVERTORIAL|"
     r"IN LOVING MEMORY|OBITUAR|REMEMBRANCE|PRAYER MEETING|CHANGE OF NAME|MATRIMONIAL|CLASSIFIED",
     re.I)
+
+
+OFF = set(filter(None, os.environ.get("NI_OFF", "").split(",")))
+PAGE_TOP = 0.07           # S4: a page label must sit in the top 7% of the page
+STRIP_GAP = 150           # S4: a column starting up to this far right of the strip so far joins it (puzzle grids are
+                          #     drawings, so their text sits apart), unless a story's column runs down past the label
+# S4 per-paper label lists (18 Oct; from the archive-wide harvest, review/zone_labels.csv)
+PAGE_LABELS = {
+    "Business Standard": re.compile(r"^\d+\s+STOCKS$"),   # the page header "24 STOCKS" (page number + section)
+    "Times of India": re.compile(r"ADVERTORIAL|PROMOTIONAL FEATURE"),
+}
+ZONE_LABELS = {
+    "The Hindu": re.compile(r"^(SUDOKU|FAITH|FROM THE ARCHIVES|THE DAILY QUIZ|THE SCIENCE QUIZ)$|thehindu\.com/crosswords"),
+    "Business Line": re.compile(r"^(BL TWO-WAY CROSSWORD|TWENTY YEARS AGO|Day trading guide|Nifty 50 Movers|Nifty Next 50 Movers)"),
+    "Business Standard": re.compile(r"BS SUDOKU$"),
+    "Times of India": re.compile(r"^(INQUIZITIVE|TIMES SUDOKU|SUDOKU CHALLENGE|THE DAILY CROSSWORD|WORD CHALLENGE|LEISURE)$"),
+    "Mint": re.compile(r"^(MATRIMONIALS|TENDER NOTICE)$"),
+}
+
+
+def _publisher(page):
+    """'archive/2026-10-09/2026-10-09_Business Standard.pdf' -> 'Business Standard' (edition suffix dropped)."""
+    stem = Path(page.parent.name or "").stem
+    rest = stem.partition("_")[2]
+    for pub in set(PAGE_LABELS) | set(ZONE_LABELS):
+        if rest == pub or rest.startswith(pub + "_"):
+            return pub
+    return None
+
+
+def _lines(page):
+    out = []
+    for b in page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            if abs(l["dir"][1]) > 0.1:
+                continue
+            t = " ".join(s["text"] for s in l["spans"] if s["text"].strip()).strip()
+            if t:
+                out.append((re.sub(r"\s+", " ", t), pymupdf.Rect(l["bbox"])))
+    return out
+
+
+def _strip_zone(page, lab, lines, rules):
+    """S4: the strip a zone label heads: from the label down to the page bottom (or the first printed horizontal line
+    that crosses it), over the columns whose text starts at or right of the label and below it, up to the next
+    vertical gap that has article-like text above the label (so a story beside the puzzle is not touched)."""
+    W, H = page.rect.width, page.rect.height
+    x0 = lab.x0 - 6
+    # lines below the label, starting at or right of it; very wide lines (page footers, printer marks) don't count
+    below = [r for t, r in lines if r.y0 >= lab.y0 - 2 and r.x0 >= x0 and r.width < 0.4 * W]
+    # columns that start under the label's left edge (+- a column) form the strip; stop at a column that has text
+    # running from above the label down past it (a story's column)
+    x1 = lab.x1 + 6
+    starts = sorted({round(r.x0) for r in below if r.y0 < lab.y1 + 150})   # columns that begin right under it
+    for sx in starts:
+        if sx > x1 + STRIP_GAP:
+            break
+        # a column whose text runs right down to the label's height (a line starting there within 30 pt above the
+        # label) is a story passing beside the strip: the strip stops before it
+        if sx > lab.x1 + 6 and any(abs(round(r.x0) - sx) <= 3 and lab.y0 - 30 <= r.y0 < lab.y0 - 2 for t, r in lines):
+            break
+        x1 = max(x1, max(r.x1 for r in below if abs(round(r.x0) - sx) <= 3))
+    y1 = H                    # strips run to the page bottom, unless a printed line clearly wider than the strip
+    for ry, rx0, rx1 in rules:  # (a full-width separator) closes it
+        if lab.y1 + 20 < ry < y1 and rx0 <= x0 + 10 and rx1 >= x1 - 10 and (rx1 - rx0) >= 1.5 * (x1 - x0):
+            y1 = ry
+    return pymupdf.Rect(x0, lab.y0 - 4, min(x1 + 2, W), y1)
 
 
 def _frames(page):
@@ -92,6 +169,13 @@ def screen_page(page):
     C = [((w[0] + w[2]) / 2, (w[1] + w[3]) / 2) for w in words]
     framed = sum(1 for c in C if any(f.contains(pymupdf.Point(c)) for f in frames))
     zones, why = [], []
+    pub = _publisher(page) if "S4" not in OFF else None
+    all_lines = None
+    if pub in PAGE_LABELS:
+        all_lines = _lines(page)
+        hit = next((t for t, r in all_lines if r.y1 < PAGE_TOP * page.rect.height and PAGE_LABELS[pub].search(t)), None)
+        if hit:
+            return {"skip_page": True, "zones": [], "why": [f"S4 page label '{hit[:30]}'"]}
     if len(frames) >= FRAMED_PAGE_MIN and framed >= FRAMED_PAGE_SHARE * len(words):
         # v0.1: blank each bordered box (outermost only), keep the unboxed text
         for f in sorted(frames, key=lambda r: -r.get_area()):
@@ -110,6 +194,16 @@ def screen_page(page):
         if hit and not any(z.contains(f) for z in zones):
             zones = [z for z in zones if not f.contains(z)] + [f]
             why.append(f"S2 frame labelled '{hit[:30]}'")
+    if pub in ZONE_LABELS:
+        from p2_extract_rules import _horizontal_rules
+        all_lines = all_lines or _lines(page)
+        rules = _horizontal_rules(page)
+        for t, r in all_lines:
+            if ZONE_LABELS[pub].search(t):
+                z = _strip_zone(page, r, all_lines, rules)
+                if not any(q.contains(z) for q in zones):
+                    zones = [q for q in zones if not z.contains(q)] + [z]
+                    why.append(f"S4 zone label '{t[:25]}'")
     return {"skip_page": False, "zones": zones, "why": why}
 
 

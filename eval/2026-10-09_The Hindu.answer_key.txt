@@ -18,8 +18,7 @@ S3: b5 b6
 S5: b61 b62 b63 b64 b69 b70 b71 b76 b77 b82 b83 b93 b94 b95
 S6: b7 b8 b9
 S7: b14 b15 b16 b17 b18 b28 b29 b30
-S8: b85 b86 b87
-NOT: b1 b2 b10 b11 b12 b13 b19 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b54 b55 b56 b65 b66 b72 b73 b84
+NOT: b1 b2 b10 b11 b12 b13 b19 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44 b45 b46 b47 b48 b49 b50 b51 b52 b53 b54 b55 b56 b65 b66 b72 b73 b84 b85 b86 b87
 
 [page 6] TUNE
 # Gold v2 tuning T3 (sheet page 5). Labelled by Kunaal (voice), written by Claude, 15 Oct 2026. One article: S2 'in Bundelkhand' is the 2nd line of S1's headline; deck b3+b15, drop cap b4, pull quote b18-b19 join it. Captions b2, b27 NOT.
