@@ -9,3 +9,5 @@ logs/
 _old/
 .env
 .DS_Store
+
+needs_ocr/
