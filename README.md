@@ -3,7 +3,7 @@
 A personal pipeline that turns the daily PDF editions of Indian national newspapers into a structured,
 searchable dataset of articles, so that themes can be followed and stories linked across papers and days.
 
-Author: Kunaal Gautam · Started September 2026 · **Work in progress** (status of every part is in the table below)
+Author: Kunaal Gautam · Started August 2026 · **Work in progress** (status of every part is in the table below)
 
 ---
 
