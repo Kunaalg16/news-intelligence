@@ -1,75 +1,166 @@
 """
-p2_tag.py -- Phase 2.3 Tag (code v0.2, 21 Oct 2026; prompt v0.1 unchanged)
+p2_tag.py -- Phase 2.3 Tag (code v0.3, prompt v1, 21 Oct 2026)
 
 WHAT IT DOES
   Gives every distinct article text of an extraction run a small fixed set of labels from a
   model and stores them in data/news.db, so Phase 3 can filter, group and follow stories
   without re-reading article text.
-  Labels per text: topic (1 of 16), topics_more (0-2), kind, entities (name, type, canonical),
-  one-sentence summary, text_check (extraction flag).
+  Labels per text (prompt v1):
+    topic         ONE child of a two-layer list (17 parents, 71 children), or "none";
+                  the parent is filled in by lookup (topic_parent), never by the model
+    topics_more   0-2 further children
+    kind          news | analysis | opinion | interview | brief | data | sponsored | notice | other
+    forum         which institution decided or acted: none | Supreme Court | High Court | lower court |
+                  tribunal | regulator or agency  (secondary label; the topic stays primary)
+    entities      name as printed, type, canonical name
+    summary       one sentence, model-written
+    text_check    ok | two_stories | fragment | garbled (the model's view of the extraction)
+  Plus one label made by a free local rule, not by the model:
+    sponsored_cue the printed sponsored cue found in the text ("promotional feature", ...), or ''.
 
 WHY
   Grouping ("everything on RBI this week") and following ("all coverage of Zoho") need a
-  controlled vocabulary and named entities, not raw text.
+  controlled vocabulary and named entities, not raw text. Topic list: drafts/2026-10-21_2.3_topic_list_v1.md.
 
-WHAT CHANGED IN v0.2 (schema v1, see src/p2_store.py)
-  Articles are read from news.db, not from the JSON files. Before any work, Tag imports the
-  paper files in data/articles/ that are new or changed (p2_store.auto_import, guarded by
-  git tag exam-v1). A tag record belongs to a TEXT (text hash), not to a seat: identical text
-  in any seat or run is tagged once and never paid for twice. The prompt is unchanged (v0.1),
-  so every Tag v0 record stays valid.
+WHAT CHANGED IN v0.3 (prompt v1)
+  * Two-layer topic list; the model picks only the child; parent by lookup.
+  * Strict tool use ("strict": true): the API constrains the answer to the schema, so a topic,
+    kind or forum outside the lists cannot be returned. Limits of the API (no maxItems, no
+    maxLength): "at most 2 more topics" and "summary <= 30 words" are asked in the prompt and
+    trimmed in code.
+  * New field forum; "none" topic for notices, classifieds, ads and sponsored items.
+  * Sponsored check: a printed-cue rule in code, stored next to the model's kind (two judges).
+  * Rejected answers are saved in the `rejects` table (raw answer + reason), not thrown away.
+  * Audit files carry the prompt version in their name (the v0.1 audit files are not overwritten).
+  * Needs news.db on schema v2: run `p2_store.py upgrade` (rehearsal), then `upgrade --apply`.
+  A new prompt version means every text is tagged again; prompt-v0.1 records stay as they are.
 
 HOW TO RUN (always from ~/news-intel)
   .venv/bin/python src/p2_tag.py plan               import new papers (free, local), count texts, estimate cost; no API call
   .venv/bin/python src/p2_tag.py sample             tag a seeded 60-text sample now (normal API, ~2 min)
-                                                    -> review/tag_audit/audit_60_<model>.jsonl for checking
+                                                    -> review/tag_audit/audit_60_<model>_<prompt>.jsonl
   .venv/bin/python src/p2_tag.py run                tag every untagged text now with the normal API (~2x the batch
                                                     price). Ctrl+C is safe: re-run resumes.
   .venv/bin/python src/p2_tag.py submit             send every untagged text as ONE Batch API job
   .venv/bin/python src/p2_tag.py status             is the batch done yet?
   .venv/bin/python src/p2_tag.py collect            fetch batch results, validate, write news.db
   .venv/bin/python src/p2_tag.py stats              counts by SQL for one run: seats and texts tagged, topics, entities
+  .venv/bin/python src/p2_tag.py show-prompt        print the system prompt and tool schema; no API call
   Options: --model haiku-4.5 (default) | haiku-5.5 · --run exam-v1 (default) | pre-freeze · --cap 25 (max dollars)
            --n 60 --seed 19 (sample) · --workers 6 (parallel calls) · --skip-import (tag only what is stored)
 
 SAFETY
   Idempotent: a text is skipped if it already has a record for this model and prompt version.
-  Fail-closed: an answer with an unknown topic or kind is rejected, not guessed.
+  Fail-closed: an answer outside the lists is rejected (and saved in `rejects`), never guessed.
   ET is not stored (p2_store). Reads news.db and data/articles/; writes news.db, data/batches/,
   review/tag_audit/ and logs/tag.log.
 """
-import argparse, concurrent.futures as cf, datetime as dt, json, os, random, sys, time
+import argparse, concurrent.futures as cf, datetime as dt, json, os, random, re, sys, time
 from pathlib import Path
 
 import p2_store as store
 
-PROMPT_VERSION = "v0.1"
+PROMPT_VERSION = "v1"
 MODELS = {"haiku-4.5": "claude-haiku-4-5-20251001", "haiku-5.5": "claude-haiku-5-5"}
 # Standard (non-batch) prices per million tokens, in / out. Batch API = half.
 # Source: official pricing page, checked 15 Oct (drafts/2026-10-15_2.3_tag_design_draft.md).
 PRICES = {"claude-haiku-4-5-20251001": (1.00, 5.00), "claude-haiku-5-5": (0.10, 0.50)}   # 5.5: prompts <= 100K tokens
 # Per-model request settings (Haiku 5.5 migration guide, checked 19 Oct): Haiku 5.5 rejects temperature other
-# than 1 (HTTP 400), so it gets none; with a forced tool it answers with the tool call and no thinking, so effort
-# barely changes cost; medium is the default setting the model is tuned for. Its tokenizer gives ~30% more tokens for the same text (used in estimates).
+# than 1 (HTTP 400), so it gets none; effort medium is the setting the model is tuned for.
+# Its tokenizer gives ~30% more tokens for the same text (used in estimates).
 SAMPLING = {"claude-haiku-4-5-20251001": {"temperature": 0}, "claude-haiku-5-5": {"output_config": {"effort": "medium"}}}
 TOKEN_FACTOR = {"claude-haiku-4-5-20251001": 1.0, "claude-haiku-5-5": 1.3}
+ESTIMATE_CORRECTION = 1.3      # Tag v0 full run (19 Oct) cost 1.3x the estimate; applied to every estimate
 MAX_BODY_WORDS = 1200
 
-TOPICS = ["Politics & Governance", "Economy & Policy", "Markets", "Companies & Business", "Banking & Finance",
-          "Technology", "Energy & Environment", "Infrastructure & Transport", "Law & Courts", "Crime & Security",
-          "Health", "Education", "World", "Science", "Sports", "Culture & Lifestyle"]
+# ---------- the labels (topic list v1, drafts/2026-10-21_2.3_topic_list_v1.md) ----------
+TAXONOMY = [
+    ("Politics & Government", ["Elections & voter rolls", "Parties & leaders", "Legislatures & appointments",
+                               "Protests & movements", "Government schemes & welfare", "Judiciary"]),
+    ("Economy", ["Growth, jobs & data", "Inflation & monetary policy", "Taxes & budget", "Trade & tariffs",
+                 "Industry & manufacturing policy", "Agriculture & food"]),
+    ("Markets", ["Stocks & IPOs", "Currency & bonds", "Commodities & gold", "Mutual funds & trading"]),
+    ("Companies & Business", ["Results & outlook", "Deals & investments", "Startups & funding",
+                              "Products & launches", "People, governance & disputes"]),
+    ("Banking & Finance", ["Banks & lenders", "Insurance", "Payments & fintech", "Personal finance"]),
+    ("Technology", ["AI", "Chips & electronics", "Telecom & digital policy", "Consumer tech & apps"]),
+    ("Energy", ["Oil & gas", "Power & coal", "Renewables"]),
+    ("Environment & Climate", ["Climate change", "Pollution", "Wildlife & conservation",
+                               "Weather & natural disasters"]),
+    ("Infrastructure & Transport", ["Aviation", "Rail & metro", "Road safety & roads", "Shipping & logistics",
+                                    "Urban infrastructure & traffic"]),
+    ("Crime & Public Safety", ["Violent crime", "Fraud, corruption & cybercrime", "Policing",
+                               "Accidents & tragedies"]),
+    ("Defence & National Security", ["Armed forces", "Terrorism & insurgency", "Espionage & borders"]),
+    ("World", ["India's foreign relations", "United States", "Wars & conflicts", "Other countries",
+               "Visas & diaspora"]),
+    ("Health", ["Public health & policy", "Hospitals & healthcare", "Pharma & medicines", "Fitness & wellness"]),
+    ("Education", ["Schools", "Higher education", "Exams & admissions"]),
+    ("Science", ["Space", "Research & discoveries"]),
+    ("Sports", ["Cricket", "Football & hockey", "Other sports", "Sports administration"]),
+    ("Culture & Lifestyle", ["Film, TV & streaming", "Books & arts", "Heritage & religion", "Travel & food",
+                             "Life & society"]),
+]
+SEP = " › "
+PARENT_OF = {child: parent for parent, children in TAXONOMY for child in children}
+TOPIC_ENUM = [parent + SEP + child for parent, children in TAXONOMY for child in children]   # what the model sees
+NO_TOPIC = "none"
 KINDS = ["news", "analysis", "opinion", "interview", "brief", "data", "sponsored", "notice", "other"]
+FORUMS = ["none", "Supreme Court", "High Court", "lower court", "tribunal", "regulator or agency"]
 ENTITY_TYPES = ["company", "person", "organisation", "place"]
 TEXT_CHECKS = ["ok", "two_stories", "fragment", "garbled"]
+assert len(PARENT_OF) == sum(len(c) for _, c in TAXONOMY), "child names must be unique across parents"
+
+# Printed cues that mark paid content. A free local rule, kept separate from the model's `kind`
+# so the two can be compared ("two independent judges"). Phrases, not single words: "sponsored"
+# alone appears in news ("state-sponsored").
+SPONSORED_CUES = ["promotional feature", "advertorial", "in association with", "marketing initiative",
+                  "consumer connect initiative", "impact feature", "brand connect", "partner content",
+                  "sponsored content", "sponsored feature"]
+CUE_RE = re.compile("|".join(re.escape(c) for c in SPONSORED_CUES), re.IGNORECASE)
+
+TOPIC_LINES = "\n".join(f"  {parent}: " + "; ".join(children) for parent, children in TAXONOMY)
 
 SYSTEM = f"""You label articles from Indian national newspapers for a personal news archive.
-Read the article and call the tool tag_article exactly once.
+Read the WHOLE article, then call the tool tag_article exactly once.
+Judge from the body text. Headlines are sometimes a section label ("QUICKLY.", "THE GIST"), a pull quote
+or a fragment; when the headline is empty or says little, the body decides.
 
-topic: the ONE best subject from this fixed list: {"; ".join(TOPICS)}.
-topics_more: 0-2 further subjects from the same list, only if clearly central.
+topic: the ONE subject the article is about, as "Parent › Child" from this list (pick the child; the parent comes with it):
+{TOPIC_LINES}
+  Use "none" only for kind notice or sponsored (classifieds, matrimonial ads, display ads, tenders,
+  public notices, obituaries, paid content).
+topics_more: 0 to 2 further children from the same list, only if clearly central (never repeat topic). Usually 0 or 1.
+
+Rules for overlapping subjects (apply them; they override your own preference):
+- Courts, tribunals and regulators are institutions, not subjects. Topic = what the ruling or action is about;
+  the institution goes in forum. Example: "Supreme Court upholds forest rule" -> Environment & Climate › Wildlife &
+  conservation, forum Supreme Court. "Sebi bars firm from markets" -> Markets › Stocks & IPOs, forum regulator or agency.
+  Use Politics & Government › Judiciary only when the courts themselves are the subject (judges' appointments,
+  recusals, case backlog, the Chief Justice's administration).
+- Accidents: a report of an accident or tragedy (road crash, building collapse, boat capsizing, stampede, fire)
+  -> Crime & Public Safety › Accidents & tragedies. Infrastructure & Transport › Road safety & roads only when the
+  article is about policy: road design, safety rules, enforcement drives. Drunk driving and hit-and-run -> Crime & Public
+  Safety › Violent crime.
+- RBI: a rate or monetary-policy decision -> Economy › Inflation & monetary policy; its bond, forex or liquidity
+  operations -> Markets › Currency & bonds; rules and supervision for banks -> Banking & Finance › Banks & lenders.
+- Military, navy, air force, defence purchases, DRDO, missile tests -> Defence & National Security, even when another
+  country is involved. Diplomacy and summits -> World › India's foreign relations.
+- Weather, rain, monsoon, cyclones, floods, heatwaves -> Environment & Climate › Weather & natural disasters.
+- Personal-finance advice (deposits, pensions, insurance cover, which fund to buy) -> Banking & Finance › Personal finance.
+- Fund-raising by a private equity or venture fund -> Companies & Business › Startups & funding.
+- Prizes go to the subject of the prize (a physics Nobel -> Science › Research & discoveries).
+
 kind: news (straight report) | analysis (feature, explainer) | opinion (editorial, column, letter) |
-  interview | brief (under ~80 words, one item) | data (scores, results, market wrap, tables) |
-  sponsored (advertorial, "marketing initiative", promotional feature) | notice (obituary, tender, public notice) | other.
+  interview | brief (under ~80 words, one item) | data (scores, results, market wrap, tables, listings) |
+  sponsored (paid content: advertorial, "marketing initiative", "promotional feature", "in association with",
+  "consumer connect initiative", supplement pages written for an advertiser) |
+  notice (obituary, tender, public notice, classified or matrimonial ad, display ad) | other.
+  Every sponsored item must be caught: if printed cues or the tone show the text was paid for, use sponsored.
+forum: the institution that decided or acted in the article: Supreme Court | High Court | lower court (district,
+  sessions, magistrate, family courts) | tribunal (NCLT, NCLAT, NGT, DGTR, CAT, consumer commissions) |
+  regulator or agency (SEBI, RBI acting as regulator, CCI, TRAI, DGCA, FSSAI, Election Commission, ED, CBI, NIA, police
+  investigations led by an agency) | none.
 entities: the important named companies, people, organisations (incl. government bodies, regulators) and places
   that the article is about. name = as printed; canonical = the full standard name
   (e.g. "RBI" -> "Reserve Bank of India", "Modi" -> "Narendra Modi"). Do not list the newspaper itself or reporters.
@@ -80,27 +171,35 @@ text_check: ok | two_stories (text clearly mixes two unrelated stories) | fragme
 TOOL = {
     "name": "tag_article",
     "description": "Record the labels for one article.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
-            "topic": {"type": "string", "enum": TOPICS},
-            "topics_more": {"type": "array", "items": {"type": "string", "enum": TOPICS}, "maxItems": 2},
+            "topic": {"type": "string", "enum": TOPIC_ENUM + [NO_TOPIC]},
+            "topics_more": {"type": "array", "items": {"type": "string", "enum": TOPIC_ENUM}},
             "kind": {"type": "string", "enum": KINDS},
-            "entities": {"type": "array", "items": {"type": "object", "properties": {
-                "name": {"type": "string"}, "type": {"type": "string", "enum": ENTITY_TYPES},
-                "canonical": {"type": "string"}}, "required": ["name", "type", "canonical"]}},
+            "forum": {"type": "string", "enum": FORUMS},
+            "entities": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ENTITY_TYPES},
+                               "canonical": {"type": "string"}},
+                "required": ["name", "type", "canonical"],
+                "additionalProperties": False}},
             "summary": {"type": "string"},
             "text_check": {"type": "string", "enum": TEXT_CHECKS},
         },
-        "required": ["topic", "kind", "entities", "summary", "text_check"],
+        # all required: no optional parameters (API limit 24) and a fixed answer order
+        "required": ["topic", "topics_more", "kind", "forum", "entities", "summary", "text_check"],
+        "additionalProperties": False,
     },
 }
 
 
 # ---------- texts ----------
-def open_run(args):
-    """Open news.db (schema v1), bring the run up to date with its JSON folder, return the connection."""
-    con = store.open_v1()
+def open_run(args, write=True):
+    """Open news.db, bring the run up to date with its JSON folder, return the connection.
+    Writing prompt-v1 records needs schema v2."""
+    con = store.open_v2() if write else store.open_v1()
     if args.run not in store.RUNS:
         sys.exit(f"Unknown run '{args.run}'. Known: {sorted(store.RUNS)}")
     if not args.skip_import and store.RUNS[args.run][0] is not None:
@@ -140,6 +239,12 @@ def user_text(a):
     return "\n".join(parts)
 
 
+def sponsored_cue(a):
+    """Free local rule: the first printed sponsored cue in headline, deck or body ('' = none)."""
+    m = CUE_RE.search(" ".join([a.get("headline") or "", a.get("deck") or "", a.get("body") or ""]))
+    return m.group(0).lower() if m else ""
+
+
 def params(a, model):
     return {"model": model, "max_tokens": 1500, "system": SYSTEM, "tools": [TOOL],
             "tool_choice": {"type": "tool", "name": "tag_article"},
@@ -153,11 +258,32 @@ def todo(con, texts, model):
     return [a for a in texts if a["text_hash"] not in have]
 
 
-def validate(inp):
-    """Fail-closed: unknown topic/kind -> None. Bad entities are dropped, not guessed."""
-    if not isinstance(inp, dict) or inp.get("topic") not in TOPICS or inp.get("kind") not in KINDS:
+def child_of(path):
+    """'Parent › Child' -> 'Child' (None if not on the list)."""
+    if path not in TOPIC_ENUM:
         return None
-    more = [t for t in (inp.get("topics_more") or []) if t in TOPICS and t != inp["topic"]][:2]
+    return path.split(SEP, 1)[1]
+
+
+def validate(inp):
+    """Fail-closed. Returns (tag, None) or (None, reason). Strict tool use should make every list value
+    valid; this check stays as the second judge (and catches truncated or missing answers)."""
+    if not isinstance(inp, dict):
+        return None, "no tool answer"
+    topic_path = inp.get("topic")
+    if topic_path != NO_TOPIC and child_of(topic_path) is None:
+        return None, f"topic not on the list: {topic_path!r}"
+    if inp.get("kind") not in KINDS:
+        return None, f"kind not on the list: {inp.get('kind')!r}"
+    if inp.get("forum") not in FORUMS:
+        return None, f"forum not on the list: {inp.get('forum')!r}"
+    topic = None if topic_path == NO_TOPIC else child_of(topic_path)
+    more = []
+    for p in inp.get("topics_more") or []:
+        c = child_of(p)
+        if c and c != topic and c not in more:
+            more.append(c)
+    more = more[:2]                                       # the API cannot enforce maxItems; trimmed here
     ents, seen = [], set()
     for e in inp.get("entities") or []:
         if not isinstance(e, dict):
@@ -170,17 +296,28 @@ def validate(inp):
         seen.add((canon.lower(), typ))
         ents.append((name, typ, canon))
     tc = inp.get("text_check") if inp.get("text_check") in TEXT_CHECKS else "ok"
-    return {"topic": inp["topic"], "topics_more": more, "kind": inp["kind"], "entities": ents,
-            "summary": str(inp.get("summary") or "").strip()[:400], "text_check": tc}
+    return {"topic": topic, "topic_parent": PARENT_OF.get(topic), "topics_more": more, "kind": inp["kind"],
+            "forum": None if inp["forum"] == "none" else inp["forum"], "entities": ents,
+            "summary": str(inp.get("summary") or "").strip()[:400], "text_check": tc}, None
 
 
-def save_tag(con, h, model, tag, usage, via):
-    con.execute("INSERT OR REPLACE INTO tags VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (h, model, PROMPT_VERSION, tag["topic"], json.dumps(tag["topics_more"]), tag["kind"], tag["summary"],
-                 tag["text_check"], dt.datetime.now().isoformat(timespec="seconds"), usage[0], usage[1], via))
+def save_tag(con, a, model, tag, usage, via):
+    store.insert_tag(con, {
+        "text_hash": a["text_hash"], "model": model, "prompt_version": PROMPT_VERSION, "topic": tag["topic"],
+        "topics_more": json.dumps(tag["topics_more"]), "kind": tag["kind"], "summary": tag["summary"],
+        "text_check": tag["text_check"], "tagged_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "in_tokens": usage[0], "out_tokens": usage[1], "via": via, "topic_parent": tag["topic_parent"],
+        "forum": tag["forum"], "sponsored_cue": sponsored_cue(a)})
+    h = a["text_hash"]
     con.execute("DELETE FROM entities WHERE text_hash=? AND model=? AND prompt_version=?", (h, model, PROMPT_VERSION))
     con.executemany("INSERT INTO entities VALUES (?,?,?,?,?,?)",
                     [(h, model, PROMPT_VERSION) + e for e in tag["entities"]])
+
+
+def save_reject(con, h, model, reason, stop_reason, raw, via):
+    con.execute("INSERT INTO rejects VALUES (?,?,?,?,?,?,?,?)",
+                (h, model, PROMPT_VERSION, dt.datetime.now().isoformat(timespec="seconds"), reason,
+                 stop_reason, json.dumps(raw, ensure_ascii=False, default=str)[:20000], via))
 
 
 def tool_input(msg):
@@ -196,11 +333,16 @@ def cost(model, tin, tout, batch=False):
     return c / 2 if batch else c
 
 
+def prompt_tokens(model):
+    """Rough size of the fixed part of every request (system prompt + tool schema): ~4 characters per token."""
+    return int(len(SYSTEM + json.dumps(TOOL)) / 4 * TOKEN_FACTOR[model])
+
+
 def estimate(texts, model, batch=False):
     words = sum(min(len(a["body"].split()), MAX_BODY_WORDS) for a in texts)
     f = TOKEN_FACTOR[model]
-    tin = int((len(texts) * 1100 + words * 1.4) * f)  # ~1,100-token prompt + ~1.4 tokens per word
-    tout = int(len(texts) * 220 * f)
+    tin = int((len(texts) * prompt_tokens(model) + words * 1.4 * f) * ESTIMATE_CORRECTION)
+    tout = int(len(texts) * 240 * f * ESTIMATE_CORRECTION)
     return tin, tout, cost(model, tin, tout, batch)
 
 
@@ -229,9 +371,18 @@ def cmd_plan(args, model):
         by[a["publisher"]] = by.get(a["publisher"], 0) + 1
     tin, tout, c_norm = estimate(left, model)
     print(f"run {args.run}: {seats_in_run(con, args.run)} seats, {len(texts)} distinct texts  {by}")
+    print(f"prompt {PROMPT_VERSION}: {len(TAXONOMY)} parents, {len(TOPIC_ENUM)} children; fixed part ~{prompt_tokens(model)} "
+          f"tokens per request")
     print(f"already tagged with {model} {PROMPT_VERSION}: {len(texts) - len(left)} · still to tag: {len(left)}")
-    print(f"estimate: ~{tin/1e6:.1f}M tokens in, ~{tout/1e6:.2f}M out -> "
+    print(f"estimate (x{ESTIMATE_CORRECTION} correction from Tag v0): ~{tin/1e6:.1f}M tokens in, ~{tout/1e6:.2f}M out -> "
           f"Batch API ${estimate(left, model, True)[2]:.2f} · normal API ${c_norm:.2f}")
+
+
+def cmd_show_prompt(args, model):
+    print(SYSTEM)
+    print("\n--- tool schema ---")
+    print(json.dumps(TOOL, indent=1, ensure_ascii=False))
+    print(f"\n~{prompt_tokens(model)} tokens for {model} (estimate)")
 
 
 def pick_sample(texts, n, seed):
@@ -259,6 +410,8 @@ def tag_sync(con, texts, model, cap, workers, label):
             try:
                 return a, client.messages.create(**p, extra_body=SAMPLING[model])
             except anthropic.BadRequestError as e:
+                if "strict" in str(e).lower() or "schema" in str(e).lower():
+                    raise                            # a schema refusal must stop the run, not be retried without it
                 extra["on"] = False                  # setting refused by this model: fall back to defaults once
                 print(f"  note: request settings {SAMPLING[model]} refused ({str(e)[:150]}); using defaults")
         return a, client.messages.create(**p)
@@ -273,22 +426,29 @@ def tag_sync(con, texts, model, cap, workers, label):
             chunk = texts[start:start + 50]
             con.execute("BEGIN")
             with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-                for fut in cf.as_completed([ex.submit(one, a) for a in chunk]):
+                futs = {ex.submit(one, a): a for a in chunk}
+                for fut in cf.as_completed(futs):
                     done += 1
+                    a = futs[fut]
                     try:
-                        a, msg = fut.result()
+                        _, msg = fut.result()
                         inp, usage = tool_input(msg), (msg.usage.input_tokens, msg.usage.output_tokens)
+                    except anthropic.BadRequestError as e:
+                        con.execute("COMMIT")
+                        sys.exit(f"  request refused by the API, stopping: {str(e)[:300]}")
                     except Exception as e:
                         bad += 1
+                        save_reject(con, a["text_hash"], model, "call failed", None, str(e)[:2000], "sync")
                         print(f"  call failed: {str(e)[:200]}")
                         continue
                     spent += cost(model, *usage)
-                    tag = validate(inp)
+                    tag, why = validate(inp)
                     if tag is None:
                         bad += 1
-                        print(f"  rejected (stop_reason {getattr(msg, 'stop_reason', '?')}): {a['key']}")
+                        save_reject(con, a["text_hash"], model, why, getattr(msg, "stop_reason", None), inp, "sync")
+                        print(f"  rejected ({why}; stop_reason {getattr(msg, 'stop_reason', '?')}): {a['key']}")
                         continue
-                    save_tag(con, a["text_hash"], model, tag, usage, "sync")
+                    save_tag(con, a, model, tag, usage, "sync")
                     ok += 1
             con.execute("COMMIT")
             if len(texts) > 60:
@@ -297,15 +457,16 @@ def tag_sync(con, texts, model, cap, workers, label):
         print("  interrupted: answers so far are saved; re-run to continue.")
     if con.in_transaction:
         con.execute("COMMIT")
-    log(f"{label} model={model} n={len(texts)} ok={ok} bad={bad} cost=${spent:.4f}")
-    print(f"tagged {ok}, failed/rejected {bad} (re-run retries them), cost ${spent:.4f}")
+    log(f"{label} model={model} prompt={PROMPT_VERSION} n={len(texts)} ok={ok} bad={bad} cost=${spent:.4f}")
+    print(f"tagged {ok}, failed/rejected {bad} (saved in table rejects; re-run retries them), cost ${spent:.4f}")
 
 
 def cmd_sample(args, model):
     con = open_run(args)
     sample = pick_sample(load_texts(con, args.run), args.n, args.seed)
     left = todo(con, sample, model)
-    print(f"sample: {len(sample)} texts from run {args.run} (seed {args.seed}); to tag now: {len(left)} with {model}")
+    print(f"sample: {len(sample)} texts from run {args.run} (seed {args.seed}); to tag now: {len(left)} with "
+          f"{model} {PROMPT_VERSION}")
     tag_sync(con, left, model, args.cap, args.workers, "sample")
     write_audit(con, sample, model)
 
@@ -317,7 +478,7 @@ def cmd_run(args, model):
         print(f"Nothing to tag: every text in run {args.run} already has a record for this model and prompt version.")
         return
     est = estimate(left, model)[2]
-    print(f"{len(left)} texts with {model}, normal API; estimated ${est:.2f} (cap ${args.cap:.2f})")
+    print(f"{len(left)} texts with {model} {PROMPT_VERSION}, normal API; estimated ${est:.2f} (cap ${args.cap:.2f})")
     if est > args.cap:
         sys.exit("Estimate is above --cap; nothing sent. Raise --cap if you mean it.")
     tag_sync(con, left, model, args.cap, args.workers, f"run[{args.run}]")
@@ -326,19 +487,23 @@ def cmd_run(args, model):
 def write_audit(con, sample, model):
     Path("review/tag_audit").mkdir(parents=True, exist_ok=True)
     short = [k for k, v in MODELS.items() if v == model][0]
-    path = Path(f"review/tag_audit/audit_{len(sample)}_{short}.jsonl")
+    path = Path(f"review/tag_audit/audit_{len(sample)}_{short}_{PROMPT_VERSION}.jsonl")
     with open(path, "w", encoding="utf-8") as f:
         for i, a in enumerate(sorted(sample, key=lambda a: a["key"]), 1):
-            row = con.execute("SELECT topic, topics_more, kind, summary, text_check FROM tags "
-                              "WHERE text_hash=? AND model=? AND prompt_version=?",
+            row = con.execute("SELECT topic, topic_parent, topics_more, kind, forum, sponsored_cue, summary, "
+                              "text_check FROM tags WHERE text_hash=? AND model=? AND prompt_version=?",
                               (a["text_hash"], model, PROMPT_VERSION)).fetchone()
             ents = con.execute("SELECT name, type, canonical FROM entities WHERE text_hash=? AND model=? "
                                "AND prompt_version=?", (a["text_hash"], model, PROMPT_VERSION)).fetchall()
+            r = dict(zip(["topic", "topic_parent", "topics_more", "kind", "forum", "sponsored_cue", "summary",
+                          "text_check"], row)) if row else {}
             f.write(json.dumps({
                 "n": f"A{i}", "key": a["key"], "text_hash": a["text_hash"], "words": a["words"],
-                "headline": a["headline"], "body": a["body"][:1500], "topic": row[0] if row else None,
-                "topics_more": json.loads(row[1]) if row else None, "kind": row[2] if row else None,
-                "summary": row[3] if row else None, "text_check": row[4] if row else None,
+                "headline": a["headline"], "body": a["body"][:1500],
+                "topic": r.get("topic"), "topic_parent": r.get("topic_parent"),
+                "topics_more": json.loads(r["topics_more"]) if row else None, "kind": r.get("kind"),
+                "forum": r.get("forum"), "sponsored_cue": r.get("sponsored_cue"), "summary": r.get("summary"),
+                "text_check": r.get("text_check"),
                 "entities": [{"name": n, "type": t, "canonical": c} for n, t, c in ents],
             }, ensure_ascii=False) + "\n")
     print(f"audit file: {path}  (upload this file to the chat)")
@@ -354,7 +519,8 @@ def cmd_submit(args, model):
         print(f"Nothing to tag: every text in run {args.run} already has a record for this model and prompt version.")
         return
     est = estimate(left, model, batch=True)[2]
-    print(f"{len(left)} texts -> one Batch API job with {model}; estimated ${est:.2f} (cap ${args.cap:.2f})")
+    print(f"{len(left)} texts -> one Batch API job with {model} {PROMPT_VERSION}; estimated ${est:.2f} "
+          f"(cap ${args.cap:.2f})")
     if est > args.cap:
         sys.exit("Estimate is above --cap; nothing sent. Raise --cap if you mean it.")
     # custom_id = "t" + text hash: unique by construction (one request per distinct text)
@@ -368,7 +534,8 @@ def cmd_submit(args, model):
     con.execute("INSERT INTO batches VALUES (?,?,?,?,?,?,?)",
                 (batch.id, model, PROMPT_VERSION, dt.datetime.now().isoformat(timespec="seconds"), len(reqs),
                  "submitted", None))
-    log(f"submit batch={batch.id} model={model} run={args.run} requests={len(reqs)} est=${est:.2f}")
+    log(f"submit batch={batch.id} model={model} prompt={PROMPT_VERSION} run={args.run} requests={len(reqs)} "
+        f"est=${est:.2f}")
     print(f"submitted batch {batch.id} ({len(reqs)} requests). Check with: status")
 
 
@@ -390,7 +557,7 @@ def cmd_status(args, model):
 
 
 def cmd_collect(args, model):
-    con = store.open_v1()
+    con = store.open_v2()
     rows = con.execute("SELECT batch_id, model, prompt_version FROM batches WHERE status != 'collected'").fetchall()
     if not rows:
         print("No open batch to collect.")
@@ -409,29 +576,42 @@ def cmd_collect(args, model):
             for line in f:
                 m = json.loads(line)
                 mapping[m["custom_id"]] = m["text_hash"]
+        texts = {}
+        for h, head, body in con.execute("SELECT text_hash, headline, body FROM texts"):
+            texts[h] = {"text_hash": h, "headline": head, "body": body}
+        decks = dict(con.execute("SELECT text_hash, MIN(deck) FROM placements GROUP BY text_hash"))
         ok = bad = 0
         tin = tout = 0
         con.execute("BEGIN")
         for entry in client.messages.batches.results(bid):
             h = mapping.get(entry.custom_id)
-            if not h or entry.result.type != "succeeded":
+            if not h:
                 bad += 1
+                continue
+            if entry.result.type != "succeeded":
+                bad += 1
+                save_reject(con, h, bmodel, f"batch result {entry.result.type}", None,
+                            getattr(entry.result, "error", None), "batch")
                 continue
             msg = entry.result.message
             tin += msg.usage.input_tokens
             tout += msg.usage.output_tokens
-            tag = validate(tool_input(msg))
+            inp = tool_input(msg)
+            tag, why = validate(inp)
             if tag is None:
                 bad += 1
+                save_reject(con, h, bmodel, why, getattr(msg, "stop_reason", None), inp, "batch")
                 continue
-            save_tag(con, h, bmodel, tag, (msg.usage.input_tokens, msg.usage.output_tokens), "batch")
+            a = dict(texts.get(h, {"text_hash": h, "headline": "", "body": ""}), deck=decks.get(h) or "")
+            save_tag(con, a, bmodel, tag, (msg.usage.input_tokens, msg.usage.output_tokens), "batch")
             ok += 1
         con.execute("UPDATE batches SET status='collected', collected_at=? WHERE batch_id=?",
                     (dt.datetime.now().isoformat(timespec="seconds"), bid))
         con.execute("COMMIT")
         spent = cost(bmodel, tin, tout, batch=True)
-        log(f"collect batch={bid} ok={ok} bad={bad} tokens_in={tin} tokens_out={tout} cost=${spent:.4f}")
-        print(f"{bid}: tagged {ok}, failed/rejected {bad} (re-sent by the next submit); cost ${spent:.2f}")
+        log(f"collect batch={bid} prompt={bpv} ok={ok} bad={bad} tokens_in={tin} tokens_out={tout} cost=${spent:.4f}")
+        print(f"{bid}: tagged {ok}, failed/rejected {bad} (saved in table rejects; re-sent by the next submit); "
+              f"cost ${spent:.2f}")
 
 
 def cmd_stats(args, model):
@@ -451,21 +631,29 @@ def cmd_stats(args, model):
          "AND e.prompt_version=?")
     p = (args.run, model, PROMPT_VERSION)
     for label, sql in [
-        ("topics used (K)", f"SELECT COUNT(DISTINCT t.topic) {J}"),
-        ("by type", f"SELECT e.type, COUNT(DISTINCT lower(e.canonical)) {E} GROUP BY 1 ORDER BY 2 DESC"),
-        ("by topic", f"SELECT t.topic, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
+        ("children used", f"SELECT COUNT(DISTINCT t.topic) {J}"),
+        ("by parent", f"SELECT t.topic_parent, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
+        ("by child (top 25)", f"SELECT t.topic, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC LIMIT 25"),
         ("by kind", f"SELECT t.kind, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
+        ("by forum", f"SELECT t.forum, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
+        ("sponsored: cue rule vs model", f"SELECT t.sponsored_cue != '', t.kind = 'sponsored', COUNT(*) {J} "
+                                         f"GROUP BY 1, 2 ORDER BY 1, 2"),
         ("text_check", f"SELECT t.text_check, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
+        ("by type", f"SELECT e.type, COUNT(DISTINCT lower(e.canonical)) {E} GROUP BY 1 ORDER BY 2 DESC"),
         ("top entities (seats)", f"SELECT e.canonical, COUNT(DISTINCT pl.date||pl.publisher||pl.art_id) {E} "
                                  f"GROUP BY lower(e.canonical) ORDER BY 2 DESC LIMIT 10"),
     ]:
         print(f"{label}: {con.execute(sql, p).fetchall()}")
+    if "rejects" in store.tables(con):
+        rj = con.execute("SELECT reason, COUNT(*) FROM rejects WHERE model=? AND prompt_version=? GROUP BY 1 "
+                         "ORDER BY 2 DESC", (model, PROMPT_VERSION)).fetchall()
+        print(f"rejected answers kept: {rj}")
     print("cost per run: logs/tag.log (cost= fields)")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "sample", "run", "submit", "status", "collect", "stats"])
+    ap.add_argument("command", choices=["plan", "sample", "run", "submit", "status", "collect", "stats", "show-prompt"])
     ap.add_argument("--model", default="haiku-4.5", choices=sorted(MODELS))
     ap.add_argument("--run", default=store.CURRENT_RUN)
     ap.add_argument("--cap", type=float, default=25.0, help="max estimated dollars per run/submit")
@@ -476,7 +664,7 @@ def main():
     args = ap.parse_args()
     model = MODELS[args.model]
     {"plan": cmd_plan, "sample": cmd_sample, "run": cmd_run, "submit": cmd_submit, "status": cmd_status,
-     "collect": cmd_collect, "stats": cmd_stats}[args.command](args, model)
+     "collect": cmd_collect, "stats": cmd_stats, "show-prompt": cmd_show_prompt}[args.command](args, model)
 
 
 if __name__ == "__main__":

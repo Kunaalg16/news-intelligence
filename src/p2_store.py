@@ -1,5 +1,5 @@
 """
-p2_store.py -- the article store in data/news.db (schema v1, 21 Oct 2026)
+p2_store.py -- the article store in data/news.db (schema v2, 21 Oct 2026; v1 the same day)
 
 WHAT IT DOES
   Keeps every extracted article text in data/news.db, once per distinct text, and records
@@ -15,6 +15,13 @@ WHY
     placements = run x seat -> text_hash (+ page, deck, byline, other article fields)
     imports    = which JSON file was imported into which run, with the file's own fingerprint
     tags, entities = labels keyed by text_hash + model + prompt version (one record per combination)
+    rejects    = (v2) raw model answers that failed validation, kept for inspection
+
+SCHEMA v2 (21 Oct, for Tag prompt v1) adds, without changing anything that exists:
+    tags.topic_parent  parent of the two-layer topic (filled by lookup in p2_tag, NULL for prompt v0.1)
+    tags.forum         which institution decided or acted (Supreme Court, High Court, ...; NULL for v0.1)
+    tags.sponsored_cue printed sponsored cue found by a free local text rule ('' = none; NULL for v0.1)
+    rejects            table
 
 HOW TO RUN (always from ~/news-intel)
   .venv/bin/python src/p2_store.py migrate            REHEARSAL: builds the v1 layout from the v0 tables and the
@@ -22,6 +29,9 @@ HOW TO RUN (always from ~/news-intel)
   .venv/bin/python src/p2_store.py migrate --apply    the same, and keeps the result if every required check passes
   .venv/bin/python src/p2_store.py import             import new/changed papers from data/articles/ into run exam-v1
                                                       (Tag does this by itself; this is the manual way)
+  .venv/bin/python src/p2_store.py upgrade            REHEARSAL: schema v1 -> v2 (three new columns + rejects table),
+                                                      prints every check, then ROLLS BACK (no change)
+  .venv/bin/python src/p2_store.py upgrade --apply    the same, and keeps the result if every check passes
   .venv/bin/python src/p2_store.py check              per-run counts; while v0 tables exist, old vs new numbers
   .venv/bin/python src/p2_store.py drop-v0 --yes      after the check passes: delete the renamed v0_* tables
   Options: --from <folder> (migrate: pre-freeze JSON) · --run exam-v1 · --folder data/articles
@@ -35,12 +45,13 @@ SAFETY
     (uncommitted edits included), so text from changed code can never be filed as exam-v1.
   Import is idempotent: a paper is re-imported only when its JSON file's fingerprint changed;
     a re-imported paper replaces its own seats in that run and nothing else. Texts are never deleted.
+  upgrade: one transaction; additive only (ADD COLUMN, CREATE TABLE): no row is changed or deleted.
   Economic Times is not stored (decided 21 Oct).
 """
 import argparse, datetime as dt, glob, hashlib, json, sqlite3, subprocess, sys
 from pathlib import Path
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 DB = Path("data") / "news.db"
 ARTICLES = Path("data") / "articles"
 PREFREEZE = Path("_old") / "articles_before_exam-v1_2026-10-20"
@@ -68,13 +79,26 @@ SCHEMA = [
     "imported_at TEXT, PRIMARY KEY (run_id, source_file))",
     "CREATE TABLE IF NOT EXISTS tags (text_hash TEXT, model TEXT, prompt_version TEXT, topic TEXT, topics_more TEXT, "
     "kind TEXT, summary TEXT, text_check TEXT, tagged_at TEXT, in_tokens INTEGER, out_tokens INTEGER, via TEXT, "
+    "topic_parent TEXT, forum TEXT, sponsored_cue TEXT, "
     "PRIMARY KEY (text_hash, model, prompt_version))",
     "CREATE TABLE IF NOT EXISTS entities (text_hash TEXT, model TEXT, prompt_version TEXT, name TEXT, type TEXT, "
     "canonical TEXT)",
     "CREATE INDEX IF NOT EXISTS ent_hash ON entities(text_hash, model, prompt_version)",
     "CREATE TABLE IF NOT EXISTS batches (batch_id TEXT PRIMARY KEY, model TEXT, prompt_version TEXT, "
     "submitted_at TEXT, requests INTEGER, status TEXT, collected_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS rejects (text_hash TEXT, model TEXT, prompt_version TEXT, at TEXT, reason TEXT, "
+    "stop_reason TEXT, raw TEXT, via TEXT)",
 ]
+# v1 -> v2: additive only. ADD COLUMN appends at the end, so a v1 file upgraded and a fresh v2 file
+# end up with the same column order (the CREATE TABLE above lists the new columns last).
+UPGRADE_V2 = [
+    "ALTER TABLE tags ADD COLUMN topic_parent TEXT",
+    "ALTER TABLE tags ADD COLUMN forum TEXT",
+    "ALTER TABLE tags ADD COLUMN sponsored_cue TEXT",
+    SCHEMA[-1],                                           # rejects table
+]
+TAG_COLUMNS = ["text_hash", "model", "prompt_version", "topic", "topics_more", "kind", "summary", "text_check",
+               "tagged_at", "in_tokens", "out_tokens", "via", "topic_parent", "forum", "sponsored_cue"]
 
 
 def now():
@@ -103,16 +127,33 @@ def schema_version(con):
 
 
 def open_v1():
-    """For Tag and other readers: the database must already be on schema v1."""
+    """For readers (check, import, stats): the database must be on schema v1 or v2."""
     con = connect()
     v = schema_version(con)
     if v is None and "tags" in tables(con):
         sys.exit("news.db is still on the v0 layout. Run: .venv/bin/python src/p2_store.py migrate (then --apply)")
-    if v is None:                                         # brand-new empty database
+    if v is None:                                         # brand-new empty database: created directly as v2
         con.execute("BEGIN")
         create_schema(con)
         con.execute("COMMIT")
     return con
+
+
+def open_v2():
+    """For writers of prompt-v1 tags: the database must be on schema v2."""
+    con = open_v1()
+    if schema_version(con) != "2":
+        sys.exit(f"news.db is on schema v{schema_version(con)}; Tag prompt v1 needs v2. Run: "
+                 f".venv/bin/python src/p2_store.py upgrade (rehearsal), then upgrade --apply")
+    return con
+
+
+def insert_tag(con, row):
+    """Insert or replace one tag record by column NAME (never by position), so the column order of the
+    file does not matter. `row` is a dict; missing columns are stored as NULL."""
+    cols = [c for c in TAG_COLUMNS if c in row]
+    con.execute(f"INSERT OR REPLACE INTO tags ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                [row[c] for c in cols])
 
 
 def create_schema(con):
@@ -329,8 +370,9 @@ def cmd_migrate(args):
                                "out_tokens, via FROM v0_tags WHERE text_hash=? AND model=? AND prompt_version=? "
                                "ORDER BY key", (h, model, pv)).fetchall()
             win = rows[0]
-            con.execute("INSERT INTO tags VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (h, model, pv, win[1], win[4], win[2], win[5], win[3], win[6], win[7], win[8], win[9]))
+            insert_tag(con, {"text_hash": h, "model": model, "prompt_version": pv, "topic": win[1],
+                             "topics_more": win[4], "kind": win[2], "summary": win[5], "text_check": win[3],
+                             "tagged_at": win[6], "in_tokens": win[7], "out_tokens": win[8], "via": win[9]})
             con.execute("INSERT INTO entities SELECT ?, model, prompt_version, name, type, canonical FROM v0_entities "
                         "WHERE key=? AND model=? AND prompt_version=?", (h, win[0], model, pv))
             kept += 1
@@ -376,6 +418,84 @@ def cmd_migrate(args):
                   ("" if ok else " Nothing was changed because a required check failed."))
     except BaseException:
         con.execute("ROLLBACK")
+        print("error: rolled back; news.db is exactly as before.")
+        raise
+
+
+# ---------- upgrade v1 -> v2 ----------
+def snapshot_counts(con):
+    """Row counts and a content fingerprint of every table that exists, to prove nothing changed."""
+    out = {}
+    for t in sorted(tables(con)):
+        n = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        cols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
+        h = hashlib.sha1()
+        for row in con.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY {', '.join(cols)}"):
+            h.update(repr(row).encode("utf-8"))
+        out[t] = (n, h.hexdigest()[:12], cols)
+    return out
+
+
+def cmd_upgrade(args):
+    if not DB.exists():
+        sys.exit(f"{DB} not found. Run from ~/news-intel.")
+    con = connect()
+    v = schema_version(con)
+    if v == "2":
+        sys.exit("news.db is already on schema v2; nothing to upgrade.")
+    if v != "1":
+        sys.exit(f"news.db is on schema {v!r}; upgrade only goes from v1 to v2.")
+    print(f"{'REHEARSAL (rolls back at the end)' if not args.apply else 'APPLY'} · schema v1 -> v2 (additive)")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        before = snapshot_counts(con)
+        for stmt in UPGRADE_V2:
+            con.execute(stmt)
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')")
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('upgraded_v2_at', ?)", (now(),))
+        after = snapshot_counts(con)
+
+        # 1: every old table keeps the same rows (same count; same content in the old columns)
+        same = True
+        for t, (n, fp, cols) in before.items():
+            if t == "meta":
+                continue
+            n2 = after[t][0]
+            old_cols = ", ".join(cols)
+            h = hashlib.sha1()
+            for row in con.execute(f"SELECT {old_cols} FROM {t} ORDER BY {old_cols}"):
+                h.update(repr(row).encode("utf-8"))
+            ok_t = n == n2 and h.hexdigest()[:12] == fp
+            same &= ok_t
+            print(f"1 rows     {t}: {n} -> {n2} rows, old columns {'identical' if ok_t else 'CHANGED'}")
+        # 2: new columns exist, are empty on every old record, and come last in tags
+        tcols = after["tags"][2]
+        new_cols = ["topic_parent", "forum", "sponsored_cue"]
+        cols_ok = tcols == TAG_COLUMNS
+        filled = con.execute("SELECT COUNT(*) FROM tags WHERE topic_parent IS NOT NULL OR forum IS NOT NULL "
+                             "OR sponsored_cue IS NOT NULL").fetchone()[0]
+        print(f"2 columns  tags now: {', '.join(tcols[-4:])} (new last: {cols_ok}); old records with a value in "
+              f"{new_cols}: {filled}  [required: 0]")
+        # 3: rejects table exists and is empty
+        rj = "rejects" in tables(con) and con.execute("SELECT COUNT(*) FROM rejects").fetchone()[0] == 0
+        print(f"3 rejects  table present and empty: {rj}")
+        # 4: SQLite's own consistency check
+        integ = con.execute("PRAGMA integrity_check").fetchone()[0]
+        print(f"4 file     PRAGMA integrity_check: {integ}")
+
+        ok = same and cols_ok and filled == 0 and rj and integ == "ok"
+        print(f"required checks: {'ALL PASS' if ok else 'FAILED'}")
+        if args.apply and ok:
+            con.execute("COMMIT")
+            print("committed: news.db is on schema v2.")
+        else:
+            con.execute("ROLLBACK")
+            print("rolled back: news.db is exactly as before." +
+                  ("" if args.apply else " Re-run with --apply to keep the result.") +
+                  ("" if ok else " Nothing was changed because a required check failed."))
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
         print("error: rolled back; news.db is exactly as before.")
         raise
 
@@ -428,14 +548,16 @@ def cmd_drop_v0(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["migrate", "import", "check", "drop-v0"])
-    ap.add_argument("--apply", action="store_true", help="migrate: keep the result (default: rehearse and roll back)")
+    ap.add_argument("command", choices=["migrate", "upgrade", "import", "check", "drop-v0"])
+    ap.add_argument("--apply", action="store_true",
+                    help="migrate / upgrade: keep the result (default: rehearse and roll back)")
     ap.add_argument("--from", dest="src", default=str(PREFREEZE), help="migrate: folder with the pre-freeze JSON")
     ap.add_argument("--run", default=CURRENT_RUN)
     ap.add_argument("--folder", default=str(ARTICLES))
     ap.add_argument("--yes", action="store_true", help="drop-v0: confirm")
     args = ap.parse_args()
-    {"migrate": cmd_migrate, "import": cmd_import, "check": cmd_check, "drop-v0": cmd_drop_v0}[args.command](args)
+    {"migrate": cmd_migrate, "upgrade": cmd_upgrade, "import": cmd_import, "check": cmd_check,
+     "drop-v0": cmd_drop_v0}[args.command](args)
 
 
 if __name__ == "__main__":
