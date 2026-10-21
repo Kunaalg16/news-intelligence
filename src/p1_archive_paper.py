@@ -26,6 +26,22 @@ Changed 13 Oct 2026 (evening) after the first backlog run:
     "The Hindu BusinessLine").
   - Editions: International and School editions keep an edition suffix,
     e.g. 2026-10-12_The Hindu_School.pdf. No suffix = main (Delhi) edition.
+
+Changed 21 Oct 2026 (three fixes found while filing 16-19 Oct papers):
+  - A. Unknown words in the filename -> needs_review/ (fail-closed). Before,
+    any edition word other than International/School fell through to "main
+    edition", so "TH North India" or "TH Education Plus" could take the main
+    Delhi paper's slot. Now every word in the filename must be a publisher
+    word, a known filler word (HD, Editable, Full, Edition, Delhi, New, Tr) or
+    a known edition; anything else stops for a human. Checked against all 64
+    filenames ever archived: none would be stopped.
+  - B. Wrap pages: if the model says the first readable page is not a front
+    page, ask once more with the next page that has >= 200 words. A wrap ad
+    whose only text is printer's marks (TH 17 Oct: 77 words) counted as
+    "readable". Papers whose wrap page already worked are unchanged (the
+    first call is the same as before); one extra call only on a "no".
+  - C. Filename dates also accept the separators "‹" and "›"
+    ("TH ● Delhi ● 19‹10‹2026"), so the filename gets its vote again.
 """
 
 import logging
@@ -76,7 +92,7 @@ MONTHS = "JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NO
 DATE_DAY_FIRST = re.compile(rf'(?<!\d)(\d{{1,2}})\s*({MONTHS})\s*,?\s*(\d{{4}})(?!\d)', re.IGNORECASE)
 DATE_MONTH_FIRST = re.compile(rf'({MONTHS})\s*(\d{{1,2}})\s*,?\s*(\d{{4}})(?!\d)', re.IGNORECASE)
 # dates in filenames, Indian order: 07-10-2026, 11~10~2026, 10_10_2026
-FILENAME_DATE = re.compile(r'(?<!\d)(\d{1,2})[-~_. ](\d{1,2})[-~_. ](\d{4})(?!\d)')
+FILENAME_DATE = re.compile(r'(?<!\d)(\d{1,2})[-~_. ‹›](\d{1,2})[-~_. ‹›](\d{4})(?!\d)')   # 21 Oct: + ‹ ›
 SAFE_NAME = re.compile(r'^[A-Za-z0-9 ,.\-_]{1,80}$')
 SAFE_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
@@ -94,6 +110,11 @@ KNOWN_PUBLISHERS = {
 
 # Non-main editions get a suffix in the archive name. No suffix = main (Delhi) edition.
 EDITIONS = {"international": "International", "school": "School"}
+# 21 Oct (fix A): words allowed in a filename besides publisher words and editions. Anything else -> needs_review/.
+# Built from the 64 filenames archived so far (logs/archive.log). Add a word here only after checking a real file.
+FILLER_WORDS = {"delhi", "new", "hd", "editable", "full", "edition", "tr"}
+PUBLISHER_WORDS = {w for key in KNOWN_PUBLISHERS for w in key.split()}
+MIN_FRONT_PAGE_WORDS = 200   # 21 Oct (fix B): the retry page must have at least this many words
 
 
 def _find_publisher(text):
@@ -125,6 +146,12 @@ def edition_from_filename(filename):
     return None
 
 
+def unknown_filename_words(filename):
+    """Fix A: words in the filename that are not a publisher word, filler word or edition, e.g. ['north']."""
+    words = re.findall(r"[a-z]+", Path(filename).stem.lower())
+    return [w for w in words if w not in PUBLISHER_WORDS | FILLER_WORDS | set(EDITIONS)]
+
+
 def is_hindi(*texts):
     return any("hindi" in (t or "").lower() for t in texts)
 
@@ -153,13 +180,29 @@ def is_mostly_garbage(text, threshold=0.1):
     return (text.count('\ufffd') / len(text)) > threshold
 
 
-def extract_page_text(pdf_path, max_pages=MAX_PAGES_TO_CHECK):
+def readable_pages(pdf_path, max_pages=MAX_PAGES_TO_CHECK):
+    """[(page number, text)] for the first pages that have usable text."""
+    out = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages[:max_pages], start=1):
             text = page.extract_text() or ""
             if text.strip() and not is_mostly_garbage(text):
-                return text, i
-    return "", None
+                out.append((i, text))
+    return out
+
+
+def extract_page_text(pdf_path, max_pages=MAX_PAGES_TO_CHECK):
+    """First page with usable text (unchanged behaviour)."""
+    pages = readable_pages(pdf_path, max_pages)
+    return pages[0][1] if pages else "", pages[0][0] if pages else None
+
+
+def retry_page(pages, first_page_num):
+    """Fix B: the next readable page after the first one with >= MIN_FRONT_PAGE_WORDS words, or (None, '')."""
+    for num, text in pages:
+        if num > first_page_num and len(text.split()) >= MIN_FRONT_PAGE_WORDS:
+            return num, text
+    return None, ""
 
 
 def _iso(day, month, year):
@@ -291,22 +334,37 @@ def process_pdf(pdf_path):
         logger.info(f"{pdf_path.name}: Hindi edition, not supported — skipping.")
         return "skipped"
 
-    text, page_num = extract_page_text(pdf_path)
-    if not text.strip():
+    pages = readable_pages(pdf_path)
+    if not pages:
         logger.error(f"No extractable text in first {MAX_PAGES_TO_CHECK} pages of {pdf_path.name} — skipping.")
         return "skipped"
+    page_num, text = pages[0]
     if page_num != 1:
         logger.info(f"{pdf_path.name}: page 1 had no usable text, used page {page_num} instead.")
 
-    regex_date = regex_extract_date(text)
     llm_result = llm_extract(text)
     if llm_result is None:
         logger.error(f"LLM call failed for {pdf_path.name} — leaving in place.")
         return "error"
 
     if not llm_result.get("is_newspaper_front_page"):
-        logger.info(f"{pdf_path.name}: not a newspaper — leaving untouched in Downloads.")
-        return "ignored"
+        # Fix B (21 Oct): the first readable page may be a wrap ad with only printer's marks. Ask once more.
+        retry_num, retry_text = retry_page(pages, page_num)
+        if retry_num is None:
+            logger.info(f"{pdf_path.name}: not a newspaper — leaving untouched in Downloads.")
+            return "ignored"
+        logger.info(f"{pdf_path.name}: page {page_num} ({len(text.split())} words) is not a front page; "
+                    f"trying page {retry_num} ({len(retry_text.split())} words).")
+        retry_result = llm_extract(retry_text)
+        if retry_result is None:
+            logger.error(f"LLM call failed for {pdf_path.name} — leaving in place.")
+            return "error"
+        if not retry_result.get("is_newspaper_front_page"):
+            logger.info(f"{pdf_path.name}: not a newspaper (pages {page_num} and {retry_num}) — leaving untouched in Downloads.")
+            return "ignored"
+        page_num, text, llm_result = retry_num, retry_text, retry_result
+
+    regex_date = regex_extract_date(text)
 
     raw_name = llm_result.get("newspaper_name") or ""
     if is_hindi(raw_name):
@@ -336,6 +394,12 @@ def process_pdf(pdf_path):
     )
     if final_date is None:
         logger.warning(f"Date problem for {pdf_path.name}: {problem}. Flagging.")
+        return _flag(pdf_path)
+
+    unknown = unknown_filename_words(pdf_path.name)
+    if unknown:   # fix A (21 Oct): fail-closed, never let an unknown edition take the main paper's slot
+        logger.warning(f"Unknown word(s) in filename {pdf_path.name}: {', '.join(unknown)} "
+                       f"(an edition or supplement?). Flagging for review.")
         return _flag(pdf_path)
 
     edition = edition_from_filename(pdf_path.name)
