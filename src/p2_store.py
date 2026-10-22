@@ -1,5 +1,5 @@
 """
-p2_store.py -- the article store in data/news.db (schema v2, 21 Oct 2026; v1 the same day)
+p2_store.py -- the article store in data/news.db (schema v3, 22 Oct 2026; v2 and v1 on 21 Oct)
 
 WHAT IT DOES
   Keeps every extracted article text in data/news.db, once per distinct text, and records
@@ -23,14 +23,18 @@ SCHEMA v2 (21 Oct, for Tag prompt v1) adds, without changing anything that exist
     tags.sponsored_cue printed sponsored cue found by a free local text rule ('' = none; NULL for v0.1)
     rejects            table
 
+SCHEMA v3 (22 Oct, for Tag prompt v1.2) adds, without changing anything that exists:
+    tags.event         what happened (deal or investment, launch, conflict or security, ...; NULL before v1.2)
+    tags.events_more   0-1 further event, JSON list (NULL before v1.2)
+
 HOW TO RUN (always from ~/news-intel)
   .venv/bin/python src/p2_store.py migrate            REHEARSAL: builds the v1 layout from the v0 tables and the
                                                       pre-freeze JSON, prints every check, then ROLLS BACK (no change)
   .venv/bin/python src/p2_store.py migrate --apply    the same, and keeps the result if every required check passes
   .venv/bin/python src/p2_store.py import             import new/changed papers from data/articles/ into run exam-v1
                                                       (Tag does this by itself; this is the manual way)
-  .venv/bin/python src/p2_store.py upgrade            REHEARSAL: schema v1 -> v2 (three new columns + rejects table),
-                                                      prints every check, then ROLLS BACK (no change)
+  .venv/bin/python src/p2_store.py upgrade            REHEARSAL: one schema step up (v1 -> v2: three columns + rejects;
+                                                      v2 -> v3: two columns), prints every check, then ROLLS BACK
   .venv/bin/python src/p2_store.py upgrade --apply    the same, and keeps the result if every check passes
   .venv/bin/python src/p2_store.py check              per-run counts; while v0 tables exist, old vs new numbers
   .venv/bin/python src/p2_store.py drop-v0 --yes      after the check passes: delete the renamed v0_* tables
@@ -51,7 +55,7 @@ SAFETY
 import argparse, datetime as dt, glob, hashlib, json, sqlite3, subprocess, sys
 from pathlib import Path
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 DB = Path("data") / "news.db"
 ARTICLES = Path("data") / "articles"
 PREFREEZE = Path("_old") / "articles_before_exam-v1_2026-10-20"
@@ -79,7 +83,7 @@ SCHEMA = [
     "imported_at TEXT, PRIMARY KEY (run_id, source_file))",
     "CREATE TABLE IF NOT EXISTS tags (text_hash TEXT, model TEXT, prompt_version TEXT, topic TEXT, topics_more TEXT, "
     "kind TEXT, summary TEXT, text_check TEXT, tagged_at TEXT, in_tokens INTEGER, out_tokens INTEGER, via TEXT, "
-    "topic_parent TEXT, forum TEXT, sponsored_cue TEXT, "
+    "topic_parent TEXT, forum TEXT, sponsored_cue TEXT, event TEXT, events_more TEXT, "
     "PRIMARY KEY (text_hash, model, prompt_version))",
     "CREATE TABLE IF NOT EXISTS entities (text_hash TEXT, model TEXT, prompt_version TEXT, name TEXT, type TEXT, "
     "canonical TEXT)",
@@ -97,8 +101,17 @@ UPGRADE_V2 = [
     "ALTER TABLE tags ADD COLUMN sponsored_cue TEXT",
     SCHEMA[-1],                                           # rejects table
 ]
+# v2 -> v3: additive only, the same way (two columns appended to tags).
+UPGRADE_V3 = [
+    "ALTER TABLE tags ADD COLUMN event TEXT",
+    "ALTER TABLE tags ADD COLUMN events_more TEXT",
+]
 TAG_COLUMNS = ["text_hash", "model", "prompt_version", "topic", "topics_more", "kind", "summary", "text_check",
-               "tagged_at", "in_tokens", "out_tokens", "via", "topic_parent", "forum", "sponsored_cue"]
+               "tagged_at", "in_tokens", "out_tokens", "via", "topic_parent", "forum", "sponsored_cue",
+               "event", "events_more"]
+# one step per run of `upgrade`: from -> (to, statements, new tags columns, creates rejects table)
+STEPS = {"1": ("2", UPGRADE_V2, ["topic_parent", "forum", "sponsored_cue"], True),
+         "2": ("3", UPGRADE_V3, ["event", "events_more"], False)}
 
 
 def now():
@@ -139,13 +152,25 @@ def open_v1():
     return con
 
 
-def open_v2():
-    """For writers of prompt-v1 tags: the database must be on schema v2."""
+def open_at_least(need):
+    """For writers: the database must be on schema `need` or later."""
     con = open_v1()
-    if schema_version(con) != "2":
-        sys.exit(f"news.db is on schema v{schema_version(con)}; Tag prompt v1 needs v2. Run: "
-                 f".venv/bin/python src/p2_store.py upgrade (rehearsal), then upgrade --apply")
+    v = schema_version(con)
+    if int(v) < int(need):
+        sys.exit(f"news.db is on schema v{v}; this code needs v{need}. Run: "
+                 f".venv/bin/python src/p2_store.py upgrade (rehearsal), then upgrade --apply"
+                 + (" (once per step)" if int(need) - int(v) > 1 else ""))
     return con
+
+
+def open_v2():
+    """For writers of prompt-v1 / v1.1 tags: schema v2 or later."""
+    return open_at_least("2")
+
+
+def open_v3():
+    """For writers of prompt-v1.2 tags (event columns): schema v3 or later."""
+    return open_at_least("3")
 
 
 def insert_tag(con, row):
@@ -441,18 +466,19 @@ def cmd_upgrade(args):
         sys.exit(f"{DB} not found. Run from ~/news-intel.")
     con = connect()
     v = schema_version(con)
-    if v == "2":
-        sys.exit("news.db is already on schema v2; nothing to upgrade.")
-    if v != "1":
-        sys.exit(f"news.db is on schema {v!r}; upgrade only goes from v1 to v2.")
-    print(f"{'REHEARSAL (rolls back at the end)' if not args.apply else 'APPLY'} · schema v1 -> v2 (additive)")
+    if v == SCHEMA_VERSION:
+        sys.exit(f"news.db is already on schema v{v}; nothing to upgrade.")
+    if v not in STEPS:
+        sys.exit(f"news.db is on schema {v!r}; no upgrade step from there.")
+    to, stmts, new_cols, makes_rejects = STEPS[v]
+    print(f"{'REHEARSAL (rolls back at the end)' if not args.apply else 'APPLY'} · schema v{v} -> v{to} (additive)")
     con.execute("BEGIN IMMEDIATE")
     try:
         before = snapshot_counts(con)
-        for stmt in UPGRADE_V2:
+        for stmt in stmts:
             con.execute(stmt)
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')")
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('upgraded_v2_at', ?)", (now(),))
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (to,))
+        con.execute(f"INSERT OR REPLACE INTO meta VALUES ('upgraded_v{to}_at', ?)", (now(),))
         after = snapshot_counts(con)
 
         # 1: every old table keeps the same rows (same count; same content in the old columns)
@@ -470,15 +496,18 @@ def cmd_upgrade(args):
             print(f"1 rows     {t}: {n} -> {n2} rows, old columns {'identical' if ok_t else 'CHANGED'}")
         # 2: new columns exist, are empty on every old record, and come last in tags
         tcols = after["tags"][2]
-        new_cols = ["topic_parent", "forum", "sponsored_cue"]
-        cols_ok = tcols == TAG_COLUMNS
-        filled = con.execute("SELECT COUNT(*) FROM tags WHERE topic_parent IS NOT NULL OR forum IS NOT NULL "
-                             "OR sponsored_cue IS NOT NULL").fetchone()[0]
-        print(f"2 columns  tags now: {', '.join(tcols[-4:])} (new last: {cols_ok}); old records with a value in "
-              f"{new_cols}: {filled}  [required: 0]")
-        # 3: rejects table exists and is empty
-        rj = "rejects" in tables(con) and con.execute("SELECT COUNT(*) FROM rejects").fetchone()[0] == 0
-        print(f"3 rejects  table present and empty: {rj}")
+        cols_ok = tcols == before["tags"][2] + new_cols and tcols == TAG_COLUMNS[:len(tcols)]
+        filled = con.execute("SELECT COUNT(*) FROM tags WHERE " +
+                             " OR ".join(f"{c} IS NOT NULL" for c in new_cols)).fetchone()[0]
+        print(f"2 columns  tags now: {', '.join(tcols[-(len(new_cols) + 1):])} (new last: {cols_ok}); old records "
+              f"with a value in {new_cols}: {filled}  [required: 0]")
+        # 3: rejects table (v1 -> v2 only) exists and is empty
+        if makes_rejects:
+            rj = "rejects" in tables(con) and con.execute("SELECT COUNT(*) FROM rejects").fetchone()[0] == 0
+            print(f"3 rejects  table present and empty: {rj}")
+        else:
+            rj = True
+            print("3 rejects  (not part of this step)")
         # 4: SQLite's own consistency check
         integ = con.execute("PRAGMA integrity_check").fetchone()[0]
         print(f"4 file     PRAGMA integrity_check: {integ}")
@@ -487,7 +516,7 @@ def cmd_upgrade(args):
         print(f"required checks: {'ALL PASS' if ok else 'FAILED'}")
         if args.apply and ok:
             con.execute("COMMIT")
-            print("committed: news.db is on schema v2.")
+            print(f"committed: news.db is on schema v{to}.")
         else:
             con.execute("ROLLBACK")
             print("rolled back: news.db is exactly as before." +

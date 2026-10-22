@@ -1,14 +1,16 @@
 """
-p2_tag.py -- Phase 2.3 Tag (code v0.3, prompt v1, 21 Oct 2026)
+p2_tag.py -- Phase 2.3 Tag (code v0.6, prompt v1.3, 22 Oct 2026)
 
 WHAT IT DOES
   Gives every distinct article text of an extraction run a small fixed set of labels from a
   model and stores them in data/news.db, so Phase 3 can filter, group and follow stories
   without re-reading article text.
   Labels per text (prompt v1):
-    topic         ONE child of a two-layer list (17 parents, 71 children), or "none";
+    topic         ONE child of a two-layer list (17 parents, 75 children), or "none";
                   the parent is filled in by lookup (topic_parent), never by the model
     topics_more   0-2 further children
+    event         ONE of 12 event types: what happened (deal or investment, launch, conflict or security, ...)
+    events_more   0-1 further event, only if a second thing also happened in the story
     kind          news | analysis | opinion | interview | brief | data | sponsored | notice | other
     forum         which institution decided or acted: none | Supreme Court | High Court | lower court |
                   tribunal | regulator or agency  (secondary label; the topic stays primary)
@@ -21,6 +23,36 @@ WHAT IT DOES
 WHY
   Grouping ("everything on RBI this week") and following ("all coverage of Zoho") need a
   controlled vocabulary and named entities, not raw text. Topic list: drafts/2026-10-21_2.3_topic_list_v1.md.
+
+WHAT CHANGED IN v0.6 (prompt v1.3, after blind check 2 of 22 Oct; the list is FROZEN after this)
+  * Four new topic children (75 in all): Technology › Data, privacy & cyber law; Politics & Government ›
+    Regulators & governance; Companies & Business › Retail & e-commerce; Culture & Lifestyle › Social issues.
+  * Definitions: Growth, jobs & data includes layoffs and hiring; Industry & manufacturing policy = factories,
+    production and industrial policy, not finance or services sectors.
+  * New event "business decision" (13 events). Event rules: court ruling -> policy or regulation; match result
+    -> results or data release; agreement between bodies -> policy or regulation.
+  * No schema change (event is free text in the store).
+
+WHAT CHANGED IN v0.5 (prompt v1.2, after the blind check of 22 Oct)
+  * Two facets: topic = the FIELD (AI, telecom, oil & gas ...) and a new label event = WHAT HAPPENED
+    (12 types). Field wins the main topic; event-type children (Violent crime, Accidents, Wars) only when
+    the story has no field beyond the event. Up to 3 topics and 2 events per text.
+  * Conflict vs crime test (Kunaal's Manipur logic) + 4 worked examples at the Crime boundary (few-shot).
+  * kind: data = tables, scores, figure releases; history and anniversary features = analysis.
+  * The newspaper that printed the text is dropped from entities in code.
+  * sample --exclude <audit files>: draw a fresh sample that avoids texts already audited.
+  * Needs news.db on schema v3 (tags.event, tags.events_more): run `p2_store.py upgrade` (rehearsal),
+    then `upgrade --apply`.
+
+WHAT CHANGED IN v0.4 (prompt v1.1, after the 60-article test of 22 Oct)
+  * Tie-break rules from Kunaal's rulings: tariffs on India -> Economy; textile/industry facilities ->
+    Industry & manufacturing policy; municipal bodies -> Urban infrastructure; armed groups in a conflict
+    region -> Terrorism & insurgency (one-off killing -> Violent crime); courts acting on protests ->
+    Protests & movements; the justice system itself -> Judiciary; UPI/payments -> Payments & fintech.
+  * Statutory results statements: kind notice, topic kept; classifieds and ads: topic none.
+  * Cue phrases + "marketing feature", "treat it as an advertisement".
+  * Entity types 4 -> 8 (scheme or law, product or work, event, other). No schema change.
+  * Forum unchanged. Prompt v1 records stay; v1.1 re-tags every text.
 
 WHAT CHANGED IN v0.3 (prompt v1)
   * Two-layer topic list; the model picks only the child; parent by lookup.
@@ -47,7 +79,7 @@ HOW TO RUN (always from ~/news-intel)
   .venv/bin/python src/p2_tag.py stats              counts by SQL for one run: seats and texts tagged, topics, entities
   .venv/bin/python src/p2_tag.py show-prompt        print the system prompt and tool schema; no API call
   Options: --model haiku-4.5 (default) | haiku-5.5 · --run exam-v1 (default) | pre-freeze · --cap 25 (max dollars)
-           --n 60 --seed 19 (sample) · --workers 6 (parallel calls) · --skip-import (tag only what is stored)
+           --n 60 --seed 19 --exclude <audit .jsonl ...> (sample) · --workers 6 (parallel calls) · --skip-import (tag only what is stored)
 
 SAFETY
   Idempotent: a text is skipped if it already has a record for this model and prompt version.
@@ -60,7 +92,7 @@ from pathlib import Path
 
 import p2_store as store
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v1.3"
 MODELS = {"haiku-4.5": "claude-haiku-4-5-20251001", "haiku-5.5": "claude-haiku-5-5"}
 # Standard (non-batch) prices per million tokens, in / out. Batch API = half.
 # Source: official pricing page, checked 15 Oct (drafts/2026-10-15_2.3_tag_design_draft.md).
@@ -76,14 +108,16 @@ MAX_BODY_WORDS = 1200
 # ---------- the labels (topic list v1, drafts/2026-10-21_2.3_topic_list_v1.md) ----------
 TAXONOMY = [
     ("Politics & Government", ["Elections & voter rolls", "Parties & leaders", "Legislatures & appointments",
-                               "Protests & movements", "Government schemes & welfare", "Judiciary"]),
+                               "Protests & movements", "Government schemes & welfare", "Judiciary",
+                               "Regulators & governance"]),
     ("Economy", ["Growth, jobs & data", "Inflation & monetary policy", "Taxes & budget", "Trade & tariffs",
                  "Industry & manufacturing policy", "Agriculture & food"]),
     ("Markets", ["Stocks & IPOs", "Currency & bonds", "Commodities & gold", "Mutual funds & trading"]),
     ("Companies & Business", ["Results & outlook", "Deals & investments", "Startups & funding",
-                              "Products & launches", "People, governance & disputes"]),
+                              "Products & launches", "People, governance & disputes", "Retail & e-commerce"]),
     ("Banking & Finance", ["Banks & lenders", "Insurance", "Payments & fintech", "Personal finance"]),
-    ("Technology", ["AI", "Chips & electronics", "Telecom & digital policy", "Consumer tech & apps"]),
+    ("Technology", ["AI", "Chips & electronics", "Telecom & digital policy", "Consumer tech & apps",
+                    "Data, privacy & cyber law"]),
     ("Energy", ["Oil & gas", "Power & coal", "Renewables"]),
     ("Environment & Climate", ["Climate change", "Pollution", "Wildlife & conservation",
                                "Weather & natural disasters"]),
@@ -99,7 +133,7 @@ TAXONOMY = [
     ("Science", ["Space", "Research & discoveries"]),
     ("Sports", ["Cricket", "Football & hockey", "Other sports", "Sports administration"]),
     ("Culture & Lifestyle", ["Film, TV & streaming", "Books & arts", "Heritage & religion", "Travel & food",
-                             "Life & society"]),
+                             "Life & society", "Social issues"]),
 ]
 SEP = " › "
 PARENT_OF = {child: parent for parent, children in TAXONOMY for child in children}
@@ -107,8 +141,11 @@ TOPIC_ENUM = [parent + SEP + child for parent, children in TAXONOMY for child in
 NO_TOPIC = "none"
 KINDS = ["news", "analysis", "opinion", "interview", "brief", "data", "sponsored", "notice", "other"]
 FORUMS = ["none", "Supreme Court", "High Court", "lower court", "tribunal", "regulator or agency"]
-ENTITY_TYPES = ["company", "person", "organisation", "place"]
+ENTITY_TYPES = ["company", "person", "organisation", "place", "scheme or law", "product or work", "event", "other"]
 TEXT_CHECKS = ["ok", "two_stories", "fragment", "garbled"]
+EVENTS = ["deal or investment", "launch", "results or data release", "policy or regulation",
+          "election or appointment", "conflict or security", "crime", "accident or disaster", "protest",
+          "speech or statement", "business decision", "feature", "other"]
 assert len(PARENT_OF) == sum(len(c) for _, c in TAXONOMY), "child names must be unique across parents"
 
 # Printed cues that mark paid content. A free local rule, kept separate from the model's `kind`
@@ -116,7 +153,8 @@ assert len(PARENT_OF) == sum(len(c) for _, c in TAXONOMY), "child names must be 
 # alone appears in news ("state-sponsored").
 SPONSORED_CUES = ["promotional feature", "advertorial", "in association with", "marketing initiative",
                   "consumer connect initiative", "impact feature", "brand connect", "partner content",
-                  "sponsored content", "sponsored feature"]
+                  "sponsored content", "sponsored feature", "marketing feature",
+                  "treat it as an advertisement"]
 CUE_RE = re.compile("|".join(re.escape(c) for c in SPONSORED_CUES), re.IGNORECASE)
 
 TOPIC_LINES = "\n".join(f"  {parent}: " + "; ".join(children) for parent, children in TAXONOMY)
@@ -126,11 +164,23 @@ Read the WHOLE article, then call the tool tag_article exactly once.
 Judge from the body text. Headlines are sometimes a section label ("QUICKLY.", "THE GIST"), a pull quote
 or a fragment; when the headline is empty or says little, the body decides.
 
-topic: the ONE subject the article is about, as "Parent › Child" from this list (pick the child; the parent comes with it):
+Every article gets labels on two separate axes:
+  topic = the FIELD the article is about (AI, telecom, oil & gas, cricket, taxes ...);
+  event = WHAT HAPPENED (a deal, a launch, a war, a crime, a protest ...).
+Keep the axes apart: "Harness buys Augment Code's AI assets" -> topic AI, event deal or investment.
+"Trump says Russia and Ukraine agreed an energy ceasefire" -> topic Oil & gas, event conflict or security.
+
+topic: the ONE main field, as "Parent › Child" from this list (pick the child; the parent comes with it):
 {TOPIC_LINES}
-  Use "none" only for kind notice or sponsored (classifieds, matrimonial ads, display ads, tenders,
-  public notices, obituaries, paid content).
-topics_more: 0 to 2 further children from the same list, only if clearly central (never repeat topic). Usually 0 or 1.
+  Use "none" only for classifieds, matrimonial ads, display ads, tenders, public notices, obituaries and
+  paid content. A statutory financial-results statement (balance sheet, revenue account published by a company)
+  is kind notice but KEEPS its topic (usually Companies & Business › Results & outlook).
+  When a story fits a field AND an event-type child (Deals & investments, Products & launches, Fraud, corruption &
+  cybercrime, Violent crime, Accidents & tragedies, Wars & conflicts, Protests & movements), the FIELD is the main
+  topic and the event-type child goes in topics_more. Use an event-type child as the main topic only when the story
+  has no field beyond the event itself (a plain murder report, a road crash, a company deal with no wider field).
+topics_more: 0 to 2 further children, only if the article is substantially about them (never repeat topic).
+  Leave it empty rather than add a loosely related field.
 
 Rules for overlapping subjects (apply them; they override your own preference):
 - Courts, tribunals and regulators are institutions, not subjects. Topic = what the ruling or action is about;
@@ -150,20 +200,82 @@ Rules for overlapping subjects (apply them; they override your own preference):
 - Personal-finance advice (deposits, pensions, insurance cover, which fund to buy) -> Banking & Finance › Personal finance.
 - Fund-raising by a private equity or venture fund -> Companies & Business › Startups & funding.
 - Prizes go to the subject of the prize (a physics Nobel -> Science › Research & discoveries).
+- File by subject, not by the country, actor or technology involved:
+  US tariffs on India, trade deals, export markets -> Economy › Trade & tariffs (not World › United States);
+  UPI, payment charges, MDR, wallets -> Banking & Finance › Payments & fintech (not Technology), also when a court
+  or regulator acts on them; textile, factory or industrial facilities and standards -> Economy › Industry &
+  manufacturing policy (not Agriculture, even when the raw material is a crop).
+- Municipal bodies, civic services, city budgets and governance -> Infrastructure & Transport › Urban
+  infrastructure & traffic.
+- Conflict or crime? Violence by armed groups in a conflict region (Manipur, J&K, the North-East, Maoist areas),
+  or violence with a clear political or structural angle, is not a one-off crime: topic Defence & National
+  Security › Terrorism & insurgency, event conflict or security. The same violence with no such context (two
+  people kill each other in Delhi) is topic Crime & Public Safety › Violent crime, event crime.
+- Courts or police acting on a protest (curbs, detentions, contempt over protest restrictions) ->
+  Politics & Government › Protests & movements (court in forum).
+- The justice system itself (legal aid, undertrial prisoners, case backlog, prisons, judges) ->
+  Politics & Government › Judiciary, not Crime & Public Safety › Policing.
+- When a crime leads to a protest and the protest is what the story reports, the protest is the subject.
+- Data protection, privacy, cyber laws and IT rules -> Technology › Data, privacy & cyber law.
+- What a regulator or government agency itself does as an institution (its board meetings, powers, cooperation
+  with foreign regulators, enforcement drives) -> Politics & Government › Regulators & governance, when no
+  sector-specific child fits better (SEBI rules for brokers -> Markets; RBI rate decision -> Economy).
+- Online and offline retail, e-commerce platforms, festive sales -> Companies & Business › Retail & e-commerce.
+- Poverty, homelessness, addiction, caste, gender and other social conditions told through people's lives ->
+  Culture & Lifestyle › Social issues (welfare schemes themselves stay Government schemes & welfare).
+- Growth, jobs & data includes layoffs, hiring and job numbers (a company's layoffs too).
+- Industry & manufacturing policy = factories, production and industrial policy; not finance, payments or
+  services sectors.
+
+Examples at the Crime boundary (follow these):
+- "Five killed as armed groups clash in Manipur's hill districts"
+  -> topic Defence & National Security › Terrorism & insurgency, event conflict or security.
+     (armed groups in a conflict region; not a one-off crime)
+- "SC sees prima facie contempt in Metro curbs imposed during farmers' protest"
+  -> topic Politics & Government › Protests & movements, event protest, forum Supreme Court.
+     (the court acts on a protest; the protest is the subject)
+- "Legal aid fails undertrials who wait years for a hearing"
+  -> topic Politics & Government › Judiciary, event feature.
+     (the justice system itself; not policing)
+- "Villagers block highway for hours demanding arrest over woman's death"
+  -> topic Politics & Government › Protests & movements, event protest, events_more crime.
+     (the story is the protest; the death is its cause)
+
+event: the ONE main thing that happened, from: deal or investment (acquisitions, stakes, fund-raising) | launch
+  (products, services, exports starting) | results or data release (company results, GDP, CPI, trade figures) |
+  policy or regulation (a scheme, rule, tax change, court or regulator order) | election or appointment |
+  conflict or security (wars, ceasefires, clashes, attacks, insurgency, military action) | crime (murder, fraud,
+  scams, arrests) | accident or disaster (crashes, collapses, floods, fires) | protest (strikes, blockades,
+  agitations) | speech or statement | business decision (a company's own decision or plan that is not a deal,
+  launch or result: layoffs, hiring, restructuring, pricing, strategy, a stated plan) | feature (history,
+  profile, explainer, column: no news event) | other.
+  - A court ruling or order -> policy or regulation. An agreement or cooperation between institutions ->
+    policy or regulation. A sports match result -> results or data release.
+  - speech or statement only when the speech itself is the news (a leader's address, an announcement);
+    never just because someone is quoted.
+  - feature is used alone: no events_more with feature.
+events_more: 0 or 1 further event, only if a second thing also happened in this story (never repeat event).
+  Usually empty.
 
 kind: news (straight report) | analysis (feature, explainer) | opinion (editorial, column, letter) |
-  interview | brief (under ~80 words, one item) | data (scores, results, market wrap, tables, listings) |
+  interview | brief (under ~80 words, one item) | data (tables, scores, market wraps, listings, and reports
+  of a figure release such as GDP, CPI or trade numbers) | analysis also covers history and anniversary features |
   sponsored (paid content: advertorial, "marketing initiative", "promotional feature", "in association with",
-  "consumer connect initiative", supplement pages written for an advertiser) |
-  notice (obituary, tender, public notice, classified or matrimonial ad, display ad) | other.
+  "consumer connect initiative", "marketing feature", supplement pages written for an advertiser) |
+  notice (obituary, tender, public notice, classified or matrimonial ad, display ad, statutory results
+  statement) | other.
   Every sponsored item must be caught: if printed cues or the tone show the text was paid for, use sponsored.
 forum: the institution that decided or acted in the article: Supreme Court | High Court | lower court (district,
   sessions, magistrate, family courts) | tribunal (NCLT, NCLAT, NGT, DGTR, CAT, consumer commissions) |
   regulator or agency (SEBI, RBI acting as regulator, CCI, TRAI, DGCA, FSSAI, Election Commission, ED, CBI, NIA, police
   investigations led by an agency) | none.
-entities: the important named companies, people, organisations (incl. government bodies, regulators) and places
-  that the article is about. name = as printed; canonical = the full standard name
-  (e.g. "RBI" -> "Reserve Bank of India", "Modi" -> "Narendra Modi"). Do not list the newspaper itself or reporters.
+entities: the important named things the article is about. name = as printed; canonical = the full standard name
+  (e.g. "RBI" -> "Reserve Bank of India", "Modi" -> "Narendra Modi"). type, one of:
+  company | person | organisation (incl. government bodies, regulators, parties, teams) | place |
+  scheme or law (government schemes, acts, rules, norms: PM-KUSUM, GST, BS-VI) |
+  product or work (products, vehicles, phones, medicines, apps, films, shows, books) |
+  event (conferences, tournaments, operations, summits) | other.
+  Never list the newspaper that printed the article, or its reporters.
 summary: one neutral sentence, at most 30 words, in your own words.
 text_check: ok | two_stories (text clearly mixes two unrelated stories) | fragment (starts or ends mid-story,
   or too little text to judge) | garbled (unreadable text)."""
@@ -177,6 +289,8 @@ TOOL = {
         "properties": {
             "topic": {"type": "string", "enum": TOPIC_ENUM + [NO_TOPIC]},
             "topics_more": {"type": "array", "items": {"type": "string", "enum": TOPIC_ENUM}},
+            "event": {"type": "string", "enum": EVENTS},
+            "events_more": {"type": "array", "items": {"type": "string", "enum": EVENTS}},
             "kind": {"type": "string", "enum": KINDS},
             "forum": {"type": "string", "enum": FORUMS},
             "entities": {"type": "array", "items": {
@@ -189,7 +303,8 @@ TOOL = {
             "text_check": {"type": "string", "enum": TEXT_CHECKS},
         },
         # all required: no optional parameters (API limit 24) and a fixed answer order
-        "required": ["topic", "topics_more", "kind", "forum", "entities", "summary", "text_check"],
+        "required": ["topic", "topics_more", "event", "events_more", "kind", "forum", "entities", "summary",
+                     "text_check"],
         "additionalProperties": False,
     },
 }
@@ -199,7 +314,7 @@ TOOL = {
 def open_run(args, write=True):
     """Open news.db, bring the run up to date with its JSON folder, return the connection.
     Writing prompt-v1 records needs schema v2."""
-    con = store.open_v2() if write else store.open_v1()
+    con = store.open_v3() if write else store.open_v1()
     if args.run not in store.RUNS:
         sys.exit(f"Unknown run '{args.run}'. Known: {sorted(store.RUNS)}")
     if not args.skip_import and store.RUNS[args.run][0] is not None:
@@ -275,6 +390,8 @@ def validate(inp):
         return None, f"topic not on the list: {topic_path!r}"
     if inp.get("kind") not in KINDS:
         return None, f"kind not on the list: {inp.get('kind')!r}"
+    if inp.get("event") not in EVENTS:
+        return None, f"event not on the list: {inp.get('event')!r}"
     if inp.get("forum") not in FORUMS:
         return None, f"forum not on the list: {inp.get('forum')!r}"
     topic = None if topic_path == NO_TOPIC else child_of(topic_path)
@@ -284,6 +401,9 @@ def validate(inp):
         if c and c != topic and c not in more:
             more.append(c)
     more = more[:2]                                       # the API cannot enforce maxItems; trimmed here
+    ev_more = []
+    if inp["event"] != "feature":                         # feature is used alone
+        ev_more = [e for e in dict.fromkeys(inp.get("events_more") or []) if e in EVENTS and e != inp["event"]][:1]
     ents, seen = [], set()
     for e in inp.get("entities") or []:
         if not isinstance(e, dict):
@@ -296,7 +416,8 @@ def validate(inp):
         seen.add((canon.lower(), typ))
         ents.append((name, typ, canon))
     tc = inp.get("text_check") if inp.get("text_check") in TEXT_CHECKS else "ok"
-    return {"topic": topic, "topic_parent": PARENT_OF.get(topic), "topics_more": more, "kind": inp["kind"],
+    return {"topic": topic, "topic_parent": PARENT_OF.get(topic), "topics_more": more, "event": inp["event"],
+            "events_more": ev_more, "kind": inp["kind"],
             "forum": None if inp["forum"] == "none" else inp["forum"], "entities": ents,
             "summary": str(inp.get("summary") or "").strip()[:400], "text_check": tc}, None
 
@@ -307,8 +428,11 @@ def save_tag(con, a, model, tag, usage, via):
         "topics_more": json.dumps(tag["topics_more"]), "kind": tag["kind"], "summary": tag["summary"],
         "text_check": tag["text_check"], "tagged_at": dt.datetime.now().isoformat(timespec="seconds"),
         "in_tokens": usage[0], "out_tokens": usage[1], "via": via, "topic_parent": tag["topic_parent"],
-        "forum": tag["forum"], "sponsored_cue": sponsored_cue(a)})
+        "forum": tag["forum"], "sponsored_cue": sponsored_cue(a), "event": tag["event"],
+        "events_more": json.dumps(tag["events_more"])})
     h = a["text_hash"]
+    own = {(a.get("publisher") or "").lower()}            # never list the newspaper that printed the text
+    tag["entities"] = [e for e in tag["entities"] if e[0].lower() not in own and e[2].lower() not in own]
     con.execute("DELETE FROM entities WHERE text_hash=? AND model=? AND prompt_version=?", (h, model, PROMPT_VERSION))
     con.executemany("INSERT INTO entities VALUES (?,?,?,?,?,?)",
                     [(h, model, PROMPT_VERSION) + e for e in tag["entities"]])
@@ -385,9 +509,11 @@ def cmd_show_prompt(args, model):
     print(f"\n~{prompt_tokens(model)} tokens for {model} (estimate)")
 
 
-def pick_sample(texts, n, seed):
-    """Seeded, stratified: the same n/papers texts per paper every time (min 20 words)."""
+def pick_sample(texts, n, seed, exclude=()):
+    """Seeded, stratified: the same n/papers texts per paper every time (min 20 words).
+    exclude: text hashes never to pick (texts already audited)."""
     rng = random.Random(seed)
+    texts = [a for a in texts if a["text_hash"] not in set(exclude)]
     pubs = sorted({a["publisher"] for a in texts})
     per = max(1, n // max(1, len(pubs)))
     out = []
@@ -461,9 +587,20 @@ def tag_sync(con, texts, model, cap, workers, label):
     print(f"tagged {ok}, failed/rejected {bad} (saved in table rejects; re-run retries them), cost ${spent:.4f}")
 
 
+SEED_USED = 19
+
+
 def cmd_sample(args, model):
+    global SEED_USED
+    SEED_USED = args.seed
     con = open_run(args)
-    sample = pick_sample(load_texts(con, args.run), args.n, args.seed)
+    excl = set()
+    for f in args.exclude or []:
+        with open(f, encoding="utf-8") as fh:
+            excl |= {json.loads(line)["text_hash"] for line in fh if line.strip()}
+    if excl:
+        print(f"excluding {len(excl)} texts listed in {len(args.exclude)} audit file(s)")
+    sample = pick_sample(load_texts(con, args.run), args.n, args.seed, excl)
     left = todo(con, sample, model)
     print(f"sample: {len(sample)} texts from run {args.run} (seed {args.seed}); to tag now: {len(left)} with "
           f"{model} {PROMPT_VERSION}")
@@ -487,21 +624,23 @@ def cmd_run(args, model):
 def write_audit(con, sample, model):
     Path("review/tag_audit").mkdir(parents=True, exist_ok=True)
     short = [k for k, v in MODELS.items() if v == model][0]
-    path = Path(f"review/tag_audit/audit_{len(sample)}_{short}_{PROMPT_VERSION}.jsonl")
+    path = Path(f"review/tag_audit/audit_{len(sample)}_{short}_{PROMPT_VERSION}"
+                f"{'_seed' + str(SEED_USED) if SEED_USED != 19 else ''}.jsonl")
     with open(path, "w", encoding="utf-8") as f:
         for i, a in enumerate(sorted(sample, key=lambda a: a["key"]), 1):
             row = con.execute("SELECT topic, topic_parent, topics_more, kind, forum, sponsored_cue, summary, "
-                              "text_check FROM tags WHERE text_hash=? AND model=? AND prompt_version=?",
+                              "text_check, event, events_more FROM tags WHERE text_hash=? AND model=? AND prompt_version=?",
                               (a["text_hash"], model, PROMPT_VERSION)).fetchone()
             ents = con.execute("SELECT name, type, canonical FROM entities WHERE text_hash=? AND model=? "
                                "AND prompt_version=?", (a["text_hash"], model, PROMPT_VERSION)).fetchall()
             r = dict(zip(["topic", "topic_parent", "topics_more", "kind", "forum", "sponsored_cue", "summary",
-                          "text_check"], row)) if row else {}
+                          "text_check", "event", "events_more"], row)) if row else {}
             f.write(json.dumps({
                 "n": f"A{i}", "key": a["key"], "text_hash": a["text_hash"], "words": a["words"],
                 "headline": a["headline"], "body": a["body"][:1500],
                 "topic": r.get("topic"), "topic_parent": r.get("topic_parent"),
-                "topics_more": json.loads(r["topics_more"]) if row else None, "kind": r.get("kind"),
+                "topics_more": json.loads(r["topics_more"]) if row else None, "event": r.get("event"),
+                "events_more": json.loads(r["events_more"] or "[]") if row else None, "kind": r.get("kind"),
                 "forum": r.get("forum"), "sponsored_cue": r.get("sponsored_cue"), "summary": r.get("summary"),
                 "text_check": r.get("text_check"),
                 "entities": [{"name": n, "type": t, "canonical": c} for n, t, c in ents],
@@ -557,7 +696,7 @@ def cmd_status(args, model):
 
 
 def cmd_collect(args, model):
-    con = store.open_v2()
+    con = store.open_v3()
     rows = con.execute("SELECT batch_id, model, prompt_version FROM batches WHERE status != 'collected'").fetchall()
     if not rows:
         print("No open batch to collect.")
@@ -580,6 +719,7 @@ def cmd_collect(args, model):
         for h, head, body in con.execute("SELECT text_hash, headline, body FROM texts"):
             texts[h] = {"text_hash": h, "headline": head, "body": body}
         decks = dict(con.execute("SELECT text_hash, MIN(deck) FROM placements GROUP BY text_hash"))
+        pubs = dict(con.execute("SELECT text_hash, MIN(publisher) FROM placements GROUP BY text_hash"))
         ok = bad = 0
         tin = tout = 0
         con.execute("BEGIN")
@@ -602,7 +742,8 @@ def cmd_collect(args, model):
                 bad += 1
                 save_reject(con, h, bmodel, why, getattr(msg, "stop_reason", None), inp, "batch")
                 continue
-            a = dict(texts.get(h, {"text_hash": h, "headline": "", "body": ""}), deck=decks.get(h) or "")
+            a = dict(texts.get(h, {"text_hash": h, "headline": "", "body": ""}), deck=decks.get(h) or "",
+                     publisher=pubs.get(h) or "")
             save_tag(con, a, bmodel, tag, (msg.usage.input_tokens, msg.usage.output_tokens), "batch")
             ok += 1
         con.execute("UPDATE batches SET status='collected', collected_at=? WHERE batch_id=?",
@@ -634,6 +775,7 @@ def cmd_stats(args, model):
         ("children used", f"SELECT COUNT(DISTINCT t.topic) {J}"),
         ("by parent", f"SELECT t.topic_parent, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
         ("by child (top 25)", f"SELECT t.topic, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC LIMIT 25"),
+        ("by event", f"SELECT t.event, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
         ("by kind", f"SELECT t.kind, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
         ("by forum", f"SELECT t.forum, COUNT(*) {J} GROUP BY 1 ORDER BY 2 DESC"),
         ("sponsored: cue rule vs model", f"SELECT t.sponsored_cue != '', t.kind = 'sponsored', COUNT(*) {J} "
@@ -659,6 +801,7 @@ def main():
     ap.add_argument("--cap", type=float, default=25.0, help="max estimated dollars per run/submit")
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--seed", type=int, default=19)
+    ap.add_argument("--exclude", nargs="*", help="audit .jsonl files whose texts the sample must avoid")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--skip-import", action="store_true", help="do not import new/changed papers first")
     args = ap.parse_args()

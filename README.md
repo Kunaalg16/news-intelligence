@@ -156,3 +156,6 @@ python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt
 - **Fail closed:** an invalid model answer is rejected and flagged, never guessed.
 - **Measure, don't eyeball:** every change is A/B tested on labelled pages; the final test is run once on
   pages that were never used for tuning.
+
+## Evaluation rule (pass lines)
+Pass lines are pre-registered. They are re-set exactly once, after the digest has run 7 consecutive days, and only from the measured downstream cost of each label's errors, never because a score came in below its line.
