@@ -11,3 +11,4 @@ _old/
 .DS_Store
 
 needs_ocr/
+.venv-embed/
