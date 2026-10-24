@@ -1,5 +1,5 @@
 """
-p2_embed.py -- 2.4 Embed: one vector per article text, per model and input variant (v0.1, 24 Oct 2026)
+p2_embed.py -- 2.4 Embed: one vector per article text, per model and input variant (v0.2, 24 Oct 2026: + Voyage pacing)
 
 WHAT IT DOES
   Reads article texts from data/news.db (READ-ONLY; never changes it) and writes vectors to
@@ -24,6 +24,8 @@ HOW TO RUN (always from ~/news-intel, with the EMBEDDING environment)
   .venv-embed/bin/python src/p2_embed.py run --model minilm --variant V1 [--limit 50]
   .venv-embed/bin/python src/p2_embed.py check                         counts per model x variant, norms, NaNs
   Options: --run exam-v1 · --batch 32 · --limit N (only the first N missing texts; for trials)
+  Voyage pacing (v0.2): --tpm T --rpm R  keeps every rolling minute under T tokens and R requests
+    (measure T and R with src/p2_dev_voyage_limits.py); batches are packed to <= 90% of T.
 
 SAFETY
   news.db is opened with SQLite's read-only mode (file:...?mode=ro): a write would raise an error.
@@ -181,6 +183,52 @@ def get_encoder(model):
     return voyage_encoder(spec) if spec["kind"] == "api" else local_encoder(spec)
 
 
+# ---------- pacing (API only) ----------
+def est_tokens(text):
+    """Cautious token estimate for planning (Voyage measured ~1 token per word on our text; 1.3x + 8 margin)."""
+    return int(len(text.split()) * 1.3) + 8
+
+
+def make_batches(todo, inputs, size, tpm):
+    """Consecutive batches of at most `size` texts; with --tpm, also at most 90% of the per-minute token budget."""
+    out, cur, cur_tok = [], [], 0
+    cap = int(tpm * 0.9) if tpm else None
+    for h in todo:
+        t = est_tokens(inputs[h])
+        if cap and t > cap:
+            sys.exit(f"one text needs about {t} tokens, more than 90% of --tpm {tpm}; raise --tpm or use a shorter variant")
+        if cur and (len(cur) >= size or (cap and cur_tok + t > cap)):
+            out.append(cur)
+            cur, cur_tok = [], 0
+        cur.append(h)
+        cur_tok += t
+    if cur:
+        out.append(cur)
+    return out
+
+
+class Throttle:
+    """Sliding 60-second window: before each request, wait until it fits under both limits.
+    Concept: client-side rate limiting (a leaky/token bucket kept by the caller)."""
+    def __init__(self, tpm, rpm, window=None):
+        self.tpm, self.rpm, self.window = tpm, rpm, window or float(os.environ.get("NI_WINDOW", 61))
+        self.sent = []                                     # (time, tokens) of requests in the window
+
+    def wait(self, tokens):
+        while True:
+            cutoff = time.time() - self.window
+            self.sent = [(t, k) for t, k in self.sent if t > cutoff]
+            used = sum(k for _, k in self.sent)
+            ok_t = not self.tpm or used + tokens <= self.tpm
+            ok_r = not self.rpm or len(self.sent) < self.rpm
+            if ok_t and ok_r:
+                return
+            time.sleep(max(0.2, self.sent[0][0] - cutoff + 0.05) if self.sent else 0.2)
+
+    def record(self, tokens):
+        self.sent.append((time.time(), tokens))
+
+
 # ---------- commands ----------
 def missing(vec, texts, model, variant):
     have = {h for (h,) in vec.execute("SELECT text_hash FROM vectors WHERE model=? AND variant=?", (model, variant))}
@@ -214,14 +262,24 @@ def cmd_run(args):
         return
     inputs = {h: build_input(args.variant, *texts[h]) for h in todo}
     todo.sort(key=lambda h: len(inputs[h]))                # similar lengths together: less padding, faster
+    batches = make_batches(todo, inputs, args.batch, args.tpm)
+    pace = Throttle(args.tpm, args.rpm) if (args.tpm or args.rpm) else None
+    if pace:
+        est = sum(est_tokens(inputs[h]) for h in todo)
+        mins = max(est / args.tpm if args.tpm else 0, len(batches) / args.rpm if args.rpm else 0)
+        print(f"paced: {len(batches)} requests, about {est} tokens -> at least {mins:.0f} min "
+              f"(limits {args.tpm or '-'} tokens/min, {args.rpm or '-'} requests/min)")
     enc = get_encoder(args.model)
     t0, done, tokens = time.time(), 0, 0
     try:
-        for i in range(0, len(todo), args.batch):
-            chunk = todo[i:i + args.batch]
+        for i, chunk in enumerate(batches):
+            if pace:
+                pace.wait(sum(est_tokens(inputs[h]) for h in chunk))
             arr, tok = enc([inputs[h] for h in chunk])
+            if pace:
+                pace.record(tok or sum(est_tokens(inputs[h]) for h in chunk))
             if arr.shape[0] != len(chunk) or not np.isfinite(arr).all():
-                sys.exit(f"bad output for batch {i // args.batch}: shape {arr.shape}; stopped, nothing of it saved")
+                sys.exit(f"bad output for batch {i}: shape {arr.shape}; stopped, nothing of it saved")
             arr = arr / np.linalg.norm(arr, axis=1, keepdims=True)
             t = now()
             vec.executemany("INSERT OR REPLACE INTO vectors VALUES (?,?,?,?,?,?,?)",
@@ -230,7 +288,7 @@ def cmd_run(args):
             vec.commit()
             done += len(chunk)
             tokens += tok
-            if done % (args.batch * 20) < args.batch or done == len(todo):
+            if (i + 1) % (5 if pace else 20) == 0 or done == len(todo):
                 print(f"  {done}/{len(todo)}  {time.time() - t0:.0f}s")
     finally:
         vec.execute("INSERT INTO log VALUES (?,?,?,?,?,?,?,?)",
@@ -264,6 +322,8 @@ def main():
     ap.add_argument("--run", default="exam-v1")
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--tpm", type=int, default=0, help="API pacing: tokens per minute (from p2_dev_voyage_limits.py)")
+    ap.add_argument("--rpm", type=int, default=0, help="API pacing: requests per minute")
     args = ap.parse_args()
     if args.command == "run" and not (args.model and args.variant):
         ap.error("run needs --model and --variant")
