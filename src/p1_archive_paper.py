@@ -42,6 +42,12 @@ Changed 21 Oct 2026 (three fixes found while filing 16-19 Oct papers):
     first call is the same as before); one extra call only on a "no".
   - C. Filename dates also accept the separators "‹" and "›"
     ("TH ● Delhi ● 19‹10‹2026"), so the filename gets its vote again.
+
+Changed 23 Oct 2026 (found while filing 19-22 Oct papers):
+  - "english" is a filler word: Business Standard's main Delhi edition is named
+    "BS English-Delhi ..." / "Business Standard English_Delhi_...".
+  - Hyderabad is a known edition: filed with a suffix, e.g. 2026-10-19_Business Line_Hyderabad.pdf
+    (used when the Delhi edition is missing; the suffix keeps the source visible).
 """
 
 import logging
@@ -109,10 +115,10 @@ KNOWN_PUBLISHERS = {
 }
 
 # Non-main editions get a suffix in the archive name. No suffix = main (Delhi) edition.
-EDITIONS = {"international": "International", "school": "School"}
+EDITIONS = {"international": "International", "school": "School", "hyderabad": "Hyderabad"}   # 23 Oct: + Hyderabad
 # 21 Oct (fix A): words allowed in a filename besides publisher words and editions. Anything else -> needs_review/.
 # Built from the 64 filenames archived so far (logs/archive.log). Add a word here only after checking a real file.
-FILLER_WORDS = {"delhi", "new", "hd", "editable", "full", "edition", "tr"}
+FILLER_WORDS = {"delhi", "new", "hd", "editable", "full", "edition", "tr", "english"}   # 23 Oct: + english (BS)
 PUBLISHER_WORDS = {w for key in KNOWN_PUBLISHERS for w in key.split()}
 MIN_FRONT_PAGE_WORDS = 200   # 21 Oct (fix B): the retry page must have at least this many words
 
