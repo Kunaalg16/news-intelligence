@@ -28,6 +28,7 @@ HOW TO RUN (always from ~/news-intel, with the EMBEDDING environment)
   --pairs (v0.3): only texts that appear in a pair of data/pairs/pairs_*.jsonl (the pair-test texts);
     used for the voyage-4 check, which needs vectors for the labelled pairs only, not the whole archive.
   Model version (v0.3): a model with a "revision" in MODELS loads exactly that commit of its files.
+    qwen3-0.6b (the 2.4 choice, 25 Oct) is pinned to 97b0c61..., the files behind all its vectors.
     Until a revision is filled in, run local models with HF_HUB_OFFLINE=1 so the cached files are used.
   Voyage pacing (v0.2): --tpm T --rpm R  keeps every rolling minute under T tokens and R requests
     (measure T and R with src/p2_dev_voyage_limits.py); batches are packed to <= 90% of T.
@@ -55,7 +56,8 @@ FAKE = os.environ.get("NI_EMBED_FAKE") == "1"          # rehearsal only: determi
 MODELS = {
     "minilm":     {"kind": "local", "name": "sentence-transformers/all-MiniLM-L6-v2", "revision": None},
     "bge-m3":     {"kind": "local", "name": "BAAI/bge-m3", "revision": None},
-    "qwen3-0.6b": {"kind": "local", "name": "Qwen/Qwen3-Embedding-0.6B", "revision": None},
+    "qwen3-0.6b": {"kind": "local", "name": "Qwen/Qwen3-Embedding-0.6B",
+                   "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"},   # pinned 25 Oct (2.4 choice)
     "voyage-4":   {"kind": "api",   "name": "voyage-4", "revision": None},
 }
 VARIANTS = ["V0", "V1", "V2", "V1i"]
