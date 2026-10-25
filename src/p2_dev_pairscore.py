@@ -1,5 +1,6 @@
 """
-p2_dev_pairscore.py -- 2.4 pair test, step 2: score every model x variant on the labelled pairs (v0.1, 25 Oct 2026)
+p2_dev_pairscore.py -- 2.4 pair test, step 2: score every model x variant on the labelled pairs
+  (v0.1, 25 Oct 2026 · v0.2, 25 Oct 2026: step 4 M3 route also needs a bootstrap range clear of zero)
 
 WHAT IT DOES
   Reads the labelled pairs and the vectors, and runs the pre-registered protocol
@@ -10,6 +11,8 @@ WHAT IT DOES
     2  E2 per model    V1 vs V2 on M2 (paired bootstrap); tie -> V1; V0 / V1i reported, chosen only if clearly best
     3  local pick      smallest model whose M2 is tied with the best (range includes 0 or gap < 1 point)
     4  API check       voyage-4 vs the local pick, only if voyage vectors cover every pair (else: OPEN, parked)
+                       v0.2 amendment (decided 25 Oct, after the local results, BEFORE any voyage result):
+                       the M3 route (>= 5 points) also needs its paired-bootstrap range to exclude zero.
     6  report          M4 judge band per day, M5 follow-ups, V0 and V1i columns
   It prints a decision proposal; Kunaal decides; the decision is written into 04_DECISIONS.md by hand.
 
@@ -382,9 +385,10 @@ def main():
     if API in chosen:
         lp = (pick, chosen[pick]); vp = (API, chosen[API])
         r1, r2 = B(vp, lp, "M1"), B(vp, lp, "M2")
-        m3d = ((M[vp]["M3"] or 0) - (M[lp]["M3"] or 0)) * 100
-        win = any(r[0] is not None and r[0] >= 2 and not tie(r) for r in (r1, r2)) or m3d >= 5
-        print(f"  voyage - local  M1 {fr(r1)} · M2 {fr(r2)} · M3 {m3d:+.1f} points -> "
+        r3 = B(vp, lp, "M3")
+        win = any(r[0] is not None and r[0] >= 2 and not tie(r) for r in (r1, r2)) \
+            or (r3[0] is not None and r3[0] >= 5 and not tie(r3))  # v0.2: M3 route needs range clear of 0
+        print(f"  voyage - local  M1 {fr(r1)} · M2 {fr(r2)} · M3 {fr(r3)} -> "
               + ("VOYAGE WINS: go to step 5 (escalation)" if win else "local pick is final"))
     else:
         print("  OPEN  no voyage-4 vectors for every pair (Voyage parked 25 Oct). Scoring without it is a deviation:"

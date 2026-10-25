@@ -1,5 +1,6 @@
 """
-p2_embed.py -- 2.4 Embed: one vector per article text, per model and input variant (v0.2, 24 Oct 2026: + Voyage pacing)
+p2_embed.py -- 2.4 Embed: one vector per article text, per model and input variant
+  (v0.2, 24 Oct 2026: + Voyage pacing · v0.3, 25 Oct 2026: + --pairs, optional revision pin)
 
 WHAT IT DOES
   Reads article texts from data/news.db (READ-ONLY; never changes it) and writes vectors to
@@ -24,6 +25,10 @@ HOW TO RUN (always from ~/news-intel, with the EMBEDDING environment)
   .venv-embed/bin/python src/p2_embed.py run --model minilm --variant V1 [--limit 50]
   .venv-embed/bin/python src/p2_embed.py check                         counts per model x variant, norms, NaNs
   Options: --run exam-v1 · --batch 32 · --limit N (only the first N missing texts; for trials)
+  --pairs (v0.3): only texts that appear in a pair of data/pairs/pairs_*.jsonl (the pair-test texts);
+    used for the voyage-4 check, which needs vectors for the labelled pairs only, not the whole archive.
+  Model version (v0.3): a model with a "revision" in MODELS loads exactly that commit of its files.
+    Until a revision is filled in, run local models with HF_HUB_OFFLINE=1 so the cached files are used.
   Voyage pacing (v0.2): --tpm T --rpm R  keeps every rolling minute under T tokens and R requests
     (measure T and R with src/p2_dev_voyage_limits.py); batches are packed to <= 90% of T.
 
@@ -41,6 +46,7 @@ from pathlib import Path
 import numpy as np
 
 NEWS_DB = Path("data") / "news.db"
+PAIRS_DIR = Path("data") / "pairs"
 VEC_DB = Path("data") / "vectors.db"
 ENV_FILE = Path.home() / ".config" / "news-intel" / ".env"
 VOYAGE_URL = os.environ.get("NI_VOYAGE_URL", "https://ai.mongodb.com/v1/embeddings")  # override only for tests
@@ -230,6 +236,23 @@ class Throttle:
 
 
 # ---------- commands ----------
+def pair_texts():
+    """Text hashes in every pair file (v0.3). Lines without "a"/"b" (the header line) are skipped."""
+    files = sorted(PAIRS_DIR.glob("pairs_*.jsonl"))
+    if not files:
+        sys.exit(f"no pairs_*.jsonl in {PAIRS_DIR}")
+    out = set()
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(o, dict) and "a" in o and "b" in o:
+                out.update((o["a"], o["b"]))
+    return out, [f.name for f in files]
+
+
 def missing(vec, texts, model, variant):
     have = {h for (h,) in vec.execute("SELECT text_hash FROM vectors WHERE model=? AND variant=?", (model, variant))}
     return [h for h in texts if h not in have]
@@ -255,6 +278,11 @@ def cmd_run(args):
     texts = load_texts(open_news(), args.run)
     vec = open_vectors()
     todo = missing(vec, texts, args.model, args.variant)
+    if args.pairs:
+        keep, names = pair_texts()
+        absent = len(keep - set(texts))
+        todo = [h for h in todo if h in keep]
+        print(f"--pairs: {len(keep)} texts in {', '.join(names)}" + (f" ({absent} not in run {args.run})" if absent else ""))
     if args.limit:
         todo = todo[:args.limit]
     print(f"{args.model} {args.variant}: {len(texts)} texts in {args.run}, {len(todo)} to embed")
@@ -324,6 +352,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--tpm", type=int, default=0, help="API pacing: tokens per minute (from p2_dev_voyage_limits.py)")
     ap.add_argument("--rpm", type=int, default=0, help="API pacing: requests per minute")
+    ap.add_argument("--pairs", action="store_true", help="only texts in data/pairs/pairs_*.jsonl (v0.3)")
     args = ap.parse_args()
     if args.command == "run" and not (args.model and args.variant):
         ap.error("run needs --model and --variant")
