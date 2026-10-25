@@ -1,5 +1,5 @@
 """
-p2_dev_pairs.py -- 2.4 pair test, step 1: pick the pairs and build the blind labelling sheet (v0.1, 25 Oct 2026)
+p2_dev_pairs.py -- 2.4 pair test, step 1: pick the pairs and build the blind labelling sheet (v0.2, 25 Oct 2026: + extend)
 
 WHAT IT DOES
   Picks ~130 cross-paper article pairs by the six routes of the pre-registered protocol
@@ -9,6 +9,11 @@ WHAT IT DOES
                                        NO scores, routes or model names; order shuffled; labels saved in the browser
                                        and downloaded as labels_<name>.json when done
   `relabel` makes a second sheet with 15 of the labelled pairs (seeded), for the next-day agreement check.
+  `extend` (v0.2) tops up Same-event pairs when step 0 finds fewer than 30 (protocol: "add pairs from P1/P2
+  by the same seeded method"): it rebuilds the pools with the same seed, checks that they reproduce the
+  original pair set exactly, then draws NEW P1/P2 pairs (2:1, none already in the set) with seed + 100 into
+    data/pairs/pairs_<name>x.jsonl and review/pairs/sheet_<name>x.html   (pair ids R001…, blind like the first sheet)
+  Without --add it only prints the Same-event count, the rate per route so far and a suggested size.
 
 ROUTES (protocol: P1 40 · P2 20 · P3 25 · P4 20 · P5 10 · P6 15; all cross-paper)
   P1 nominations   each model x V1: every text's nearest same-day neighbour in another paper; pooled, then sampled
@@ -23,6 +28,8 @@ ROUTES (protocol: P1 40 · P2 20 · P3 25 · P4 20 · P5 10 · P6 15; all cross-
 HOW TO RUN (from ~/news-intel; the embedding environment has numpy)
   .venv-embed/bin/python src/p2_dev_pairs.py make --name v1            pairs + sheet (seed 2025)
   .venv-embed/bin/python src/p2_dev_pairs.py relabel --name v1         15-pair re-label sheet from labels_v1.json
+  .venv-embed/bin/python src/p2_dev_pairs.py extend --name v1          estimate only (reads labels_v1.json)
+  .venv-embed/bin/python src/p2_dev_pairs.py extend --name v1 --add 120   top-up sheet v1x (P1 80 + P2 40)
   Options: --seed · --models minilm,bge-m3,qwen3-0.6b (those with V1 vectors) · --tag-model · --tag-prompt
   Opens nothing and changes neither database (both read-only).
 """
@@ -93,11 +100,16 @@ def sims(V, models, a, b):
     return {m: np.stack([V[m][h] for h in a]) @ np.stack([V[m][h] for h in b]).T for m in models}
 
 
-def make_pairs(args, seat, tag, ents, V, models, keep):
+def key(a, b):
+    return tuple(sorted((a, b)))
+
+
+def build_pools(args, seat, tag, ents, V, models, keep):
+    """Candidate pairs per route. Deterministic: same databases + seed -> same pools.
+    Uses the seeded generator only for P5, and returns it so the first draw continues the same stream."""
     rng = random.Random(args.seed)
     days = by_day(seat, keep)
     dates = list(days)
-    key = lambda a, b: tuple(sorted((a, b)))
     pools = {r: set() for r in QUOTA}
     all_same_day = []                                   # (avg rank score, pair) for P4 / P3 thresholds
     for d, hs in days.items():
@@ -143,6 +155,11 @@ def make_pairs(args, seat, tag, ents, V, models, keep):
                     if seat[b[j]]["paper"] != seat[h]["paper"] and b[j] != h:
                         pools["P6"].add((h, b[j]))
                         break
+    return pools, rng
+
+
+def make_pairs(args, seat, tag, ents, V, models, keep):
+    pools, rng = build_pools(args, seat, tag, ents, V, models, keep)
     taken, out = set(), []
     for r, q in QUOTA.items():
         cand = sorted(pools[r] - taken)
@@ -159,7 +176,7 @@ def make_pairs(args, seat, tag, ents, V, models, keep):
             p["a"], p["b"], p["day_a"], p["day_b"] = p["b"], p["a"], p["day_b"], p["day_a"]
     print("pairs: " + " · ".join(f"{r} {sum(p['route'] == r for p in out)} (pool {len(pools[r])})" for r in QUOTA)
           + f" · total {len(out)}")
-    return out
+    return out, pools
 
 
 # ---------- sheet ----------
@@ -234,7 +251,7 @@ def cmd_make(args):
     if out.exists() and not args.force:
         sys.exit(f"{out} exists. A new pair set needs a new --name (or --force to overwrite, before any labelling).")
     seat, tag, ents, V, models, keep = load(args)
-    pairs = make_pairs(args, seat, tag, ents, V, models, keep)
+    pairs, _ = make_pairs(args, seat, tag, ents, V, models, keep)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(json.dumps({"meta": {"seed": args.seed, "models": models, "variant": "V1", "run": args.run,
@@ -264,18 +281,86 @@ def cmd_relabel(args):
                 f"Re-label · {args.name} (15 pairs)")
 
 
+def read_pairs(name):
+    path = PAIRS_DIR / f"pairs_{name}.jsonl"
+    if not path.exists():
+        sys.exit(f"{path} not found.")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return json.loads(lines[0])["meta"], [json.loads(l) for l in lines[1:]]
+
+
+def cmd_extend(args):
+    meta, base = read_pairs(args.name)
+    if meta["seed"] != args.seed or meta["run"] != args.run or ",".join(meta["models"]) != args.models:
+        sys.exit(f"settings differ from pairs_{args.name}.jsonl ({meta}); run with the same --seed, --run, --models")
+    lab_path = SHEET_DIR / f"labels_{args.name}.json"
+    if not lab_path.exists():
+        sys.exit(f"{lab_path} not found (download it from the sheet and move it there first).")
+    labels = json.loads(lab_path.read_text(encoding="utf-8"))["labels"]
+    same = sum(v == "same" for v in labels.values())
+    rate = {}
+    for r in ("P1", "P2"):
+        ps = [p for p in base if p["route"] == r and p["pair"] in labels]
+        rate[r] = (sum(labels[p["pair"]] == "same" for p in ps), len(ps))
+    hit, n = rate["P1"][0] + rate["P2"][0], rate["P1"][1] + rate["P2"][1]
+    print(f"labels_{args.name}: {len(labels)} labelled, Same event {same} (protocol needs >= 30)")
+    print(f"Same-event rate so far: P1 {rate['P1'][0]}/{rate['P1'][1]} · P2 {rate['P2'][0]}/{rate['P2'][1]}")
+    need = max(0, 30 - same)
+    if need and hit:
+        est = int(need / (hit / n) * 1.25 + 0.999)
+        print(f"to find {need} more at that rate (+25% margin): about {est} new pairs")
+    if not args.add:
+        print("estimate only; nothing written. Add --add N to build the top-up sheet.")
+        return
+    ext = f"{args.name}x"
+    out = PAIRS_DIR / f"pairs_{ext}.jsonl"
+    if out.exists() and not args.force:
+        sys.exit(f"{out} exists. Refusing to overwrite (labels may depend on it).")
+    seat, tag, ents, V, models, keep = load(args)
+    redo, pools = make_pairs(args, seat, tag, ents, V, models, keep)
+    same_set = {(p["route"], key(p["a"], p["b"])) for p in redo} == {(p["route"], key(p["a"], p["b"])) for p in base}
+    print("reproduction of the original pair set: " + ("exact" if same_set else
+          "DIFFERENT (databases changed since?); continuing, the original file is what is excluded"))
+    taken = {key(p["a"], p["b"]) for p in base}
+    rng = random.Random(args.seed + 100)
+    want = {"P1": args.add - args.add // 3, "P2": args.add // 3}
+    new = []
+    for r, q in want.items():
+        cand = sorted(pools[r] - taken)
+        pick = rng.sample(cand, min(q, len(cand)))
+        if len(pick) < q:
+            print(f"  note: route {r} has only {len(cand)} new candidates (wanted {q})")
+        for a, b in pick:
+            taken.add(key(a, b))
+            new.append({"route": r, "a": a, "b": b, "day_a": seat[a]["date"], "day_b": seat[b]["date"]})
+    rng.shuffle(new)
+    for i, p in enumerate(new, 1):
+        p["pair"] = f"R{i:03d}"
+        if rng.random() < 0.5:
+            p["a"], p["b"], p["day_a"], p["day_b"] = p["b"], p["a"], p["day_b"], p["day_a"]
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"meta": {**meta, "extends": args.name, "seed_extend": args.seed + 100, "added": want,
+                                     "reproduced": same_set}}) + "\n")
+        for p in new:
+            f.write(json.dumps(p) + "\n")
+    print(f"new pairs: " + " · ".join(f"{r} {sum(p['route'] == r for p in new)}" for r in want)
+          + f" · total {len(new)} -> {out}")
+    write_sheet(SHEET_DIR / f"sheet_{ext}.html", ext, new, seat, f"Pair labelling · {ext}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["make", "relabel"])
+    ap.add_argument("command", choices=["make", "relabel", "extend"])
     ap.add_argument("--name", default="v1")
     ap.add_argument("--seed", type=int, default=2025)
     ap.add_argument("--run", default="exam-v1")
     ap.add_argument("--models", default="minilm,bge-m3,qwen3-0.6b")
     ap.add_argument("--tag-model", default="claude-haiku-5-5")
     ap.add_argument("--tag-prompt", default="v1.3")
+    ap.add_argument("--add", type=int, default=0, help="extend: number of new pairs (P1 2/3, P2 1/3)")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
-    {"make": cmd_make, "relabel": cmd_relabel}[args.command](args)
+    {"make": cmd_make, "relabel": cmd_relabel, "extend": cmd_extend}[args.command](args)
 
 
 if __name__ == "__main__":
