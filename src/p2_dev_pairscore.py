@@ -1,6 +1,8 @@
 """
 p2_dev_pairscore.py -- 2.4 pair test, step 2: score every model x variant on the labelled pairs
-  (v0.1, 25 Oct 2026 · v0.2, 25 Oct 2026: step 4 M3 route also needs a bootstrap range clear of zero)
+  (v0.1, 25 Oct 2026 · v0.2, 25 Oct 2026: step 4 M3 route also needs a bootstrap range clear of zero
+   · v0.3, 26 Oct 2026: --min-words N, the long-article subgroup check, exploratory, rule fixed before any number
+   · v0.3.1, 26 Oct 2026: an opus_<set>.json without an "audit" key (opus_v1.json, labels only) is no longer read as a triage record)
 
 WHAT IT DOES
   Reads the labelled pairs and the vectors, and runs the pre-registered protocol
@@ -36,6 +38,16 @@ INPUTS (all read-only)
 HOW TO RUN (from ~/news-intel)
   .venv-embed/bin/python src/p2_dev_pairscore.py                  full report
   Options: --sets v1,v1x · --boot 1000 · --seed 2025 · --ignore-audit (only if Kunaal decides so; logged in output)
+
+LONG-ARTICLE SUBGROUP CHECK (v0.3, exploratory; STATUS A5, rule written 26 Oct before any number)
+  .venv-embed/bin/python src/p2_dev_pairscore.py --min-words 400
+  Keeps only pairs where at least one text has MORE than N body words (counted from texts.body in news.db,
+  whitespace split), prints the label counts, the metric table and the V2 - V1 paired bootstrap on M2 for
+  every model, then the verdict for qwen3-0.6b:
+    V2 better by >= 2 points on M2 AND its range clear of 0 -> "consider V2 for long texts only"
+    otherwise                                               -> "V1 stands"
+  Steps 0, 1, 3, 4 and M4 are skipped (they belong to the full test). Small n: exploratory only, never a decision
+  by itself. Without --min-words the script behaves exactly as v0.2.
 """
 import argparse, json, random, sqlite3, sys
 from collections import Counter, defaultdict
@@ -148,8 +160,8 @@ def load_labels(sets):
         pairs += ps
         labels.update(lab)
         of = PAIRS_DIR / f"opus_{s}.json"
-        if of.exists():
-            rec = json.loads(of.read_text(encoding="utf-8"))
+        rec = json.loads(of.read_text(encoding="utf-8")) if of.exists() else {}
+        if "audit" in rec:  # v0.3.1: only a triage record (v1x) has an audit; opus_v1.json is labels only
             aud = rec["audit"]
             got = [q for q in aud if q in lab]
             hit = [q for q in got if lab[q] == "same"]
@@ -196,6 +208,47 @@ def related_links(news, run):
     return out
 
 
+def body_words(news, hashes):
+    """{text_hash: number of body words} from texts.body (whitespace split)."""
+    hs, out = list(hashes), {}
+    for i in range(0, len(hs), 500):
+        chunk = hs[i:i + 500]
+        q = f"SELECT text_hash, body FROM texts WHERE text_hash IN ({','.join('?' * len(chunk))})"
+        out.update({h: len((b or "").split()) for h, b in news.execute(q, chunk)})
+    return out
+
+
+def subgroup_report(used, lab, S, cols, n_words, args):
+    """Exploratory long-article check: metric table + V2 - V1 on M2 per model + rule verdict for Qwen."""
+    cnt = Counter(lab)
+    print(f"\n== LONG-ARTICLE SUBGROUP (exploratory) · pairs where at least one text has > {n_words} body words")
+    print(f"  pairs {len(used)} · " + " · ".join(f"{k} {cnt[k]}" for k in ("same", "follow", "subject", "unrelated")))
+    if cnt["same"] < 10 or cnt["subject"] < 10:
+        print("  note  fewer than 10 Same-event or Same-subject pairs: ranges will be very wide")
+    M = {c: metrics(S[c], lab) for c in cols}
+    print(f"  {'model':11} {'var':4} {'M1':>6} {'M2':>6} {'M3':>6} {'M5':>6}")
+    for c in cols:
+        r = M[c]
+        print(f"  {c[0]:11} {c[1]:4} {fmt(r['M1']):>6} {fmt(r['M2']):>6} {fmt(r['M3']):>6} {fmt(r['M5']):>6}")
+    print("\n  V2 - V1 on M2 (paired bootstrap, points):")
+    verdict = None
+    for m in SIZE_ORDER + [API]:
+        if (m, "V1") in S and (m, "V2") in S:
+            r = boot_diff(S[(m, "V2")], S[(m, "V1")], lab, "M2", args.boot, args.seed)
+            print(f"  {m:11} {fr(r)}")
+            if m == "qwen3-0.6b":
+                verdict = r
+    print("\n  RULE (fixed 26 Oct, before any number): V2 for long texts only if >= 2 points better on M2 "
+          "with range clear of 0")
+    if verdict is None or verdict[0] is None:
+        print("  qwen3-0.6b: cannot score (missing vectors or labels) -> V1 stands by default")
+    elif verdict[0] >= 2 and verdict[1] > 0:
+        print(f"  qwen3-0.6b: V2 - V1 {fr(verdict)} -> consider V2 for long texts only (exploratory; Kunaal decides)")
+    else:
+        print(f"  qwen3-0.6b: V2 - V1 {fr(verdict)} -> V1 stands (exploratory)")
+    print("\nDone. Nothing was written. Log the result as exploratory (STATUS A5).")
+
+
 def day_groups(news, run, keep):
     seat = {}
     for h, d, pub in news.execute("SELECT text_hash, date, publisher FROM placements WHERE run_id=? "
@@ -236,6 +289,8 @@ def main():
     ap.add_argument("--seed", type=int, default=2025)
     ap.add_argument("--ignore-audit", action="store_true")
     ap.add_argument("--no-band", action="store_true", help="skip M4 (whole-archive similarity; slower)")
+    ap.add_argument("--min-words", type=int, default=0,
+                    help="v0.3: long-article subgroup check; keep pairs where a text has more than N body words")
     args = ap.parse_args()
     sets = args.sets.split(",")
 
@@ -266,6 +321,14 @@ def main():
             vv = V.get(m, {}).get(v, {})
             if vv and all(p["a"] in vv and p["b"] in vv for p in used):
                 cols.append((m, v))
+    if args.min_words:                                   # v0.3: subgroup check only, then stop
+        bw = body_words(news, {h for p in used for h in (p["a"], p["b"])})
+        keep = [i for i, p in enumerate(used) if max(bw.get(p["a"], 0), bw.get(p["b"], 0)) > args.min_words]
+        used = [used[i] for i in keep]
+        lab = lab[keep]
+        S = {c: np.array([float(V[c[0]][c[1]][p["a"]] @ V[c[0]][c[1]][p["b"]]) for p in used]) for c in cols}
+        subgroup_report(used, lab, S, cols, args.min_words, args)
+        return
     S = {c: np.array([float(V[c[0]][c[1]][p["a"]] @ V[c[0]][c[1]][p["b"]]) for p in used]) for c in cols}
     skipped = [(m, v) for m in V for v in V[m] if (m, v) not in cols]
     print("columns: " + ", ".join(f"{m} {v}" for m, v in cols)
