@@ -17,6 +17,11 @@ HOW    cd ~/news-intel && .venv/bin/python src/p2_dev_boundary.py
                  data/pairs/opus_<set>.json      (Opus)
          writes  review/pairs/sheet_boundary.html (refuses to overwrite; --force)
        --sets v1,v1x   --dry-run (print only, write nothing)
+       --opus-suffix _def1   (v0.2) κ re-test: read data/pairs/opus_<set>_def1.json
+                             and write review/pairs/sheet_boundary_def1.html, so the
+                             first review sheet (your notes) is never touched
+VERSION v0.1 26 Oct 2026 (commit a279138) · v0.2 26 Oct 2026: --opus-suffix for the
+       κ re-test with the written definition; prints PASS/FAIL against 0.70
        Reads only; never touches news.db or vectors.db. Standard library only.
 """
 import argparse, html, json, os, re, sys
@@ -194,19 +199,25 @@ def main():
     ap.add_argument("--root", default=".")
     ap.add_argument("--force", action="store_true", help="overwrite an existing sheet_boundary.html")
     ap.add_argument("--dry-run", action="store_true", help="print only; write nothing")
+    ap.add_argument("--opus-suffix", default="",
+                    help="v0.2: re-test labels, e.g. _def1 reads opus_<set>_def1.json, writes sheet_boundary_def1.html")
     a = ap.parse_args()
     R = lambda *p: os.path.join(a.root, *p)
 
-    out = R("review", "pairs", "sheet_boundary.html")
+    sfx = a.opus_suffix
+    if sfx and not re.fullmatch(r"_[A-Za-z0-9]+", sfx):
+        die(f"--opus-suffix {sfx!r}: use an underscore and letters/digits, e.g. _def1")
+    out = R("review", "pairs", f"sheet_boundary{sfx}.html")
     if os.path.exists(out) and not (a.force or a.dry_run):
         die(f"{out} exists (it may hold your work in progress); use --force to rebuild")
 
-    print("== same-event boundary review · Opus vs Kunaal · yes/no on Same event (Can't tell left out)")
+    print("== same-event boundary review · Opus vs Kunaal · yes/no on Same event (Can't tell left out)"
+          + (f" · Opus labels: opus_<set>{sfx}.json (re-test)" if sfx else ""))
     items, allrows = [], []
     for s in [x.strip() for x in a.sets.split(",") if x.strip()]:
         kun = find_labels(load_json(R("review", "pairs", f"labels_{s}.json")), f"labels_{s}.json")
-        oraw = load_json(R("data", "pairs", f"opus_{s}.json"))
-        opus = find_labels(oraw, f"opus_{s}.json")
+        oraw = load_json(R("data", "pairs", f"opus_{s}{sfx}.json"))
+        opus = find_labels(oraw, f"opus_{s}{sfx}.json")
         cards = sheet_cards(R("review", "pairs", f"sheet_{s}.html"))
         audit = find_audit(oraw)
         print(f"-- {s}: Kunaal {len(kun)} labels · Opus {len(opus)} labels · cards {len(cards)}"
@@ -226,7 +237,10 @@ def main():
                               "dir": "opus_same" if opus[i] == "same" else "kunaal_same"})
     n, po, pe, k = kappa(allrows)
     print(f"  {'all sets pooled':<28} n {n:>3} · agreement {po*100:5.1f}% · chance {pe*100:5.1f}% · kappa {k:.2f}"
-          "   (baseline for the re-test; pass line 0.70)")
+          + ("   (re-test; pass line 0.70)" if sfx else "   (baseline for the re-test; pass line 0.70)"))
+    if sfx:
+        print(f"  RE-TEST {'PASS' if k >= 0.70 else 'FAIL'}: kappa {k:.2f} vs pass line 0.70 "
+              "(in-sample: the definition was written from these same pairs, so this is optimistic)")
 
     items.sort(key=lambda x: (x["dir"] != "opus_same", x["set"], x["pair"]))
     for j, x in enumerate(items, 1):
