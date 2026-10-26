@@ -1,4 +1,5 @@
 """p3_group.py — Phase 3 · Story grouping v0, stage 1 (same-day groups).
+  v0.1 26 Oct 2026 (B·2) · v0.2 26 Oct: paid predicate for `check` set from real tag values
 
 WHAT IT DOES
   For each date, finds which articles (across all papers) report the same story.
@@ -66,10 +67,13 @@ VEC_MODEL, VEC_VARIANT = "qwen3-0.6b", "V1"
 TAG_MODEL, TAG_PROMPT = "claude-haiku-5-5", "v1.3"
 
 # Provisional paid predicate for `check` only (schema-on-read; never stored).
-# The final rule lives in the digest's read-time labelling function.
-# PAID_KINDS: `tags.kind` values meaning paid/advert. Set from a read-only query
-# of the real values before the paid-bridge count is trusted.
-PAID_KINDS = ()
+# The final rule lives in the digest's read-time labelling function; when it exists,
+# `check` should import it instead (single source of truth).
+# Values from a read-only query of tags v1.3 (26 Oct, B·2): kind 'sponsored' = 104 texts;
+# sponsored_cue values: in association with 11 · marketing initiative 5 · advertorial 2 ·
+# marketing feature 1 · sponsored content 1. Chat 13 dropped "in association with" from the cue rule.
+PAID_KINDS = ("sponsored",)
+DROPPED_CUES = ("in association with",)
 
 NEWS_DB = Path("data/news.db")
 VECTORS_DB = Path("data/vectors.db")
@@ -321,7 +325,7 @@ def cmd_run(args):
 
 
 def paid_hashes(news, hashes):
-    """Provisional paid predicate (check only): sponsored_cue set OR kind in PAID_KINDS."""
+    """Provisional paid predicate (check only): kind in PAID_KINDS OR a cue not in DROPPED_CUES."""
     paid = set()
     for i in range(0, len(hashes), 500):
         chunk = hashes[i:i + 500]
@@ -330,7 +334,7 @@ def paid_hashes(news, hashes):
                 f"SELECT text_hash, kind, sponsored_cue FROM tags "
                 f"WHERE model=? AND prompt_version=? AND text_hash IN ({q})",
                 (TAG_MODEL, TAG_PROMPT, *chunk)):
-            if kind in PAID_KINDS or cue not in (None, 0, "", "0", "[]", "false", "False", "null"):
+            if kind in PAID_KINDS or (cue and cue.strip().lower() not in DROPPED_CUES):
                 paid.add(h)
     return paid
 
@@ -358,8 +362,7 @@ def cmd_check(args):
     stored = set(stored_dates(news))
     print(f"{GROUPING_VERSION} | {len(dates)} built date(s); stored but not built: "
           f"{len(stored - set(dates)) if not args.date else '-'}")
-    if not PAID_KINDS:
-        print("  note: PAID_KINDS is empty → paid bridges use sponsored_cue only (provisional)")
+    print(f"  paid (provisional, check only): kind in {list(PAID_KINDS)} or a cue other than {list(DROPPED_CUES)}")
 
     sizes, flags = {}, dict(chain=0, same_only=0, bridges=0, paid=0)
     worst = []
