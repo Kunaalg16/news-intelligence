@@ -1,6 +1,7 @@
 """p3_group.py — Phase 3 · Story grouping v0: stage 1 (same-day groups) + stage 2 (cross-day threads).
   v0.1 26 Oct 2026 (B·2) · v0.2 26 Oct: paid predicate for `check` set from real tag values
   v0.3 28 Oct (B·3): stage 2 `track` (t0.1) + `threads`; `check` reports stage 2; intel.db schema 2
+  v0.4 29 Oct (B·3): stage 2 skips day-groups made only of excluded kinds (notice, sponsored) → t0.2
 
 WHAT IT DOES
   For each date, finds which articles (across all papers) report the same story.
@@ -29,6 +30,10 @@ STAGE 2 (track)
   the best few under the line are stored as BELOW (for the below-the-line skim).
   Threads = trees over parent links; thread id = the root group, computed on read.
   Links are untyped ("earlier coverage") until the judge types them.
+  Day-groups whose every member is tagged with an EXCLUDED kind (knob "exclude_kinds":
+  notice, sponsored) take no part in stage 2, on either side: classifieds and paid
+  features are not stories, and a template look-alike could otherwise take the parent
+  slot of the real earlier story (B·3 sheet t01, 29 Oct). Stage-1 groups are untouched.
   A date is rebuilt when it is new, when the set of built dates in its window
   changed (a late date arrived), or when a date in its window was rebuilt in stage 1.
 
@@ -103,7 +108,7 @@ DROPPED_CUES = ("in association with",)
 # ──────────────────────────── STAGE 2 KNOBS ───────────────────────────
 # Provisional (S6 D4): set from B·1, replaced by a rule learned from cross-day labels.
 # Change a knob → bump TRACKING_VERSION (stage-1 groups are untouched).
-TRACKING_VERSION = "t0.1"
+TRACKING_VERSION = "t0.2"          # t0.1 (28 Oct) → t0.2 (29 Oct): + exclude_kinds
 
 TRACK_KNOBS = {
     # Look back this many calendar days for an earlier day-group = the longest GAP
@@ -121,6 +126,13 @@ TRACK_KNOBS = {
     # at or above the floor. Changed by: the skim needing more or fewer.
     "below_keep": 3,
     "below_floor": 0.496,
+    # Day-groups whose EVERY member has one of these tagger kinds (v1.3) are left out of
+    # stage 2 entirely. Untagged members count as journalism (kept). From sheet t01 (29 Oct):
+    # 5 of 10 errors were weekly classifieds / a results notice, all tagged 'notice'; a 15-item
+    # sample (seed 2910) found 0/4 notice and 0/3 sponsored real news, but 3/8 'other' real
+    # journalism (story fragments), so 'other' stays in. Changed by: next blind sheet; when the
+    # read-time labelling function exists, import the list from it (single source of truth).
+    "exclude_kinds": ["notice", "sponsored"],
 }
 # Time decay: OFF in t0.1 (B·1). Changed by: links at 5–7 days much worse than at 1–2 days.
 # Pass lines (written 28 Oct, before any stage-2 result; Kunaal agreed):
@@ -371,8 +383,29 @@ def window_of(date, built_dates, window):
     return [e for e in built_dates if 1 <= gap_days(e, date) <= window]
 
 
-def load_groups(intel, vecs, date, version=GROUPING_VERSION):
-    """One date's stage-1 groups as [(group_id, matrix k×d)], groups with ≥ 1 vector only."""
+def excluded_groups(news, intel, date, kinds, version=GROUPING_VERSION):
+    """Group ids of `date` whose every member is tagged (v1.3) with a kind in `kinds`."""
+    if not kinds:
+        return set()
+    members = {}
+    for gid, h in intel.execute("SELECT group_id, text_hash FROM members WHERE version=? AND date=?",
+                                (version, date)):
+        members.setdefault(gid, []).append(h)
+    hashes = sorted({h for ms in members.values() for h in ms})
+    kind = {}
+    for i in range(0, len(hashes), 500):
+        chunk = hashes[i:i + 500]
+        q = ",".join("?" * len(chunk))
+        for h, k in news.execute(
+                f"SELECT text_hash, kind FROM tags WHERE model=? AND prompt_version=? AND text_hash IN ({q})",
+                (TAG_MODEL, TAG_PROMPT, *chunk)):
+            kind[h] = k
+    return {g for g, ms in members.items() if all(kind.get(h) in kinds for h in ms)}
+
+
+def load_groups(intel, vecs, date, version=GROUPING_VERSION, skip=frozenset()):
+    """One date's stage-1 groups as [(group_id, matrix k×d)], groups with ≥ 1 vector only,
+    leaving out the group ids in `skip`."""
     members = {}
     for gid, h in intel.execute(
             "SELECT group_id, text_hash FROM members WHERE version=? AND date=? ORDER BY group_id, text_hash",
@@ -389,6 +422,8 @@ def load_groups(intel, vecs, date, version=GROUPING_VERSION):
             vec[h] = np.frombuffer(b, dtype=np.float32)
     out = []
     for gid in sorted(members):
+        if gid in skip:
+            continue
         rows = [vec[h] for h in members[gid] if h in vec]
         if rows:
             out.append((gid, np.vstack(rows)))
@@ -547,7 +582,7 @@ def cmd_run(args):
 
 
 def cmd_track(args):
-    vecs, intel = open_ro(VECTORS_DB), (None if args.dry else open_intel())
+    news, vecs, intel = open_ro(NEWS_DB), open_ro(VECTORS_DB), (None if args.dry else open_intel())
     con = intel or open_intel_ro()
     built = dict(con.execute("SELECT date, built_at FROM group_runs WHERE version=?", (GROUPING_VERSION,)))
     if not built:
@@ -569,15 +604,17 @@ def cmd_track(args):
         return
     k = TRACK_KNOBS
     print(f"{GROUPING_VERSION}/{TRACKING_VERSION} | {'DRY, nothing written' if args.dry else 'writing data/intel.db'} | "
-          f"{len(todo)} date(s) | window {W} d · {k['linkage']} ≥ {k['link_threshold']} · decay off")
-    cache = {}
+          f"{len(todo)} date(s) | window {W} d · {k['linkage']} ≥ {k['link_threshold']} · decay off · "
+          f"excluded kinds {k['exclude_kinds']}")
+    cache, skipped = {}, {}
 
     def groups_of(d):
         if d not in cache:
-            cache[d] = load_groups(con, vecs, d)
+            skipped[d] = excluded_groups(news, con, d, set(k["exclude_kinds"]))
+            cache[d] = load_groups(con, vecs, d, skip=skipped[d])
         return cache[d]
 
-    tot = dict(groups=0, parents=0, sides=0, below=0)
+    tot = dict(groups=0, parents=0, sides=0, below=0, excluded=0)
     for d in todo:
         win = window_of(d, dates, W)
         today = groups_of(d)
@@ -586,16 +623,16 @@ def cmd_track(args):
         if not args.dry:
             write_track(intel, d, win, len(today), rows)
         n = {r: sum(1 for x in rows if x[7] == r) for r in ("parent", "side", "below")}
-        print(f"  {d}  groups {len(today):4d}  window {len(win)} date(s)  "
+        print(f"  {d}  groups {len(today):4d} (excl. {len(skipped[d]):3d})  window {len(win)} date(s)  "
               f"parents {n['parent']:4d} ({(n['parent'] / len(today) if today else 0):5.1%})  "
               f"sides {n['side']:3d}  below {n['below']:4d}" + ("" if win else "  (nothing earlier in window)"))
-        for key, v in zip(tot, (len(today), n["parent"], n["side"], n["below"])):
+        for key, v in zip(tot, (len(today), n["parent"], n["side"], n["below"], len(skipped[d]))):
             tot[key] += v
         for e in list(cache):                                     # keep memory flat: drop dates no longer needed
             if gap_days(e, d) > W:
                 del cache[e]
-    print(f"  total     groups {tot['groups']}  parents {tot['parents']} "
-          f"({tot['parents'] / max(tot['groups'], 1):.1%} of groups)  sides {tot['sides']}  below {tot['below']}")
+    print(f"  total     groups {tot['groups']} tracked + {tot['excluded']} excluded  parents {tot['parents']} "
+          f"({tot['parents'] / max(tot['groups'], 1):.1%} of tracked groups)  sides {tot['sides']}  below {tot['below']}")
 
 
 def open_intel_ro():
@@ -683,10 +720,10 @@ def cmd_check(args):
     if worst:
         print("  loosest multi-article groups (lowest inside-pair score): " +
               ", ".join(f"{g} ({s} texts, {m:.3f})" for m, s, g in worst[:5]))
-    check_stage2(intel)
+    check_stage2(intel, news)
 
 
-def check_stage2(intel):
+def check_stage2(intel, news):
     """Stage-2 summary over every tracked date (threads cross dates, so no --date filter)."""
     g, t = GROUPING_VERSION, TRACKING_VERSION
     runs = intel.execute("SELECT COUNT(*), SUM(groups), SUM(parents), SUM(sides), SUM(below) FROM track_runs "
@@ -699,7 +736,11 @@ def check_stage2(intel):
     n_dates, n_groups, n_par, n_side, n_below = runs
     print(f"\n{g}/{t} | stage 2: {n_dates} tracked date(s); stale or missing: {len(stale)}"
           + (f" ({', '.join(stale[:5])}{' …' if len(stale) > 5 else ''})" if stale else ""))
-    print(f"  links  parents {n_par} ({n_par / max(n_groups, 1):.1%} of {n_groups} groups)  ·  "
+    kinds = TRACK_KNOBS["exclude_kinds"]
+    tracked = [d for (d,) in intel.execute("SELECT date FROM track_runs WHERE gversion=? AND tversion=?", (g, t))]
+    excl = sum(len(excluded_groups(news, intel, d, set(kinds))) for d in tracked)
+    print(f"  excluded  {excl} day-groups made only of {kinds} (left out of stage 2)")
+    print(f"  links  parents {n_par} ({n_par / max(n_groups, 1):.1%} of {n_groups} tracked groups)  ·  "
           f"sides {n_side}  ·  below-line kept {n_below}")
     gap = dict(intel.execute("SELECT gap_days, COUNT(*) FROM links WHERE gversion=? AND tversion=? "
                              "AND role='parent' GROUP BY gap_days", (g, t)))
