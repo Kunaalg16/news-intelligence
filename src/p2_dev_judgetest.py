@@ -1,4 +1,4 @@
-"""p2_dev_judgetest.py · 2.4 dev tool · fresh agreement test for the stage-1 judge (v0.2, 28 Oct 2026)
+"""p2_dev_judgetest.py · 2.4 dev tool · fresh agreement test for the stage-1 judge (v0.3, 28 Oct 2026)
 
 WHAT   Builds the blind labelling sheet for the agreement test of the "same story" judge
        (drafts/2026-10-28_B2.4_judge_definition_and_test.md, pre-registered 28 Oct).
@@ -22,6 +22,13 @@ POOL   (pre-registered, before any draw)  pairs table, version g0.1, band 'middl
        the others. And no article appears in more than --per-text pairs (default 3). Seeded shuffle of the
        sorted pool, then pairs taken in that order under both limits. Left/right and order randomised; ids J001...
 HOW    cd ~/news-intel && .venv/bin/python src/p2_dev_judgetest.py sample --name j1
+       v0.3: `haiku`  the gating judge: Haiku 5.5 reads each pair (definition v1.0 as the system prompt, both
+                      articles up to 1,200 body words, forced tool output: label · anchor · reason), with the
+                      tagger's own settings imported from p2_tag (MODELS, PRICES, SAMPLING); key loaded the same
+                      way; resumable; cap --cap (default $1); writes data/pairs/haiku_<name>.json; prints no labels.
+                      Never reads Kunaal's labels.  Run it only after Kunaal has finished labelling.
+             `score`  Kunaal vs haiku (GATE) and opus (diagnostic): merge kappa + bootstrap range, event-vs-story
+                      kappa (reported), 4x4 table, disagreement ids, pre-registered outcome. Writes nothing.
        options: --n 200 --seed 2028 --per-date 25 --per-text 3 --grouping g0.1 --dry (counts only) --force
        Reads intel.db, news.db (read-only). Writes only the two files above. Standard library only.
 """
@@ -36,6 +43,7 @@ OLD_SETS = ("v1", "v1x")
 MIN_WORDS = 50
 EXCERPT_WORDS = 140
 DEFINITION_VERSION = "v1.0"
+LADDER_ENUM = ["same_event", "same_story", "same_subject", "unrelated"]
 DEFINITION = '**Your task.** You will see two newspaper articles published on the same day, in different papers. Decide how they relate, using exactly one of four labels. Then name the anchor (below) if your label is one of the first two.\n\n**The idea behind the labels.** News is organised around *happenings*: specific, dated occurrences such as a decision, an announcement, a ruling, a release of figures, an incident, an arrest, a protest action, a speech, a match, a vote or a deal. A **story** is one such happening together with the further happenings directly tied to it: reactions to it, consequences of it, other actions taken in the same episode on the same day. A **subject** is a broader theme (a policy, a programme, a long process, a condition, an industry, an organisation, a person) under which many separate stories fall.\n\n**The four labels, from closest to farthest:**\n1. **same event** — both articles report the same specific happening. Different angles, quotes or details of that one happening still count: the victim\'s account and the police response to the same incident; two different statements made by the same person at the same press conference; two parts of the same deal announced together.\n2. **same story, different event** — the articles report different happenings, but both stem from one specific, dated happening you can name (the anchor). Example: on a day of protests in Delhi, one article reports the metro stations closed to stop protesters and the other reports police detaining journalists at the protest site; both stem from that day\'s protest action.\n3. **same subject only** — the articles share a theme, but you cannot name one specific dated happening that both stem from. Example: one article on a chip maker scaling up its assembly plant in India, another on the Prime Minister\'s speech about chips and private investment: same subject (semiconductors in India), different stories.\n4. **unrelated** — no shared subject.\n\n**The anchor rule (decides between 2 and 3).** For label 1 or 2 you must name the anchor in a few words, with its date if the articles give it (for example "RBI policy announcement, <date>"; "Delhi protests, <date>"). The anchor must be a **specific dated occurrence**. A policy, a programme, a long-running process, a condition, an organisation or a person is **not** an anchor; if that is all the two articles share, the label is **same subject only**. The anchor may have happened before the articles were printed: reactions on Friday to Wednesday\'s decision share that decision as their anchor. If you cannot name an anchor both articles stem from, do not use label 1 or 2.\n\n**Worked examples (from real pairs):**\n- *Same event.* A report that the US clinched a deal to buy Russian fuel while criticising India for doing the same, and a report that the US lifted sanctions on Russian diesel sales: two parts of one announced deal. → same event; anchor: the US deal on Russian diesel.\n- *Same event.* A cricket coach\'s praise for a bowler\'s spell, and the same coach saying his batters must learn to defend: both said at the same post-match press conference. → same event; anchor: the post-match press conference.\n- *Same story, different event.* On the same day of the Delhi protests, one article on protest sites at Jantar Mantar and police action there, another on checkpoints at Delhi\'s borders stopping people from entering. → same story; anchor: the Delhi protests that day.\n- *Same story, different event.* The news that a payment charge (MDR) will apply to UPI, a petrol dealers\' association reacting to it, an analysis of what it means for bank earnings, and an editorial on it, all printed the same day. → each pair is same story; anchor: the MDR-on-UPI announcement.\n- *Same subject only.* Two reports on two different cricket matches. → no shared happening.\n- *Same subject only.* A protest in Delhi and a protest in Mumbai on the same day, both against the same policy: they share a movement (a long process), not one dated happening. → same subject only, **unless** one is a reaction to a specific happening in the other.\n- *Same subject only.* The Supreme Court on an anomaly in Form 6 filings, and an article on the effects of the electoral-roll revision (SIR). → same subject (the SIR), **unless** both articles report or react to one specific ruling or hearing that day, in which case same story.\n- *It depends on the anchor.* RBI revising its growth and inflation forecasts, and consumption stocks falling after a repo-rate hike: same story **if** both stem from the same policy announcement; same subject only if they are about different occasions.\n\n**Output:** `label` (one of the four) · `anchor` (a few words with a date if known; empty for labels 3 and 4) · `reason` (one sentence).'
 
 
@@ -137,6 +145,211 @@ def spread_draw(pool, n, per_date, per_text, rng):
             quota[d] -= 1
             stuck.add(d)        # no pair left on this date under the per-article limit
     return taken
+
+
+# ---------- haiku (v0.3): the gating model, same settings as the tagger ----------
+JUDGE_TOOL = {
+    "name": "judge_pair",
+    "description": "Record how the two articles relate, using the definition's four labels.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string", "enum": LADDER_ENUM},
+            "anchor": {"type": "string", "description": "the specific dated happening both stem from (labels same_event / same_story); empty otherwise"},
+            "reason": {"type": "string", "description": "one sentence"},
+        },
+        "required": ["label", "anchor", "reason"],
+        "additionalProperties": False,
+    },
+}
+JUDGE_MAX_WORDS = 1200      # per article body, as the tagger's MAX_BODY_WORDS
+
+
+def article_text(tag, s):
+    words = s["body"].split()
+    body = " ".join(words[:JUDGE_MAX_WORDS]) + (" [...]" if len(words) > JUDGE_MAX_WORDS else "")
+    return (f"ARTICLE {tag}\nPaper: {s['paper']} · Date: {s['date']} · Page: {s['page']}\n"
+            f"Headline: {s['head']}\n" + (f"Deck: {s['deck']}\n" if s["deck"] else "") + f"Body: {body}")
+
+
+def judge_messages(sa, sb):
+    return [{"role": "user", "content": article_text("A", sa) + "\n\n" + article_text("B", sb)
+             + "\n\nApply the definition and record your answer with the judge_pair tool."}]
+
+
+def cmd_haiku(args):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import os
+    import anthropic
+    from dotenv import load_dotenv
+    from p2_tag import MODELS, PRICES, SAMPLING        # one source of truth for model settings
+    model = MODELS[args.model]
+    pf = PAIRS_DIR / f"pairs_{args.name}.jsonl"
+    if not pf.exists():
+        sys.exit(f"{pf} not found.")
+    pairs = [json.loads(l) for l in pf.read_text(encoding="utf-8").splitlines()[1:]]
+    out = PAIRS_DIR / f"haiku_{args.name}.json"
+    rec = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {
+        "model": model, "definition": DEFINITION_VERSION, "settings": SAMPLING.get(model, {}),
+        "tool": JUDGE_TOOL["name"], "max_words": JUDGE_MAX_WORDS, "labels": {}, "errors": {}, "cost_usd": 0.0}
+    if rec.get("model") != model or rec.get("definition") != DEFINITION_VERSION:
+        sys.exit(f"{out} was made with {rec.get('model')} / {rec.get('definition')}; use a new --name or move it away.")
+    todo = [p for p in pairs if p["pair"] not in rec["labels"]]
+    print(f"== haiku judge · {args.name} · {model} · settings {SAMPLING.get(model, {})} · definition {DEFINITION_VERSION}")
+    print(f"pairs {len(pairs)} · already done {len(pairs) - len(todo)} · to do {len(todo)} · cap ${args.cap:.2f}")
+    if args.dry or not todo:
+        print("nothing to do." if not todo else "dry run: no calls made.")
+        return
+    load_dotenv(Path.home() / ".config" / "news-intel" / ".env")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        sys.exit("No ANTHROPIC_API_KEY found in ~/.config/news-intel/.env")
+    client = anthropic.Anthropic(max_retries=8)
+    news = ro(NEWS_DB)
+    seat = {}
+    for p in todo:
+        for h in (p["a"], p["b"]):
+            r = news.execute("SELECT p.date, p.publisher, p.page, p.deck, t.headline, t.body FROM placements p JOIN texts t "
+                             "ON t.text_hash = p.text_hash WHERE p.text_hash = ? AND p.run_id = ? "
+                             "ORDER BY p.date, p.publisher, p.art_id LIMIT 1", (h, args.run)).fetchone()
+            seat[h] = {"date": r[0], "paper": r[1], "page": r[2], "deck": r[3] or "", "head": r[4] or "", "body": r[5] or ""}
+    pin, pout = PRICES[model]
+    extra = {"on": bool(SAMPLING.get(model))}
+    for n, p in enumerate(todo, 1):
+        if rec["cost_usd"] > args.cap:
+            print(f"stopped: spend ${rec['cost_usd']:.3f} passed the cap; re-run to continue.")
+            break
+        req = {"model": model, "max_tokens": 600, "system": DEFINITION, "tools": [JUDGE_TOOL],
+               "tool_choice": {"type": "tool", "name": JUDGE_TOOL["name"]},
+               "messages": judge_messages(seat[p["a"]], seat[p["b"]])}
+        try:
+            if extra["on"]:
+                try:
+                    resp = client.messages.create(**req, extra_body=SAMPLING[model])
+                except anthropic.BadRequestError as e:
+                    extra["on"] = False
+                    print(f"  note: settings {SAMPLING[model]} refused ({str(e)[:120]}); using defaults")
+                    resp = client.messages.create(**req)
+            else:
+                resp = client.messages.create(**req)
+        except Exception as e:                       # network etc. after the SDK's own retries: record, go on
+            rec["errors"][p["pair"]] = f"call failed: {type(e).__name__}"
+            continue
+        rec["cost_usd"] += (resp.usage.input_tokens * pin + resp.usage.output_tokens * pout) / 1e6
+        ans = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None)
+        if not isinstance(ans, dict) or ans.get("label") not in LADDER_ENUM:
+            rec["errors"][p["pair"]] = "no valid label (fail-closed: not guessed)"
+        else:
+            rec["labels"][p["pair"]] = {"label": ans["label"], "anchor": str(ans.get("anchor", ""))[:200],
+                                        "reason": str(ans.get("reason", ""))[:400]}
+            rec["errors"].pop(p["pair"], None)
+        if n % 10 == 0 or n == len(todo):
+            out.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")   # resumable
+            print(f"  {len(rec['labels'])} labelled · {len(rec['errors'])} errors · ${rec['cost_usd']:.3f}")
+    out.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"wrote {out}: {len(rec['labels'])} labels, {len(rec['errors'])} errors, ${rec['cost_usd']:.3f}. "
+          "Labels are not printed (blind rule); `score` compares them after Kunaal's pass.")
+
+
+# ---------- score (v0.3) ----------
+LADDER = ["same_event", "same_story", "same_subject", "unrelated"]
+MERGE = {"same_event", "same_story"}
+
+
+def kappa2(xs, ys):
+    """Cohen's kappa for two lists of equal length (any labels)."""
+    n = len(xs)
+    if not n:
+        return None
+    cats = sorted(set(xs) | set(ys))
+    po = sum(x == y for x, y in zip(xs, ys)) / n
+    pe = sum((xs.count(c) / n) * (ys.count(c) / n) for c in cats)
+    return None if pe == 1 else (po - pe) / (1 - pe)
+
+
+def boot(xs, ys, reps, seed):
+    rng = random.Random(seed)
+    n, ks = len(xs), []
+    for _ in range(reps):
+        idx = [rng.randrange(n) for _ in range(n)]
+        k = kappa2([xs[i] for i in idx], [ys[i] for i in idx])
+        if k is not None:
+            ks.append(k)
+    ks.sort()
+    return (ks[int(0.025 * len(ks))], ks[int(0.975 * len(ks)) - 1]) if ks else (None, None)
+
+
+def model_labels(path):
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    out = {}
+    for k, v in rec.get("labels", {}).items():
+        lab = v.get("label") if isinstance(v, dict) else v
+        if lab not in LADDER:
+            sys.exit(f"{path.name}: pair {k} has label {lab!r}, not one of {LADDER}")
+        out[k] = lab
+    return rec, out
+
+
+def cmd_score(args):
+    pf = PAIRS_DIR / f"pairs_{args.name}.jsonl"
+    lf = SHEET_DIR / f"labels_{args.name}.json"
+    for f in (pf, lf):
+        if not f.exists():
+            sys.exit(f"{f} not found.")
+    ids = [json.loads(l)["pair"] for l in pf.read_text(encoding="utf-8").splitlines()[1:]]
+    kun = json.loads(lf.read_text(encoding="utf-8"))["labels"]
+    missing = [i for i in ids if i not in kun]
+    print(f"== judge agreement test · {args.name} · definition {DEFINITION_VERSION} · gate: kappa >= 0.70 on the merge decision")
+    print(f"Kunaal: {len(kun)} of {len(ids)} labelled" + (f" · {len(missing)} missing" if missing else "")
+          + f" · can't tell {sum(v == 'cant' for v in kun.values())} (left out)")
+    use = [i for i in ids if kun.get(i) in LADDER]
+    merges = sum(kun[i] in MERGE for i in use)
+    print(f"Kunaal merges (same event + same story): {merges} of {len(use)}  ->  "
+          + ("top-up rule met (>= 30)" if merges >= 30 else "FEWER THAN 30: top-up needed before scoring counts"))
+    print("Kunaal's labels: " + " · ".join(f"{l} {sum(kun[i] == l for i in use)}" for l in LADDER))
+    verdict = {}
+    for who in [m for m in args.models.split(",") if m]:
+        mf = PAIRS_DIR / f"{who}_{args.name}.json"
+        if not mf.exists():
+            print(f"-- {who}: {mf} not found (skipped)")
+            continue
+        rec, ml = model_labels(mf)
+        both = [i for i in use if i in ml]
+        if len(both) < len(use):
+            print(f"-- {who}: labels for {len(both)} of {len(use)} usable pairs")
+        k_m = [kun[i] in MERGE for i in both]
+        m_m = [ml[i] in MERGE for i in both]
+        k = kappa2(k_m, m_m)
+        lo, hi = boot(k_m, m_m, args.boot, args.seed)
+        agree = sum(a == b for a, b in zip(k_m, m_m)) / len(both) if both else 0
+        gate = "GATE" if who == args.gate else "diagnostic"
+        ok = k is not None and k >= 0.70
+        verdict[who] = ok
+        print(f"-- {who} ({gate}, {rec.get('model', '?')}): merge kappa {k:.2f} [{lo:.2f} … {hi:.2f}] · agreement {agree*100:.1f}% "
+              f"· n {len(both)} · {'PASS' if ok else 'FAIL'}")
+        sub = [i for i in both if kun[i] in MERGE and ml[i] in MERGE]
+        ks = kappa2([kun[i] for i in sub], [ml[i] for i in sub])
+        print(f"   event vs story where both merge (reported, not gating): n {len(sub)} · kappa "
+              + ("n/a" if ks is None else f"{ks:.2f}"))
+        print("   Kunaal (rows) x " + who + " (columns): " + "  ".join(f"{c[:8]:>8}" for c in LADDER))
+        for r in LADDER:
+            print(f"   {r:<14}" + "".join(f"{sum(kun[i] == r and ml[i] == c for i in both):>10}" for c in LADDER))
+        dis = [i for i in both if (kun[i] in MERGE) != (ml[i] in MERGE)]
+        print(f"   merge disagreements {len(dis)}: " + " ".join(dis))
+    g, d = verdict.get(args.gate), verdict.get(args.diag)
+    print("== outcome (pre-registered):", end=" ")
+    if merges < 30:
+        print("not scored yet: top-up first.")
+    elif g is None:
+        print(f"{args.gate} labels missing.")
+    elif g:
+        print(f"PASS on {args.gate}: B·3 builds the judge with definition {DEFINITION_VERSION}.")
+    elif d:
+        print(f"FAIL on {args.gate}, PASS on {args.diag}: the definition works, the model is too weak -> stronger model or layout (Kunaal decides).")
+    elif d is False:
+        print(f"FAIL on both: revise the definition once from the disagreements, then a NEW fresh set (not these pairs).")
+    else:
+        print(f"FAIL on {args.gate}; {args.diag} not run yet, so the cause is not known.")
+    print("Nothing was written.")
 
 
 def card(s):
@@ -274,7 +487,7 @@ show();
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["sample"])
+    ap.add_argument("command", choices=["sample", "haiku", "score"])
     ap.add_argument("--name", default="j1")
     ap.add_argument("--n", type=int, default=200)
     ap.add_argument("--seed", type=int, default=2028)
@@ -284,10 +497,16 @@ def main():
     ap.add_argument("--tag-prompt", default="v1.3")
     ap.add_argument("--per-date", type=int, default=25, help="v0.2: at most this many pairs from one date")
     ap.add_argument("--per-text", type=int, default=3, help="v0.2: at most this many pairs containing one article")
+    ap.add_argument("--models", default="haiku,opus", help="score: model label files data/pairs/<model>_<name>.json")
+    ap.add_argument("--gate", default="haiku")
+    ap.add_argument("--model", default="haiku-5.5", help="haiku: model short name from p2_tag.MODELS")
+    ap.add_argument("--cap", type=float, default=1.0, help="haiku: stop when spend passes this many dollars")
+    ap.add_argument("--diag", default="opus")
+    ap.add_argument("--boot", type=int, default=1000)
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
-    {"sample": cmd_sample}[args.command](args)
+    {"sample": cmd_sample, "haiku": cmd_haiku, "score": cmd_score}[args.command](args)
 
 
 if __name__ == "__main__":
