@@ -12,3 +12,5 @@ _old/
 
 needs_ocr/
 .venv-embed/
+_docs/
+_work/

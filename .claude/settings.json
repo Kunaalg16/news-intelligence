@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "blockReadsOutsideWorkingDirectories": true,
+    "deny": [
+      "Read(./review/pairs/labels_*)",
+      "Read(./review/threads/labels_*)",
+      "Read(~/.config/news-intel/**)",
+      "Read(**/.env)",
+      "Edit(./review/pairs/labels_*)",
+      "Edit(./review/threads/labels_*)",
+      "Edit(./CLAUDE.md)",
+      "Edit(./.claude/**)",
+      "Edit(./_docs/**)",
+      "Edit(./archive/**)",
+      "Edit(./eval/**)",
+      "Edit(./data/pairs/**)",
+      "Edit(./data/snapshots/**)",
+      "Edit(./review/tag_audit/**)"
+    ],
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git reset *)",
+      "Bash(git checkout *)",
+      "Bash(rm *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true,
+    "filesystem": {
+      "denyRead": [
+        "./review/pairs/labels_*",
+        "./review/threads/labels_*",
+        "~/.config/news-intel"
+      ],
+      "denyWrite": [
+        "./data/news.db",
+        "./data/vectors.db",
+        "./data/snapshots",
+        "./data/pairs",
+        "./archive",
+        "./eval",
+        "./_docs",
+        "./review/pairs",
+        "./review/threads",
+        "./review/tag_audit",
+        "./CLAUDE.md"
+      ]
+    },
+    "credentials": {
+      "envVars": [
+        { "name": "ANTHROPIC_API_KEY", "mode": "deny" },
+        { "name": "VOYAGE_API_KEY", "mode": "deny" }
+      ]
+    }
+  }
+}
