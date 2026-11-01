@@ -31,27 +31,48 @@ const S = {
   prefs: {},
   threads: {},           /* thread_id -> thread | null (null = this story has none) */
   newSince: {},          /* story_id -> [text_hash] that arrived since the last read */
+  keepUnread: new Set(),  /* story ids the reader is holding unread */
+  pins: [],
+  openBoardId: null,
   openStoryId: null,
   lastVisit: null,
   openedAStory: false,
+  reachable: true,       /* false once a request finds nothing answering at all */
 };
 
 /* ------------------------------------------------------------------- the routes */
 
+/* A route that answers 404 and a server that is not running are different failures, and
+   neither may take the page down. `fetch` REJECTS when nothing answers -- it does not
+   return a response -- so without this catch one unreachable route leaves the reader
+   looking at an empty shell with no idea why. Both come back as null; S.reachable says
+   which kind it was, and the page says so on screen. */
 async function getJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) return null;
-  return r.json();
+  try {
+    const r = await fetch(url);
+    S.reachable = true;
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    S.reachable = false;
+    return null;
+  }
 }
 
 async function postJSON(url, body, method) {
-  const r = await fetch(url, {
-    method: method || 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!r.ok) return null;
-  return r.json();
+  try {
+    const r = await fetch(url, {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    S.reachable = true;
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    S.reachable = false;
+    return null;
+  }
 }
 
 const api = {
@@ -71,6 +92,7 @@ const api = {
   follow: (storyId, hashes, on) =>
     postJSON('/api/follow', { story_id: storyId, text_hashes: hashes, on: on }),
   follows: () => getJSON('/api/follows'),
+  keepUnreadList: () => getJSON('/api/keep_unread'),
   boards: () => getJSON('/api/boards'),
   newBoard: (name) => postJSON('/api/boards', { name: name }),
   pin: (boardId, itemType, payload, source) =>
@@ -427,8 +449,181 @@ function metaLine(story) {
   bits.push(count(cov.articles, 'article') + ' from ' + count(cov.papers, 'paper'));
   return el('div', { class: 'meta-line' },
     el('p', { class: 'meta-source', text: bits.join(' · ') }),
-    /* The reader's own buttons (Keep unread, Follow, Pin, the votes) arrive with A6. */
-    el('div', { class: 'meta-actions', id: 'meta-actions' }));
+    storyActions(story));
+}
+
+/* ============================================================== reader actions
+
+   READ IS ON LEAVE. Nothing here marks a story read when it opens: the page waits until
+   the reader goes somewhere else (another story, another screen, or away from the tab
+   altogether). So the story in front of you never says READ, and running an eye down the
+   drawer does not consume the morning. "Keep unread" holds a story against that, and a
+   story already read can be put back to unread the same way.
+*/
+
+function storyActions(story) {
+  const hashes = storyHashes(story);
+  const read = isRead(story);
+  const held = S.keepUnread.has(story.story_id);
+  const following = isFollowed(story);
+
+  const keep = el('button', {
+    class: 'reset action', type: 'button',
+    'aria-pressed': held ? 'true' : 'false',
+    text: read && !held ? 'Mark unread' : 'Keep unread',
+    onclick: async () => {
+      const on = !held;
+      if (on) S.keepUnread.add(story.story_id); else S.keepUnread.delete(story.story_id);
+      const res = await api.keepUnread(story.story_id, hashes, on);
+      if (res && res.read) Object.assign(S.read, res.read);
+      render();
+    },
+  });
+
+  const follow = el('button', {
+    class: 'reset action', type: 'button', dataset: { you: 'true' },
+    'aria-pressed': following ? 'true' : 'false',
+    text: following ? '★ Following' : '☆ Follow',
+    onclick: async () => {
+      const res = await api.follow(story.story_id, hashes, !following);
+      S.follows = (res && res.follows) || S.follows;
+      render();
+    },
+  });
+
+  const up = el('button', {
+    class: 'reset action', type: 'button', dataset: { vote: 'true' },
+    'aria-label': 'This story was worth reading', title: 'Worth reading',
+    onclick: async () => {
+      await api.feedback('story', story.story_id, hashes, 'up', null);
+      toast('Thank you · noted');
+    },
+  }, '👍');
+
+  const voteHolder = el('span', {});
+  const down = el('button', {
+    class: 'reset action', type: 'button', dataset: { vote: 'true' },
+    'aria-label': 'This story was not worth reading', title: 'Not worth reading',
+    onclick: () => {
+      clear(voteHolder);
+      const input = el('input', { type: 'text', 'aria-label': 'Why? (optional)',
+                                  placeholder: 'Why? (optional)' });
+      const send = el('button', {
+        class: 'reset action', type: 'button', text: 'Send',
+        onclick: async () => {
+          await api.feedback('story', story.story_id, hashes, 'down',
+                             input.value.trim() || null);
+          clear(voteHolder);
+          toast('Thank you · noted');
+        },
+      });
+      voteHolder.append(el('span', { class: 'why-field' }, input, send));
+      input.focus();
+    },
+  }, '👎');
+
+  return el('div', { class: 'meta-actions', id: 'meta-actions' },
+    keep, follow, pinButton(story), up, down, voteHolder);
+}
+
+/* §8.6 — the boards menu: most recently used first, a new board inline, and six seconds
+   to undo, because pinning to the wrong board is the easy mistake. */
+function pinButton(story) {
+  const wrap = el('span', { class: 'pin-wrap' });
+  const menu = el('div', { class: 'pin-menu' });
+  menu.hidden = true;
+
+  const button = el('button', {
+    class: 'reset action', type: 'button', dataset: { you: 'true' },
+    'aria-expanded': 'false', 'aria-haspopup': 'menu', text: 'Pin to board',
+    onclick: async () => {
+      const open = menu.hidden;
+      if (open) {
+        const boards = await api.boards();
+        S.boards = (boards && boards.boards) || [];
+        fillPinMenu(menu, story, () => { menu.hidden = true;
+                                         button.setAttribute('aria-expanded', 'false'); });
+      }
+      menu.hidden = !open;
+      button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    },
+  });
+
+  wrap.append(button, menu);
+  return wrap;
+}
+
+function pinPayload(story) {
+  const head = story.headline || {};
+  const source = rowsByHash(story).get(head.source_text_hash);
+  return {
+    payload: { story_id: story.story_id, headline: head.text,
+               text_hashes: storyHashes(story) },
+    source: { digest_ref: S.ref, paper: source ? source.paper : null,
+              date: source ? source.date : null,
+              page_link: source ? source.page_link : null },
+  };
+}
+
+function fillPinMenu(menu, story, close) {
+  clear(menu);
+  const { payload, source } = pinPayload(story);
+
+  menu.append(el('ul', {}, S.boards.map((b) => el('li', {},
+    el('button', { class: 'reset', type: 'button', onclick: async () => {
+      close();
+      const res = await api.pin(b.board_id, 'story', payload, source);
+      pinnedToast(b.name, res && res.pin_id);
+    } },
+      b.name, ' ', el('span', { class: 'pin-count',
+                                text: '(' + b.pin_count + ')' }))))));
+
+  const input = el('input', { type: 'text', 'aria-label': 'New board name',
+                              placeholder: 'New board…' });
+  const make = el('button', {
+    class: 'reset action', type: 'button', text: 'Add',
+    onclick: async () => {
+      const name = input.value.trim();
+      if (!name) return;
+      close();
+      const made = await api.newBoard(name);
+      if (!made) return;
+      S.boards = made.boards || S.boards;
+      const res = await api.pin(made.board_id, 'story', payload, source);
+      pinnedToast(name, res && res.pin_id);
+    },
+  });
+  menu.append(el('div', { class: 'pin-new' }, input, make));
+}
+
+const UNDO_SECONDS = 6;     /* long enough to notice the toast, short enough to ignore */
+let toastTimer = null;
+
+function toast(text, undo) {
+  const node = document.getElementById('toast');
+  clear(node);
+  node.append(el('span', { text: text }));
+  if (undo) {
+    node.append(el('button', { class: 'reset', type: 'button', text: 'Undo',
+                               onclick: () => { undo(); hideToast(); } }));
+  }
+  node.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, UNDO_SECONDS * 1000);
+}
+
+function hideToast() {
+  const node = document.getElementById('toast');
+  node.hidden = true;
+  clear(node);
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+}
+
+function pinnedToast(boardName, pinId) {
+  toast('Pinned to ' + boardName, pinId ? async () => {
+    await api.unpin(pinId);
+    toast('Unpinned');
+  } : null);
 }
 
 /* §8.4.5 — open the first time this story is seen, folded after that (a pref per
@@ -800,9 +995,12 @@ function graphView(thread) {
       el('span', { class: 'graph-title', text: r.headline })));
   });
 
-  const width = Math.max(spine.length, 1) * GRAPH.col + GRAPH.pad;
+  /* The spine stops at the last day rather than running on past it, and goes in FIRST so
+     the boxes sit on top of it: appended last it painted straight through their text. */
+  const lastLeft = Math.max(spine.length - 1, 0) * GRAPH.col + GRAPH.pad;
+  const width = lastLeft + GRAPH.box;
   canvas.style.width = width + 'px';
-  canvas.append(el('span', { class: 'graph-spine',
+  canvas.prepend(el('span', { class: 'graph-spine',
     style: 'width:' + width + 'px; left:0' }));
   if (thread.entries.length) show(thread.entries[0]);
 
@@ -911,14 +1109,148 @@ function goToThreadEntry(entryId) {
 
 /* ------------------------------------------------------------------- the screens */
 
+/* ------------------------------------------------------------- the other screens */
+
+function boardsScreen(pane) {
+  pane.append(el('h2', { class: 'screen-title', text: 'Boards' }));
+  if (S.openBoardId) {
+    const board = S.boards.find((b) => b.board_id === S.openBoardId);
+    pane.append(el('button', { class: 'reset back-link', type: 'button',
+      onclick: () => { S.openBoardId = null; render(); } }, '← All boards'));
+    pane.append(el('h3', { class: 'plain-name', text: board ? board.name : 'Board' }));
+    const pins = S.pins || [];
+    if (!pins.length) {
+      pane.append(el('p', { class: 'empty-note', text: 'Nothing pinned here yet.' }));
+      return;
+    }
+    pane.append(el('ul', { class: 'plain-list' }, pins.map((p) => {
+      const payload = p.payload || {};
+      const source = p.source || {};
+      const bits = [source.paper, source.date ? dateWithDay(source.date) : null,
+                    source.page_link ? source.page_link.label : null].filter(Boolean);
+      return el('li', {}, el('button', {
+        class: 'reset plain-row', type: 'button',
+        onclick: () => openPin(p),
+      },
+        el('span', { class: 'plain-name',
+                     text: payload.headline || payload.text_hash || p.item_type }),
+        el('span', { class: 'pin-source',
+                     text: (p.item_type + (bits.length ? ' · ' + bits.join(' · ')
+                                                       : '')) })));
+    })));
+    return;
+  }
+
+  if (!S.boards.length) {
+    pane.append(el('p', { class: 'empty-note',
+      text: 'No boards yet. Pin a story to make one.' }));
+    return;
+  }
+  pane.append(el('ul', { class: 'plain-list' }, S.boards.map((b) => el('li', {},
+    el('button', { class: 'reset plain-row', type: 'button',
+      onclick: async () => {
+        const pins = await api.boardPins(b.board_id);
+        S.pins = (pins && pins.pins) || [];
+        S.openBoardId = b.board_id;
+        render();
+      } },
+      el('span', { class: 'plain-name', text: b.name }),
+      el('span', { class: 'plain-sub',
+        text: count(b.pin_count, 'pin')
+              + (b.last_used_at ? ' · last used ' + dateWithDay(b.last_used_at)
+                                : '') }))))));
+}
+
+/* A pin goes back to what it came from: a story in its own digest, or an article. */
+function openPin(p) {
+  const payload = p.payload || {};
+  if (p.item_type === 'article' && payload.text_hash) {
+    openArticle(payload.text_hash);
+    return;
+  }
+  const ref = (p.source || {}).digest_ref;
+  S.screen = 'today';
+  if (ref && ref !== S.ref) { loadDigest(ref, payload.story_id); return; }
+  if (payload.story_id) openStory(payload.story_id); else render();
+}
+
+function isOpenDigest(d) {
+  return Boolean(S.digest) && d.built_at === S.digest.built_at;
+}
+
+function pastScreen(pane) {
+  pane.append(el('h2', { class: 'screen-title', text: 'Past digests' }));
+  pane.append(el('ul', { class: 'plain-list' }, S.digests.map((d) => el('li', {},
+    el('button', {
+      class: 'reset plain-row', type: 'button',
+      /* "latest" is a request, not a name, so the open digest is the one whose build
+         time matches what is loaded -- comparing refs would never match it. */
+      'aria-current': isOpenDigest(d) ? 'true' : null,
+      onclick: () => { S.screen = 'today'; loadDigest(d.ref, null); },
+    },
+      el('span', { class: 'plain-name', text: windowText(d.window) }),
+      el('span', { class: 'plain-sub',
+        text: 'built ' + (d.built_at ? dateWithDay(d.built_at) + ' '
+                                       + timeOfDay(d.built_at) : '')
+              + (isOpenDigest(d) ? ' · open' : '') }))))));
+}
+
+/* Another digest: its read state still applies, so the stamps are right at once. */
+async function loadDigest(ref, thenOpenStoryId) {
+  await leaveOpenStory();
+  S.ref = ref;
+  S.digest = await api.digest(ref);
+  S.openStoryId = null;
+  S.threads = {};
+  S.newSince = {};
+  await refreshRead();
+  const first = thenOpenStoryId
+    || (stories().length ? stories()[0].story_id : null);
+  render();
+  if (first) await openStory(first);
+}
+
+async function refreshRead() {
+  const hashes = [];
+  for (const s of stories()) hashes.push(...storyHashes(s));
+  for (const f of S.follows) hashes.push(...(f.text_hashes || []));
+  if (!hashes.length) return;
+  const read = await api.readState([...new Set(hashes)]);
+  S.read = (read && read.read) || {};
+}
+
 function renderReading() {
   const pane = document.getElementById('reading');
   clear(pane);
-  if (S.screen === 'today') {
-    const story = findStory(S.openStoryId);
-    if (story) renderStory(pane, story);
-    else pane.append(el('p', { class: 'drawer-note', text: 'Choose a story.' }));
+
+  if (!S.digest) {
+    pane.append(el('h2', { class: 'screen-title',
+      text: S.reachable ? 'No digest to show' : 'The server is not answering' }));
+    pane.append(el('p', { class: 'empty-note', text: S.reachable
+      ? 'The server is running, but it has no digest to show yet.'
+      : 'Nothing is answering at 127.0.0.1:8765. Start it with'
+        + '  .venv/bin/python src/p3_app.py  in ~/news-intel, then reload this page.' }));
+    return;
   }
+
+  if (S.screen === 'boards') { boardsScreen(pane); return; }
+  if (S.screen === 'past') { pastScreen(pane); return; }
+  const story = findStory(S.openStoryId);
+  if (story) renderStory(pane, story);
+  else pane.append(el('p', { class: 'drawer-note', text: 'Choose a story.' }));
+}
+
+/* Leaving a story is what marks it read: opening another one, going to another screen,
+   or leaving the tab. A story held unread is left alone, and the double refuses it too,
+   so the rule does not depend on this function remembering to check. */
+async function leaveOpenStory() {
+  const story = findStory(S.openStoryId);
+  if (!story) return;
+  if (S.keepUnread.has(story.story_id)) return;
+  const hashes = storyHashes(story);
+  if (!hashes.length || hashes.every((h) => S.read[h])) return;
+  const res = await api.markRead(hashes);
+  if (res && res.read) Object.assign(S.read, res.read);
 }
 
 function render() {
@@ -930,6 +1262,7 @@ function render() {
 /* Opening a story: the read-on-leave rule and the rest of the reader's actions arrive
    with A6; A3 only moves which story is open. */
 async function openStory(storyId) {
+  if (S.openStoryId && S.openStoryId !== storyId) await leaveOpenStory();
   S.openStoryId = storyId;
   if (!S.openedAStory) {
     S.openedAStory = true;
@@ -966,6 +1299,7 @@ async function boot() {
 
   const [status, digest, cost, follows] =
     await Promise.all([api.status(), api.digest(S.ref), api.cost(), api.follows()]);
+  if (!digest) { S.digest = null; render(); return; }
   S.status = status;
   S.digest = digest;
   S.cost = cost;
@@ -979,6 +1313,9 @@ async function boot() {
     S.read = (read && read.read) || {};
   }
 
+  const held = await api.keepUnreadList();
+  for (const k of ((held && held.keep_unread) || [])) S.keepUnread.add(k.story_id);
+
   const view = await api.pref('thread_view');
   S.prefs.thread_view = view ? view.value : null;
 
@@ -988,8 +1325,35 @@ async function boot() {
   S.lastVisit = visit && visit.last_visit;
 
   for (const b of document.querySelectorAll('.nav-item')) {
-    b.addEventListener('click', () => { S.screen = b.dataset.screen; render(); });
+    b.addEventListener('click', async () => {
+      if (b.dataset.screen !== 'today') await leaveOpenStory();
+      if (b.dataset.screen === 'boards') {
+        const boards = await api.boards();
+        S.boards = (boards && boards.boards) || [];
+        S.openBoardId = null;
+      }
+      if (b.dataset.screen === 'past') {
+        const list = await api.digests();
+        S.digests = (list && list.digests) || [];
+      }
+      S.screen = b.dataset.screen;
+      render();
+    });
   }
+
+  /* ... and so does leaving the tab. `keepalive` is what makes the request survive the
+     page going away; without it the last story read of the morning would be lost. */
+  window.addEventListener('pagehide', () => {
+    const story = findStory(S.openStoryId);
+    if (!story || S.keepUnread.has(story.story_id)) return;
+    const hashes = storyHashes(story).filter((h) => !S.read[h]);
+    if (!hashes.length) return;
+    fetch('/api/read', {
+      method: 'POST', keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text_hashes: hashes }),
+    });
+  });
 
   render();
   /* §8.3: Today opens with the first story already open. */

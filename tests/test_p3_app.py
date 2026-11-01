@@ -574,6 +574,25 @@ def routes():
                                     "text_hashes": hashes, "on": True})["follows"]), 1)
         check("/api/follows agrees", len(A.follows()["follows"]), 1)
 
+        # keep-unread must survive a reload, or the button lies about its own state
+        A.keep_unread(payload={"story_id": shown["story_id"], "text_hashes": hashes,
+                               "on": True})
+        check("the held stories can be asked for",
+              [k["story_id"] for k in A.keep_unread_list()["keep_unread"]],
+              [shown["story_id"]])
+        A.read(payload={"text_hashes": hashes})
+        check("and leaving a held story marks nothing",
+              any(A.read(payload={"text_hashes": hashes})["read"].values()), False)
+        A.keep_unread(payload={"story_id": shown["story_id"], "text_hashes": hashes,
+                               "on": False})
+        check("letting go empties the list", A.keep_unread_list()["keep_unread"], [])
+
+        # new-since, which the page draws its red box from
+        check("a story nothing has been read of has nothing new since",
+              A.new_since(shown["story_id"])["new_since_read"], [])
+        check("new_since on a story that is not in the digest is 404",
+              status_of(A.new_since, "2026-01-01:nope"), 404)
+
         board_id = A.new_board(payload={"name": "Protests"})["board_id"]
         check("a board with a blank name is 400",
               status_of(A.new_board, payload={"name": "   "}), 400)

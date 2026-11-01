@@ -636,6 +636,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 
 .graph-node {
   position: absolute;
+  z-index: 1;
   width: 104px; height: 70px;
   padding: 7px 8px;
   overflow: hidden;
@@ -660,7 +661,13 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
                                border: 1px dashed var(--mark); color: var(--text-secondary); }
 .graph-node[data-kind="spine"] .graph-tag,
 .graph-node[data-kind="rel"] .graph-tag { color: var(--text-muted); }
-.graph-node[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
+.graph-node[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -7px;
+  height: 3px;
+  background: var(--ink);
+}
 
 /* a follow-up hangs above the spine on a red line; a related item below on a dashed one */
 .graph-link { position: absolute; width: 2px; background: var(--red); }
@@ -695,7 +702,61 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    clean line rather than mid-word at its edge. */
 .graph-node .graph-title {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ============================================================== reader actions */
+
+.action {
+  padding: 4px 9px;
+  border: 1px solid var(--mark);
+  font-size: var(--s125);
+  color: var(--text-secondary);
+  background: var(--page);
+  white-space: nowrap;
+}
+.action:hover { border-color: var(--ink); color: var(--ink); }
+
+/* Ochre is "you": the things the reader does to a story, not the news itself. */
+.action[data-you="true"] { color: var(--ochre); border-color: var(--ochre); }
+.action[aria-pressed="true"] { background: var(--chip-ground); color: var(--ochre);
+                               border-color: var(--ochre); font-weight: 600; }
+.action[data-vote="true"] { font-size: var(--s14); line-height: 1.1; padding: 3px 7px; }
+
+.pin-wrap { position: relative; display: inline-block; }
+
+.pin-menu {
+  position: absolute;
+  right: 0; top: calc(100% + 4px);
+  z-index: 15;
+  min-width: 210px;
+  padding: 6px 0;
+  background: var(--page);
+  border: 1px solid var(--ink);
+}
+.pin-menu ul { margin: 0; padding: 0; list-style: none; }
+.pin-menu li button {
+  display: block; width: 100%;
+  padding: 6px 12px;
+  font-size: var(--s125);
+}
+.pin-menu li button:hover { background: var(--drawer-ground); }
+.pin-menu .pin-count { color: var(--text-muted); }
+.pin-new { display: flex; gap: 6px; padding: 6px 12px; border-top: 1px solid var(--rule-light); }
+.pin-new input { flex: 1 1 auto; min-width: 0; padding: 4px 6px; font: inherit;
+                 font-size: var(--s125); border: 1px solid var(--mark); background: var(--page); }
+
+/* ------------------------------------------------------ boards and past digests */
+
+.screen-title { margin: 0 0 16px; font-family: var(--serif); font-size: var(--s26);
+                font-weight: 500; }
+.plain-list { margin: 0; padding: 0; list-style: none; }
+.plain-list li { border-bottom: 1px solid var(--rule-light); }
+.plain-row { display: block; width: 100%; padding: 11px 0; }
+.plain-row:hover { background: var(--drawer-ground); }
+.plain-name { font-family: var(--serif); font-size: var(--s19); display: block; }
+.plain-sub { font-size: var(--s125); color: var(--text-muted); }
+.pin-source { font-size: var(--s125); color: var(--text-muted); display: block; }
+.empty-note { font-size: var(--s14); color: var(--text-muted); }

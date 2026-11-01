@@ -278,6 +278,12 @@ def keep_unread(payload: dict = Body(...)):
     return {"story_id": story_id, "on": bool(on), "read": data.read_state(hashes)}
 
 
+@app.get("/api/keep_unread")
+def keep_unread_list():
+    """Which stories are being held unread, so the button is right after a reload."""
+    return {"keep_unread": data.list_keep_unread()}
+
+
 @app.post("/api/follow")
 def follow(payload: dict = Body(...)):
     story_id, hashes, on = _need(payload, "story_id", "text_hashes", "on")

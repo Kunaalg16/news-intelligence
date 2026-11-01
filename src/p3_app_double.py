@@ -528,6 +528,18 @@ def set_keep_unread(story_id, text_hashes, on):
     _save_state(state)
 
 
+def list_keep_unread():
+    """The stories being held unread. Added to request R1 by this build (register C2).
+
+    §4 gives `set_keep_unread` and no way to ask. The rule still holds without one --
+    `mark_read` refuses a held hash -- but after a reload the page could not tell which
+    stories to show "Keep unread" as already on, so the button would lie. The brief
+    added `follow` / `list_follows` to R1 for the same reason.
+    """
+    return [{"story_id": sid, "text_hashes": hs}
+            for sid, hs in sorted(_load_state()["keep_unread"].items())]
+
+
 def follow(story_id, text_hashes, on):
     """Follow or unfollow a story (added to request R1 by this build; register C2)."""
     state = _load_state()
