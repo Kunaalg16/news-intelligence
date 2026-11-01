@@ -306,3 +306,210 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ================================================================= the story page */
+
+.label-line {
+  margin: 0 0 10px;
+  font-size: var(--s11);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.label-line[data-developing="true"] { color: var(--red); }
+
+/* Caveat tags sit ABOVE the headline, so a warning is read before the claim. */
+.caveats { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; padding: 0;
+           list-style: none; }
+.caveat {
+  padding: 1px 6px;
+  border: 1px solid var(--mark);
+  font-size: var(--s11);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.story-headline {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: var(--s40);
+  font-weight: 500;
+  line-height: 1.12;
+}
+
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0 0 22px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--rule-light);
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+.meta-source { margin: 0; }
+
+/* "sample data": invented content is always tagged, so it is never mistaken for news. */
+.fixture-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 5px;
+  border: 1px solid var(--mark);
+  font-size: var(--s11);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  vertical-align: 1px;
+}
+
+/* ------------------------------------------------------- the story so far (§8.4.5) */
+
+.story-so-far {
+  margin: 0 0 24px;
+  padding: 14px 16px 16px;
+  background: var(--drawer-ground);
+  border-top: 2px solid var(--ink);
+}
+.ssf-head { display: flex; align-items: baseline; justify-content: space-between;
+            gap: 12px; margin: 0 0 8px; }
+.ssf-title { margin: 0; font-family: var(--serif); font-size: var(--s19); font-weight: 500; }
+.ssf-toggle { font-size: var(--s125); color: var(--text-secondary);
+              text-decoration: underline; padding: 5px 0; }
+.ssf-body p { margin: 0 0 8px; font-family: var(--serif); font-size: var(--s16);
+              line-height: 1.5; }
+
+.key-dates { display: flex; flex-wrap: wrap; gap: 18px; margin: 12px 0 0; padding: 0;
+             list-style: none; border-top: 1px solid var(--rule); padding-top: 10px; }
+.key-date { max-width: 210px; }
+.key-date-when { display: block; font-size: var(--s125); font-weight: 600; color: var(--ink); }
+.key-date[data-upcoming="true"] .key-date-when { color: var(--red); }
+.key-date-what { display: block; font-size: var(--s125); color: var(--text-secondary);
+                 line-height: 1.4; }
+
+/* --------------------------------------------------- new since you read it (§8.4.6) */
+
+.new-since {
+  margin: 0 0 24px;
+  padding: 12px 16px 14px;
+  background: var(--red-ground);
+}
+.new-since-title {
+  margin: 0 0 8px;
+  font-size: var(--s11);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+.new-since ul { margin: 0; padding: 0; list-style: none; }
+.new-since li { margin: 0 0 8px; font-family: var(--serif); font-size: var(--s16);
+                line-height: 1.35; }
+
+/* ------------------------------------------------------------ the write-up (§8.4.7) */
+
+.writeup { margin: 0 0 24px; }
+.writeup p {
+  margin: 0 0 14px;
+  font-family: var(--serif);
+  font-size: var(--s19);
+  line-height: 1.62;
+}
+.one-liner-only { font-family: var(--serif); font-size: var(--s19); line-height: 1.5;
+                  margin: 0 0 24px; }
+.writeup-note { font-size: var(--s125); color: var(--text-muted); }
+
+/* ----------------------------------------------------------------- chips (§8.4.8) */
+
+.chips { display: inline; }
+.chip {
+  display: inline-block;
+  margin: 0 0 0 5px;
+  padding: 1px 5px;
+  position: relative;
+  background: var(--chip-ground);
+  color: var(--ochre);
+  font-family: var(--sans);
+  font-size: var(--s11);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: 2px;
+}
+/* The drawn chip stays small; the hit area is >= 24px high by a pseudo-element. */
+.chip::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  top: 50%;
+  height: 24px;
+  transform: translateY(-50%);
+}
+.chip:hover { background: #EADFC2; }
+
+/* ------------------------------------------------------- views and theme (§8.4.9-10) */
+
+.views, .theme-line { margin: 0 0 20px; font-size: var(--s125); color: var(--text-secondary); }
+.views ul { margin: 6px 0 0; padding: 0; list-style: none; }
+.views li { margin: 0 0 5px; line-height: 1.45; }
+.views-label, .theme-topic { font-weight: 600; color: var(--ink); }
+
+/* -------------------------------------------------------------- coverage (§8.4.12) */
+
+.coverage { margin: 0 0 22px; border-top: 1px solid var(--rule); }
+.coverage-toggle {
+  width: 100%;
+  padding: 10px 0;
+  font-size: var(--s125);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.coverage-table { width: 100%; border-collapse: collapse; font-size: var(--s125); }
+.coverage-table th {
+  text-align: left;
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--s11);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.coverage-table td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--rule-light);
+                     color: var(--text-secondary); vertical-align: top; }
+.coverage-table td:first-child { color: var(--ink); white-space: nowrap; }
+.row-new-dot { color: var(--red); font-size: var(--s14); line-height: 1; }
+
+.page-footer {
+  margin: 28px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule-light);
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------- the article view (§8.4.8) */
+
+.back-link { display: inline-block; margin: 0 0 16px; font-size: var(--s125);
+             font-weight: 500; padding: 5px 0; }
+.article-headline { margin: 0 0 8px; font-family: var(--serif); font-size: var(--s26);
+                    font-weight: 500; line-height: 1.18; }
+.article-meta { margin: 0 0 18px; font-size: var(--s125); color: var(--text-muted); }
+.article-body p { margin: 0 0 16px; font-family: var(--serif); font-size: var(--s19);
+                  line-height: 1.62; }
+
+/* A button that reads as a link: used where the thing opened is a view in this pane,
+   not a page of its own, so an <a href> would be a lie about what happens. */
+.link-like { text-decoration: underline; color: var(--ink); padding: 3px 0; }
+.link-like:hover { text-decoration-thickness: 2px; }
+
+.meta-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Arriving at a thread day from a story-so-far chip: the entry is marked, not animated. */
+.entry-flash { outline: 2px solid var(--ink); outline-offset: 4px; }

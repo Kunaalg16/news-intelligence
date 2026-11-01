@@ -30,6 +30,7 @@ const S = {
   boards: [],
   prefs: {},
   threads: {},           /* thread_id -> thread | null (null = this story has none) */
+  newSince: {},          /* story_id -> [text_hash] that arrived since the last read */
   openStoryId: null,
   lastVisit: null,
   openedAStory: false,
@@ -60,6 +61,8 @@ const api = {
   digest: (ref) => getJSON('/api/digest?ref=' + encodeURIComponent(ref || 'latest')),
   digests: () => getJSON('/api/digests'),
   article: (h) => getJSON('/api/article/' + encodeURIComponent(h)),
+  newSince: (storyId, ref) => getJSON('/api/new_since/' + encodeURIComponent(storyId)
+                                      + '?ref=' + encodeURIComponent(ref || 'latest')),
   thread: (id) => getJSON('/api/thread/' + encodeURIComponent(id)),
   readState: (hashes) => postJSON('/api/read_state', { text_hashes: hashes }),
   markRead: (hashes) => postJSON('/api/read', { text_hashes: hashes }),
@@ -167,6 +170,13 @@ function paperCode(paper) {
   const letters = words.filter((w) => !skip.has(w.toLowerCase()))
                        .map((w) => w[0].toUpperCase()).join('');
   return letters || String(paper).slice(0, 3);
+}
+
+/* "1 article from 1 paper", never "1 articles from 1 papers". The wording rule of §7 is
+   that a paper is a newspaper and an article is one piece, so both are counted out loud
+   wherever both matter -- which makes getting the singular right unavoidable. */
+function count(n, word) {
+  return n + ' ' + word + (n === 1 ? '' : 's');
 }
 
 function money(usd) {
@@ -323,13 +333,335 @@ function renderDrawer() {
     stories().map((s) => storyRow(s, s.rank))));
 }
 
-/* The story page itself is A4. Until then the pane shows what the drawer selected, so
-   the shell and the drawer can be seen working on real data. */
+/* =============================================================== the story page */
+
+/* Every coverage row of the open story, by its text_hash, so a write-up sentence's
+   citation can become a chip that names the paper and the page. */
+function rowsByHash(story) {
+  const map = new Map();
+  for (const r of ((story.coverage && story.coverage.rows) || [])) map.set(r.text_hash, r);
+  return map;
+}
+
+function chipLabel(row) {
+  return paperCode(row.paper) + ' ' + (row.page_link ? row.page_link.label : '');
+}
+
+/* A chip under a write-up sentence: which paper said this, and on which page.
+   Clicking it opens that article; hovering says what it is. */
+function articleChip(row) {
+  return el('button', {
+    class: 'reset chip',
+    type: 'button',
+    title: row.headline + ' · ' + row.paper + ', '
+           + (row.page_link ? row.page_link.label : ''),
+    onclick: () => openArticle(row.text_hash),
+  }, chipLabel(row));
+}
+
+/* A story-so-far sentence cites a DAY of the thread, not an article, so its chip says
+   the day and takes you to that entry in the thread (§8.4). */
+function dayChip(entryId) {
+  const date = String(entryId).split(':')[0];
+  return el('button', {
+    class: 'reset chip',
+    type: 'button',
+    title: 'That day in the thread',
+    onclick: () => goToThreadEntry(entryId),
+  }, dateShort(date));
+}
+
+function chipsFor(cites, byHash) {
+  const chips = [];
+  for (const cite of (cites || [])) {
+    const row = byHash.get(cite);
+    if (row) chips.push(articleChip(row));
+    else if (/^\d{4}-\d{2}-\d{2}:/.test(cite)) chips.push(dayChip(cite));
+  }
+  return chips.length ? el('span', { class: 'chips' }, chips) : null;
+}
+
+/* §8.4.1 — "DEVELOPING · DAY 5 · TAXES & BUDGET", or "NEW · TAXES & BUDGET". */
+function labelLine(story) {
+  const bits = [];
+  if (story.developing) {
+    bits.push('Developing');
+    const days = (story.story_so_far || {}).days;
+    if (days) bits.push('Day ' + days);
+  } else {
+    bits.push('New');
+  }
+  const topic = (story.theme || {}).topic;
+  if (topic) bits.push(topic);
+  return el('p', {
+    class: 'label-line',
+    dataset: { developing: story.developing ? 'true' : 'false' },
+    text: bits.join(' · '),
+  });
+}
+
+/* §8.4.2 — only the true ones, and each behind its own flag. */
+const CAVEATS = [
+  ['single_source', 'caveat_single_source', 'Single source'],
+  ['paid_content', 'caveat_paid_content', 'Paid content'],
+  ['paid_only', 'caveat_paid_only', 'Paid feature only'],
+  ['partial_text', 'caveat_partial_text', 'Partial text'],
+];
+
+function caveatTags(story) {
+  const tags = CAVEATS
+    .filter(([key, flag]) => S.flags[flag] && (story.caveats || {})[key] === true)
+    .map(([, , label]) => el('li', { class: 'caveat', text: label }));
+  return tags.length ? el('ul', { class: 'caveats' }, tags) : null;
+}
+
+function metaLine(story) {
+  const head = story.headline || {};
+  const source = rowsByHash(story).get(head.source_text_hash);
+  const cov = story.coverage || {};
+  const bits = [];
+  if (source) {
+    bits.push('Headline from ' + source.paper + ', '
+              + (source.page_link ? source.page_link.label : ''));
+  }
+  bits.push(count(cov.articles, 'article') + ' from ' + count(cov.papers, 'paper'));
+  return el('div', { class: 'meta-line' },
+    el('p', { class: 'meta-source', text: bits.join(' · ') }),
+    /* The reader's own buttons (Keep unread, Follow, Pin, the votes) arrive with A6. */
+    el('div', { class: 'meta-actions', id: 'meta-actions' }));
+}
+
+/* §8.4.5 — open the first time this story is seen, folded after that (a pref per
+   story id, so the box does not re-open every morning on a story already caught up on). */
+function storySoFar(story) {
+  const ssf = story.story_so_far;
+  if (!S.flags.story_so_far || !ssf || !ssf.shown) return null;
+
+  const key = 'ssf_seen:' + story.story_id;
+  const seen = Boolean(S.prefs[key]);
+  const open = !seen;
+  if (!seen) { S.prefs[key] = true; api.setPref(key, true); }
+
+  const byHash = rowsByHash(story);
+  const body = el('div', { class: 'ssf-body', id: 'ssf-body' },
+    (ssf.sentences || []).map((s) =>
+      el('p', {}, s.text, chipsFor(s.cites, byHash))),
+    keyDates(ssf.key_dates));
+  body.hidden = !open;
+
+  const toggle = el('button', {
+    class: 'reset ssf-toggle', type: 'button',
+    'aria-expanded': open ? 'true' : 'false', 'aria-controls': 'ssf-body',
+    text: open ? 'Hide' : 'Show',
+    onclick: (e) => {
+      const nowOpen = body.hidden;
+      body.hidden = !nowOpen;
+      e.currentTarget.textContent = nowOpen ? 'Hide' : 'Show';
+      e.currentTarget.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
+    },
+  });
+
+  return el('section', { class: 'story-so-far' },
+    el('div', { class: 'ssf-head' },
+      el('h3', { class: 'ssf-title', text: 'The story so far' }), toggle),
+    body);
+}
+
+/* A key date still to come is red; one already past is ink (§8.4.5). "Today" is the
+   reader's own date, computed here, because K3 does not mark which date is upcoming. */
+function todayISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-'
+         + String(d.getDate()).padStart(2, '0');
+}
+
+function keyDates(dates) {
+  const some = (dates || []).slice(0, 3);
+  if (!some.length) return null;
+  const today = todayISO();
+  return el('ul', { class: 'key-dates' }, some.map((k) =>
+    el('li', { class: 'key-date', dataset: { upcoming: k.date > today ? 'true' : 'false' } },
+      el('span', { class: 'key-date-when', text: dateWithDay(k.date) }),
+      el('span', { class: 'key-date-what', text: k.what }))));
+}
+
+function newSinceBox(story) {
+  const hashes = S.newSince[story.story_id] || [];
+  if (!hashes.length) return null;
+  const byHash = rowsByHash(story);
+  return el('section', { class: 'new-since' },
+    el('h3', { class: 'new-since-title', text: 'New since you read it' }),
+    el('ul', {}, hashes.map((h) => {
+      const row = byHash.get(h);
+      if (!row) return null;
+      return el('li', {}, row.headline, chipsFor([h], byHash));
+    })));
+}
+
+/* §8.4.7 — the write-up, each sentence followed by the chips of what it cites.
+   With no write-up, the one-liner stands in its place and says nothing about why. */
+function writeup(story) {
+  const w = story.writeup;
+  const byHash = rowsByHash(story);
+  if (!w || !w.sentences || !w.sentences.length) {
+    const capped = S.cost && S.cost.cap_usd !== null && S.cost.cap_usd !== undefined
+                   && S.cost.spent_usd >= S.cost.cap_usd;
+    return el('div', { class: 'one-liner-only' },
+      story.one_liner.text,
+      /* H5: at the cap, a missing write-up is explained; otherwise it is not. */
+      capped ? el('span', { class: 'writeup-note',
+                            text: ' · write-up paused: daily cap' }) : null);
+  }
+  return el('div', { class: 'writeup' },
+    w.sentences.map((s) => el('p', {}, s.text, chipsFor(s.cites, byHash))));
+}
+
+/* §8.4.9 — the opinion and analysis pieces beside the news.
+   A view has no text_hash of its own (logged as R10), so it opens the article view only
+   when the same piece is also a coverage row; otherwise it opens the printed page. */
+function viewsLine(story) {
+  const views = story.views || [];
+  if (!views.length) return null;
+  const rows = (story.coverage && story.coverage.rows) || [];
+  return el('section', { class: 'views' },
+    el('span', { class: 'views-label', text: 'Views' }),
+    el('ul', {}, views.map((v) => {
+      const match = rows.find((r) => r.paper === v.paper && r.date === v.date
+                                     && r.page === v.page);
+      const label = v.kind + ' · ' + paperCode(v.paper) + ' '
+                    + (v.page_link ? v.page_link.label : '');
+      const opener = match
+        ? el('button', { class: 'reset link-like', type: 'button',
+                         onclick: () => openArticle(match.text_hash) }, v.headline)
+        : el('a', { href: pdfHref(v.page_link), target: '_blank',
+                    rel: 'noopener' }, v.headline);
+      return el('li', {}, label + ' — ', opener);
+    })));
+}
+
+/* §8.4.10 — the trend word only when there is one; `no_trend_because` is never printed. */
+function themeLine(story) {
+  const theme = story.theme;
+  if (!S.flags.theme_line || !theme) return null;
+  const bits = [theme.stories_21d + ' stories in 21 days'];
+  if (theme.trend) bits.push(theme.trend);
+  return el('p', { class: 'theme-line' },
+    el('span', { class: 'theme-topic', text: theme.topic }),
+    ' · ' + bits.join(' · '));
+}
+
+function pdfHref(link) {
+  if (!link || !link.pdf) return '#';
+  const bits = link.pdf.split('/');            /* archive/<date>/<file> */
+  return '/pdf/' + encodeURIComponent(bits[1]) + '/' + encodeURIComponent(bits[2])
+         + '#page=' + link.pdf_page;
+}
+
+/* §8.4.12 — folded by default; a row that arrived since the last read gets a red dot. */
+function coverage(story) {
+  const cov = story.coverage || {};
+  const rows = cov.rows || [];
+  const newHashes = new Set(S.newSince[story.story_id] || []);
+
+  const table = el('table', { class: 'coverage-table', id: 'coverage-table' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'Paper' }), el('th', { text: 'Page' }), el('th', { text: 'Words' }),
+      el('th', { text: 'Kind' }), el('th', { text: 'Byline' }))),
+    el('tbody', {}, rows.map((r) => el('tr', {},
+      el('td', {}, newHashes.has(r.text_hash)
+          ? el('span', { class: 'row-new-dot', title: 'New since you read it',
+                         text: '● ' }) : null, r.paper),
+      el('td', {}, el('a', { href: pdfHref(r.page_link), target: '_blank',
+                             rel: 'noopener' }, r.page_link ? r.page_link.label : '')),
+      el('td', { text: r.words === null || r.words === undefined ? '' : String(r.words) }),
+      el('td', { text: r.kind || '' }),
+      el('td', { text: r.byline || '' })))));
+  table.hidden = true;
+
+  const toggle = el('button', {
+    class: 'reset coverage-toggle', type: 'button',
+    'aria-expanded': 'false', 'aria-controls': 'coverage-table',
+    onclick: (e) => {
+      const open = table.hidden;
+      table.hidden = !open;
+      e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
+      e.currentTarget.firstChild.textContent = coverageLabel(cov, open);
+    },
+  }, coverageLabel(cov, false));
+
+  return el('section', { class: 'coverage' }, toggle, table);
+}
+
+function coverageLabel(cov, open) {
+  return 'Coverage · ' + count(cov.articles, 'article') + ' from '
+         + count(cov.papers, 'paper') + ' ' + (open ? '▾' : '▸');
+}
+
 function renderStory(pane, story) {
+  pane.append(labelLine(story));
+  const tags = caveatTags(story);
+  if (tags) pane.append(tags);
   pane.append(el('h2', { class: 'story-headline', text: story.headline.text }));
-  pane.append(el('p', { class: 'story-oneliner', text: story.one_liner.text }));
-  pane.append(el('p', { class: 'drawer-note',
-                        text: 'The story page arrives with step A4.' }));
+  pane.append(metaLine(story));
+
+  const ssf = storySoFar(story);
+  if (ssf) pane.append(ssf);
+  const since = newSinceBox(story);
+  if (since) pane.append(since);
+
+  pane.append(writeup(story));
+
+  const views = viewsLine(story);
+  if (views) pane.append(views);
+  const theme = themeLine(story);
+  if (theme) pane.append(theme);
+
+  /* The thread section is A5; a story with no thread shows none at all (H3). */
+  pane.append(coverage(story));
+  pane.append(el('p', { class: 'page-footer',
+    text: "Charts and photos aren't read. Use the page link to see them." }));
+}
+
+/* --------------------------------------------------------------- the article view */
+
+async function openArticle(textHash) {
+  const article = await api.article(textHash);
+  const pane = document.getElementById('reading');
+  clear(pane);
+  if (!article) {
+    pane.append(el('p', { class: 'drawer-note', text: 'That article could not be found.' }));
+    return;
+  }
+  pane.append(el('button', {
+    class: 'reset back-link', type: 'button',
+    onclick: () => { render(); },
+  }, '← Back to story'));
+
+  pane.append(el('h2', { class: 'article-headline' }, article.headline,
+    article.fixture ? el('span', { class: 'fixture-tag', text: 'sample data' }) : null));
+
+  const bits = [article.paper, article.date ? dateWithDay(article.date) : null,
+                article.page_link ? article.page_link.label : null]
+    .filter(Boolean).join(' · ');
+  pane.append(el('p', { class: 'article-meta' }, bits,
+    article.byline ? ' · ' + article.byline : ''));
+
+  pane.append(el('div', { class: 'article-body' },
+    (article.paragraphs || []).map((p) => el('p', { text: p }))));
+
+  pane.append(el('p', {},
+    el('a', { href: pdfHref(article.page_link), target: '_blank', rel: 'noopener' },
+      'Open page')));
+  pane.scrollTop = 0;
+}
+
+/* Scrolling to a day of the thread is A5; until then the chip is inert but real. */
+function goToThreadEntry(entryId) {
+  const node = document.querySelector('[data-entry-id="' + CSS.escape(entryId) + '"]');
+  if (node) {
+    node.scrollIntoView({ block: 'center' });
+    node.classList.add('entry-flash');
+  }
 }
 
 /* ------------------------------------------------------------------- the screens */
@@ -352,12 +684,27 @@ function render() {
 
 /* Opening a story: the read-on-leave rule and the rest of the reader's actions arrive
    with A6; A3 only moves which story is open. */
-function openStory(storyId) {
+async function openStory(storyId) {
   S.openStoryId = storyId;
   if (!S.openedAStory) {
     S.openedAStory = true;
     api.visit(S.ref, S.digest && S.digest.window, true);
   }
+
+  /* Both of these decide what the story page shows, so they are fetched before it is
+     drawn rather than appearing a moment later: what arrived since this story was last
+     read (R4), and whether its "story so far" has been seen before. */
+  const story = findStory(storyId);
+  if (story && !(storyId in S.newSince)) {
+    const since = await api.newSince(storyId, S.ref);
+    S.newSince[storyId] = (since && since.new_since_read) || [];
+  }
+  const ssfKey = 'ssf_seen:' + storyId;
+  if (story && (story.story_so_far || {}).shown && !(ssfKey in S.prefs)) {
+    const pref = await api.pref(ssfKey);
+    S.prefs[ssfKey] = pref ? pref.value : null;
+  }
+
   render();
   document.getElementById('reading').scrollTop = 0;
 }
@@ -393,9 +740,9 @@ async function boot() {
     b.addEventListener('click', () => { S.screen = b.dataset.screen; render(); });
   }
 
-  /* §8.3: Today opens with the first story already open. */
-  if (stories().length) S.openStoryId = stories()[0].story_id;
   render();
+  /* §8.3: Today opens with the first story already open. */
+  if (stories().length) await openStory(stories()[0].story_id);
 }
 
 /* --------------------------------------------------------- reachable for testing
@@ -408,7 +755,7 @@ async function boot() {
    returns a value -- the DOM-building ones still need the click list.
 */
 const EXPORTS = {
-  windowText, paperCode, money, timeOfDay, dateWithDay, dateShort, dayName,
+  windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 

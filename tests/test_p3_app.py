@@ -667,6 +667,10 @@ eq("less than a penny", APP.money(0.0004), "<1¢");
 eq("nothing spent", APP.money(0), "0¢");
 eq("more than a dollar", APP.money(1.5), "$1.50");
 
+eq("one article from one paper", APP.count(1, "article"), "1 article");
+eq("and more than one takes the s", APP.count(5, "paper"), "5 papers");
+eq("none is still plural", APP.count(0, "article"), "0 articles");
+
 eq("an afternoon build time", APP.timeOfDay("2026-11-01T16:38:51"), "4.38pm");
 eq("midnight is 12am, not 0am", APP.timeOfDay("2026-10-11T00:05:00"), "12.05am");
 eq("noon is 12pm", APP.timeOfDay("2026-10-11T12:00:00"), "12.00pm");

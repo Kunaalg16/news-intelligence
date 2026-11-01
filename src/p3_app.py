@@ -226,6 +226,25 @@ def article(text_hash: str):
     return got
 
 
+@app.get("/api/new_since/{story_id}")
+def new_since(story_id: str, ref: str = "latest"):
+    """The story's articles that arrived after the reader last read it (R4).
+
+    Not in the brief's route list, because §4 gives the double a `new_since_read(story)`
+    and no route was named for it. The page could work the rule out for itself -- it
+    already knows the read state -- but then the rule would live in two places and K3's
+    version would stop being the one that decides. So the server looks the story up and
+    asks the double.
+    """
+    digest = data.get_digest(ref)
+    if digest is None:
+        raise HTTPException(status_code=404, detail=f"no digest {ref!r}")
+    for story in digest.get("stories", []):
+        if story.get("story_id") == story_id:
+            return {"story_id": story_id, "new_since_read": data.new_since_read(story)}
+    raise HTTPException(status_code=404, detail="no such story in that digest")
+
+
 @app.get("/api/thread/{thread_id}")
 def thread(thread_id: str):
     got = data.thread(thread_id)
