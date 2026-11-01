@@ -552,8 +552,11 @@ def routes():
         check("/api/thread serialises", bool(json.dumps(t)), True)
         day1 = next(s for s in live["stories"]
                     if not s["developing"] and (s.get("story_so_far") or {}).get("days") == 1)
-        check("a day-1 story's thread is 404, which is how the page renders none (H3)",
-              status_of(A.thread, day1["story_id"]), 404)
+        check("a day-1 story is told plainly that it has no thread (H3), not 404 -- most "
+              "stories have none, and the console should not fill with red on a healthy "
+              "morning", A.thread(day1["story_id"])["thread"], None)
+        check("but a story no digest has heard of is still 404",
+              status_of(A.thread, "2026-01-01:nosuchthing"), 404)
 
         # --- the posted routes ----------------------------------------------------
         hashes = [r["text_hash"] for r in shown["coverage"]["rows"]]

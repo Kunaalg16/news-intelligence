@@ -1307,7 +1307,9 @@ async function openStory(storyId) {
     S.newSince[storyId] = (since && since.new_since_read) || [];
   }
   if (story && !(storyId in S.threads)) {
-    S.threads[storyId] = await api.thread(storyId);   /* 404 -> null -> no section (H3) */
+    /* a story with no thread answers with no entries, and then no section is drawn (H3) */
+    const got = await api.thread(storyId);
+    S.threads[storyId] = (got && got.entries) ? got : null;
   }
   const ssfKey = 'ssf_seen:' + storyId;
   if (story && (story.story_so_far || {}).shown && !(ssfKey in S.prefs)) {

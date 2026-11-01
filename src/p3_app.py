@@ -245,13 +245,34 @@ def new_since(story_id: str, ref: str = "latest"):
     raise HTTPException(status_code=404, detail="no such story in that digest")
 
 
+def _story_exists(story_id):
+    """Whether any digest holds this story, by its own id or by its thread's."""
+    for entry in data.list_digests():
+        digest = data.get_digest(entry["ref"]) or {}
+        for story in digest.get("stories", []):
+            if story.get("story_id") == story_id:
+                return True
+            if (story.get("story_so_far") or {}).get("thread_id") == story_id:
+                return True
+    return False
+
+
 @app.get("/api/thread/{thread_id}")
 def thread(thread_id: str):
+    """One story's thread, or a plain "there isn't one".
+
+    Most stories ran for a single day and have no thread, and the page asks for one on
+    every story it opens, so answering 404 would print a red error in the browser's
+    console seven times out of ten on a perfectly healthy morning. "This story has no
+    thread" is an answer (state H3), not a missing resource. A thread_id no digest has
+    ever heard of still is one.
+    """
     got = data.thread(thread_id)
-    if got is None:
-        # Not an error: a day-1 story has no thread, and the page renders none (H3).
-        raise HTTPException(status_code=404, detail="no thread for this story")
-    return got
+    if got is not None:
+        return got
+    if _story_exists(thread_id):
+        return {"thread_id": thread_id, "thread": None}
+    raise HTTPException(status_code=404, detail="no such story")
 
 
 # -------------------------------------------------------------- reader state (R1)
