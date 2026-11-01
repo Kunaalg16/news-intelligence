@@ -367,6 +367,12 @@ def feedback(payload: dict = Body(...)):
     return {"stored": True}
 
 
+@app.get("/api/feedback")
+def feedback_list():
+    """What has already been voted on, so the page can show it."""
+    return {"votes": data.list_feedback()}
+
+
 @app.get("/api/pref/{key}")
 def pref(key: str):
     return {"key": key, "value": data.get_pref(key)}

@@ -545,7 +545,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 
 .timeline { margin: 0; padding: 0; list-style: none; }
 
-.entry { display: grid; grid-template-columns: 96px 28px 1fr; align-items: start; }
+.entry { display: grid; grid-template-columns: 96px 28px 1fr; align-items: stretch; }
 
 .entry-when {
   padding: 10px 8px 10px 0;
@@ -556,7 +556,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .entry-when .entry-day { display: block; color: var(--text-secondary); font-weight: 500; }
 
 /* The 2px ink line runs THROUGH the node column; the node sits on top of it. */
-.entry-node { position: relative; }
+.entry-node { position: relative; min-height: 100%; }
 .entry-node::before {
   content: "";
   position: absolute;
@@ -804,3 +804,15 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--text-secondary);
 }
 .cheat-sheet dd { margin: 0; font-size: var(--s125); color: var(--text-secondary); }
+
+/* A vote already given stays visible, so it is not given twice. */
+.action[data-vote="true"][aria-pressed="true"] {
+  background: var(--chip-ground);
+  border-color: var(--ochre);
+}
+
+/* A vote already given stays visible, so it is not given twice. */
+.action[data-vote="true"][aria-pressed="true"] {
+  background: var(--chip-ground);
+  border-color: var(--ochre);
+}

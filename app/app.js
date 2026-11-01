@@ -34,6 +34,7 @@ const S = {
   newSince: {},          /* story_id -> [text_hash] that arrived since the last read */
   keepUnread: new Set(),  /* story ids the reader is holding unread */
   pins: [],
+  votes: {},             /* "<kind>:<id>" -> the vote already given, so it can be shown */
   openBoardId: null,
   openStoryId: null,
   lastVisit: null,
@@ -103,6 +104,7 @@ const api = {
                            source: source }),
   unpin: (pinId) => postJSON('/api/pin/' + encodeURIComponent(pinId), undefined, 'DELETE'),
   boardPins: (boardId) => getJSON('/api/boards/' + encodeURIComponent(boardId) + '/pins'),
+  votes: () => getJSON('/api/feedback'),
   feedback: (kind, id, hashes, vote, note) =>
     postJSON('/api/feedback', { target_kind: kind, target_id: id, text_hashes: hashes,
                                 vote: vote, note: note }),
@@ -505,19 +507,30 @@ function storyActions(story) {
     },
   });
 
+  /* A vote that leaves no mark is one you give again next week, having forgotten you
+     ever gave it -- which is exactly what happened when this was first used. The button
+     now stays pressed, and says so when you hover it. */
+  const given = (S.votes['story:' + story.story_id] || {}).vote || null;
+
   const up = el('button', {
     class: 'reset action', type: 'button', dataset: { vote: 'true' },
-    'aria-label': 'This story was worth reading', title: 'Worth reading',
+    'aria-pressed': given === 'up' ? 'true' : 'false',
+    'aria-label': 'This story was worth reading',
+    title: given === 'up' ? 'You marked this worth reading' : 'Worth reading',
     onclick: async () => {
       await api.feedback('story', story.story_id, hashes, 'up', null);
+      S.votes['story:' + story.story_id] = { vote: 'up' };
       toast('Thank you · noted');
+      render();
     },
   }, '👍');
 
   const voteHolder = el('span', {});
   const down = el('button', {
     class: 'reset action', type: 'button', dataset: { vote: 'true' },
-    'aria-label': 'This story was not worth reading', title: 'Not worth reading',
+    'aria-pressed': given === 'down' ? 'true' : 'false',
+    'aria-label': 'This story was not worth reading',
+    title: given === 'down' ? 'You marked this not worth reading' : 'Not worth reading',
     onclick: () => {
       clear(voteHolder);
       const input = el('input', { type: 'text', 'aria-label': 'Why? (optional)',
@@ -527,8 +540,10 @@ function storyActions(story) {
         onclick: async () => {
           await api.feedback('story', story.story_id, hashes, 'down',
                              input.value.trim() || null);
+          S.votes['story:' + story.story_id] = { vote: 'down' };
           clear(voteHolder);
           toast('Thank you · noted');
+          render();
         },
       });
       voteHolder.append(el('span', { class: 'why-field' }, input, send));
@@ -555,11 +570,17 @@ function pinButton(story) {
       if (open) {
         const boards = await api.boards();
         S.boards = (boards && boards.boards) || [];
-        fillPinMenu(menu, story, () => { menu.hidden = true;
-                                         button.setAttribute('aria-expanded', 'false'); });
+        const shut = () => { menu.hidden = true;
+                             button.setAttribute('aria-expanded', 'false'); };
+        fillPinMenu(menu, story, shut);
+        pinMenuKeys(menu, shut, button);
       }
       menu.hidden = !open;
       button.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        const first = menu.querySelector('li button') || menu.querySelector('input');
+        if (first) first.focus();
+      }
     },
   });
 
@@ -577,6 +598,28 @@ function pinPayload(story) {
               date: source ? source.date : null,
               page_link: source ? source.page_link : null },
   };
+}
+
+/* The menu is opened by `p` as often as by the mouse, so it has to work without one:
+   the first board takes focus, the arrows move between boards, Escape closes it and
+   hands focus back to the button, and Tab reaches the new-board field and Add. */
+function pinMenuKeys(menu, close, button) {
+  menu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      button.focus();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = [...menu.querySelectorAll('li button')];
+    if (!items.length) return;
+    e.preventDefault();
+    const here = items.indexOf(document.activeElement);
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    items[here < 0 ? 0 : (here + step + items.length) % items.length].focus();
+  });
 }
 
 function fillPinMenu(menu, story, close) {
@@ -1418,10 +1461,20 @@ function runKeyAction(action) {
     case 'pin': clickAction('Pin to board'); return;
     case 'thread_view': {
       if (!S.flags.graph_view) return;
+      /* Seven stories of ten have no thread, and on the rest it is usually below the
+         fold -- so the switch happened where it could not be seen and the key looked
+         dead. Now it either says there is no thread, or shows you what it changed. */
+      const open = findStory(S.openStoryId);
+      if (!open || !S.threads[open.story_id]) {
+        toast('This story has no thread');
+        return;
+      }
       const next = S.prefs.thread_view === 'graph' ? 'timeline' : 'graph';
       S.prefs.thread_view = next;
       api.setPref('thread_view', next);
       render();
+      const drawn = document.querySelector('.thread');
+      if (drawn) drawn.scrollIntoView({ block: 'start' });
       return;
     }
     case 'help': toggleCheatSheet(); return;
@@ -1485,6 +1538,9 @@ async function boot() {
   const list = await api.digests();
   S.digests = (list && list.digests) || [];
   markIfPast();
+
+  const voted = await api.votes();
+  S.votes = (voted && voted.votes) || {};
 
   const held = await api.keepUnreadList();
   for (const k of ((held && held.keep_unread) || [])) S.keepUnread.add(k.story_id);

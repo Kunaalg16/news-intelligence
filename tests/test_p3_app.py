@@ -616,10 +616,19 @@ def routes():
         check("a feedback target_kind outside story/thread_link is 400",
               status_of(A.feedback, payload={"target_kind": "paper", "target_id": "x",
                                              "vote": "up"}), 400)
+        check("nothing has been voted on yet", A.feedback_list()["votes"], {})
         check("a 👎 with a note is stored",
               A.feedback(payload={"target_kind": "story", "target_id": shown["story_id"],
                                   "vote": "down", "note": "not what I expected",
                                   "text_hashes": hashes})["stored"], True)
+
+        votes = A.feedback_list()["votes"]
+        check("the vote can be read back, so the page can show it was given",
+              votes["story:" + shown["story_id"]]["vote"], "down")
+        A.feedback(payload={"target_kind": "story", "target_id": shown["story_id"],
+                            "vote": "up"})
+        check("and changing your mind replaces it",
+              A.feedback_list()["votes"]["story:" + shown["story_id"]]["vote"], "up")
 
         check("an unset pref reads as None", A.pref("thread_view")["value"], None)
         check("a pref posts and reads back",

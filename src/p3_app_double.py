@@ -619,6 +619,21 @@ def feedback(target_kind, target_id, text_hashes, vote, note=None):
     _save_state(state)
 
 
+def list_feedback():
+    """The latest vote on each thing voted on. Added to request R1 by this build.
+
+    §4 gives `feedback` and no way to ask what was already said. Without it the page
+    cannot show that a story has been rated, so a reader has no way to tell a vote
+    landed and votes the same story again and again -- which Kunaal did, and said so.
+    Keyed "<kind>:<id>", latest wins, because changing your mind is allowed.
+    """
+    latest = {}
+    for row in _load_state()["feedback"]:
+        latest[f'{row["target_kind"]}:{row["target_id"]}'] = {
+            "vote": row["vote"], "note": row.get("note"), "at": row["at"]}
+    return latest
+
+
 def get_pref(key):
     return _load_state()["prefs"].get(key)
 
