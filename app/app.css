@@ -33,6 +33,7 @@
   --red-ground: #FBEDEA;        /* the new-since box */
   --ochre: #7A5A12;             /* you, and the assistant */
   --chip-ground: #F2E8D2;
+  --chip-ground-hover: #EADFC2;   /* the chip under the pointer; ground only, never text */
   --assistant-ground: #F6F2E6;
   --olive: #3F5A1E;             /* READ */
 
@@ -449,7 +450,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   height: 24px;
   transform: translateY(-50%);
 }
-.chip:hover { background: #EADFC2; }
+.chip:hover { background: var(--chip-ground-hover); }
 
 /* ------------------------------------------------------- views and theme (§8.4.9-10) */
 
@@ -774,3 +775,32 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 }
 .past-back { font-size: var(--s125); color: var(--ink); text-decoration: underline;
              padding: 4px 0; }
+
+/* ------------------------------------------------------------------ the keyboard */
+
+/* Where j and k are, which is not the same as the story being read. */
+.story-row[data-cursor="true"] { box-shadow: inset 3px 0 0 var(--ink); }
+
+.cheat-sheet {
+  position: fixed;
+  right: 56px; bottom: 28px;
+  z-index: 30;
+  min-width: 240px;
+  padding: 14px 16px 12px;
+  background: var(--page);
+  border: 2px solid var(--ink);
+}
+.cheat-sheet h2 {
+  margin: 0 0 8px;
+  font-family: var(--serif); font-size: var(--s19); font-weight: 500;
+}
+.cheat-sheet dl { margin: 0 0 10px; }
+.cheat-sheet dl div { display: flex; gap: 10px; margin: 0 0 4px; align-items: baseline; }
+.cheat-sheet dt {
+  flex: 0 0 42px;
+  padding: 1px 5px;
+  border: 1px solid var(--mark);
+  font-size: var(--s11); font-weight: 600; text-align: center;
+  color: var(--text-secondary);
+}
+.cheat-sheet dd { margin: 0; font-size: var(--s125); color: var(--text-secondary); }

@@ -779,6 +779,26 @@ APP.S.digests = [];
 APP.markIfPast();
 eq("with nothing to compare against, nothing is called past", APP.S.isPast, false);
 
+// the nine keys of §8.9, and the rule that none of them fires while typing
+var NINE = {j: "next", k: "previous", o: "open", Escape: "back", u: "keep_unread",
+            f: "follow", p: "pin", t: "thread_view", "?": "help"};
+Object.keys(NINE).forEach(function (key) {
+  eq("the key " + key + " means " + NINE[key], APP.keyAction(key, {}), NINE[key]);
+  eq("and " + key + " does nothing while typing",
+     APP.keyAction(key, {inField: true}), null);
+});
+eq("exactly nine keys are bound", Object.keys(APP.KEYS).length, 9);
+eq("the cheat sheet lists every one of them", APP.CHEAT_SHEET.length, 9);
+eq("slash is left unbound for the assistant", APP.keyAction("/", {}), null);
+eq("an ordinary letter does nothing", APP.keyAction("z", {}), null);
+eq("and neither does a key that only looks like one",
+   APP.keyAction("constructor", {}), null);
+
+// every feature flag has to say what it takes off the page, or a flag can be added
+// that silently hides nothing (acceptance check 7)
+eq("every flag names the element it removes",
+   Object.keys(APP.FLAG_ELEMENTS).sort(), FLAGS_FROM_SERVER.sort());
+
 print(JSON.stringify({ran: ran, fails: fails}));
 """
 
@@ -801,7 +821,10 @@ def js_logic():
         return
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "run.js"
-        script.write_text('var ROOT = "%s";\n%s' % (ROOT, JS_TEST))
+        import p3_app as A
+        flags = json.dumps(sorted(A.FLAGS))
+        script.write_text('var ROOT = "%s";\nvar FLAGS_FROM_SERVER = %s;\n%s'
+                          % (ROOT, flags, JS_TEST))
         done = subprocess.run([JSC, str(script)], capture_output=True, text=True,
                               timeout=60)
         out = (done.stdout or "").strip().splitlines()
@@ -861,6 +884,149 @@ def pdf_guard():
         A.ARCHIVE = real_archive
 
 
+def _css_without_comments():
+    return re.sub(r"/\*.*?\*/", "", (ROOT / "app" / "app.css").read_text(), flags=re.S)
+
+
+def _tokens(css):
+    root = re.search(r":root\s*\{(.*?)\n\}", css, re.S).group(1)
+    return dict(re.findall(r"(--[\w-]+):\s*(#[0-9A-Fa-f]{6})", root))
+
+
+def _ratio(a, b):
+    """WCAG contrast between two #rrggbb colours."""
+    def lum(hexcolour):
+        parts = [int(hexcolour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        parts = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+                 for c in parts]
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+    first, second = lum(a) + 0.05, lum(b) + 0.05
+    return round(max(first, second) / min(first, second), 2)
+
+
+# Every pair the design actually puts on screen. Written out rather than guessed at by
+# a parser, because what matters is which ink lands on which ground -- and saying so
+# here means a new pair has to be added deliberately.
+TEXT_PAIRS = [
+    ("--ink", "--page", "body text"),
+    ("--ink", "--drawer-ground", "drawer headlines"),
+    ("--ink", "--chip-ground", "a chip's own border text"),
+    ("--text-secondary", "--page", "entry one-liners, coverage rows"),
+    ("--text-secondary", "--drawer-ground", "key dates in the story so far"),
+    ("--text-secondary", "--chip-ground", "the keys in the cheat sheet"),
+    ("--text-muted", "--page", "meta lines, dates, the cost header"),
+    ("--text-muted", "--drawer-ground", "drawer headings, the past-digest note"),
+    ("--text-muted", "--red-ground", "muted text in the new-since box"),
+    ("--red", "--page", "the DEVELOPING label, upcoming dates"),
+    ("--red", "--red-ground", "the new-since heading"),
+    ("--page", "--red", "white on the DEVELOPING stamp"),
+    ("--page", "--ink", "the toast, the graph's start box"),
+    ("--page", "--olive", "white on the READ stamp"),
+    ("--ochre", "--page", "Follow and Pin"),
+    ("--ochre", "--chip-ground", "chip text"),
+    ("--ochre", "--assistant-ground", "the assistant rail"),
+    ("--text-muted", "--assistant-ground", "the rail's label"),
+]
+
+# Marks and borders that carry MEANING rather than text: >= 3:1 is the bar for those.
+# `--rule` and `--rule-light` are deliberately NOT in this list. §8.1 lists "rules" apart
+# from "grey marks and borders #878276 (>= 3:1)" and puts the ratio only on the second,
+# because a line that separates two sections carries no information: remove it and the
+# page still says everything it said. The check below is the one that matters for them --
+# that they are never used where a border DOES carry meaning, which is what would make
+# 1.63:1 a real failure rather than a quiet divider.
+MARK_PAIRS = [
+    ("--mark", "--page", "caveat tags, the Wrong link? border"),
+    ("--mark", "--drawer-ground", "the pin menu's rules"),
+    ("--ink", "--page", "the thread's spine and its nodes"),
+    ("--red", "--page", "the today node and the follow-up line"),
+    ("--olive", "--page", "the READ stamp's ground"),
+    ("--ochre", "--page", "a pressed action's border"),
+]
+
+
+def contrast():
+    """Acceptance check 4: every text pair >= 4.5:1, every meaningful mark >= 3:1."""
+    css = _css_without_comments()
+    tokens = _tokens(css)
+    worst_text, worst_mark = None, None
+    for ink, ground, where in TEXT_PAIRS:
+        r = _ratio(tokens[ink], tokens[ground])
+        check(f"contrast >= 4.5:1 for {where} ({ink} on {ground}, {r}:1)", r >= 4.5, True)
+        if worst_text is None or r < worst_text[0]:
+            worst_text = (r, where)
+    for ink, ground, where in MARK_PAIRS:
+        r = _ratio(tokens[ink], tokens[ground])
+        check(f"contrast >= 3:1 for {where} ({ink} on {ground}, {r}:1)", r >= 3.0, True)
+        if worst_mark is None or r < worst_mark[0]:
+            worst_mark = (r, where)
+    print(f"lowest text pair {worst_text[0]}:1 ({worst_text[1]}); "
+          f"lowest mark {worst_mark[0]}:1 ({worst_mark[1]})")
+
+    # a decorative rule must stay decorative: anything that bounds a control or marks a
+    # distinction uses --mark, --ink or --red, never --rule
+    control_rules = []
+    for block in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        selector, body = block[0].strip(), block[1]
+        if not re.search(r"border[^;]*var\(--rule", body):
+            continue
+        if re.search(r"\.(action|caveat|chip|entry-wrong|view-switch|pin-menu)"
+                     r"|button|input|textarea", selector):
+            control_rules.append(selector.split("\n")[-1].strip()[:40])
+    check("no control or meaningful mark is drawn with a decorative rule",
+          sorted(set(control_rules)), [])
+
+    # the token system is only real if nothing paints with a raw colour
+    root = re.search(r":root\s*\{.*?\n\}", css, re.S).group(0)
+    stray = sorted(set(re.findall(r"#[0-9A-Fa-f]{3,8}", css.replace(root, ""))))
+    check("every colour on the page comes from a token", stray, [])
+
+
+def markup():
+    """Acceptance check 3: real controls, no `all: unset`, a focus ring on everything."""
+    css = _css_without_comments()
+    html = (ROOT / "app" / "index.html").read_text()
+    js = (ROOT / "app" / "app.js").read_text()
+
+    check("no `all: unset` anywhere in the stylesheet",
+          bool(re.search(r"all\s*:\s*unset", css)), False)
+    check("the focus-visible rule is 2px of ink, offset",
+          bool(re.search(r":focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--ink\)",
+                         css, re.S)), True)
+    for kind in ("button", "a", "input", "textarea", "[tabindex]"):
+        check(f"{kind} has a focus ring",
+              bool(re.search(re.escape(kind) + r":focus-visible", css)), True)
+
+    # nothing in the shell is a clickable div
+    check("the shell has no clickable div or span",
+          re.findall(r"<(div|span|li|p)[^>]*onclick", html), [])
+
+    # and nothing the page builds is either: every el() given an onclick is a real control
+    bad = []
+    for match in re.finditer(r"el\(\s*'([a-z]+)'\s*,\s*\{", js):
+        tag, start = match.group(1), match.end() - 1
+        depth, i = 0, start
+        while i < len(js):                      # the props object, braces balanced
+            if js[i] == "{":
+                depth += 1
+            elif js[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        props = js[start:i]
+        if "onclick" in props and tag not in ("button", "a", "input", "textarea"):
+            bad.append(tag)
+    check("every clickable thing the page builds is a real control", sorted(set(bad)), [])
+
+    # a chip is drawn small; its hit area must not be
+    check("the small controls are given a >= 24px hit area",
+          bool(re.search(r"\.chip::after[^}]*height:\s*24px", css, re.S)), True)
+    check("reduced motion turns every transition off",
+          bool(re.search(r"prefers-reduced-motion[^}]*\{[^}]*transition:\s*none",
+                         css, re.S)), True)
+
+
 # ------------------------------------------------------------------- 5. ownership
 
 def ownership():
@@ -888,6 +1054,8 @@ def main():
     routes()
     pdf_guard()
     js_logic()
+    contrast()
+    markup()
     ownership()
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:

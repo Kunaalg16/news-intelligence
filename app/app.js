@@ -39,6 +39,8 @@ const S = {
   lastVisit: null,
   openedAStory: false,
   reachable: true,       /* false once a request finds nothing answering at all */
+  cursor: null,          /* where j/k are, which is not the same as what is open */
+  articleOpen: false,
 };
 
 /* ------------------------------------------------------------------- the routes */
@@ -322,6 +324,7 @@ function storyRow(story, number) {
       class: 'reset story-row',
       type: 'button',
       'aria-current': story.story_id === S.openStoryId ? 'true' : null,
+      dataset: number !== null && S.cursor === number - 1 ? { cursor: 'true' } : {},
       onclick: () => openStory(story.story_id),
     },
       el('span', { class: 'row-number', text: number === null ? '' : String(number) }),
@@ -1079,6 +1082,7 @@ function earlierCoverage(story) {
 /* --------------------------------------------------------------- the article view */
 
 async function openArticle(textHash) {
+  S.articleOpen = true;
   const article = await api.article(textHash);
   const pane = document.getElementById('reading');
   clear(pane);
@@ -1274,6 +1278,7 @@ async function leaveOpenStory() {
 }
 
 function render() {
+  S.articleOpen = false;
   renderHeader();
   renderDrawer();
   renderReading();
@@ -1312,6 +1317,144 @@ async function openStory(storyId) {
 
   render();
   document.getElementById('reading').scrollTop = 0;
+}
+
+/* What each feature flag takes off the page (§8.8, acceptance check 7).
+
+   Written down rather than left implicit in ten `if` statements, for two reasons: a new
+   flag cannot be added without saying what it hides (the test compares this map against
+   the flags the server sends), and the sweep that checks a flag really does remove its
+   element has something to drive it. A flag that is off removes the element completely;
+   it never leaves an empty gap where it was.
+*/
+const FLAG_ELEMENTS = {
+  graph_view: '.view-switch',
+  story_so_far: '.story-so-far',
+  caveat_single_source: '.caveat',
+  caveat_paid_content: '.caveat',
+  caveat_paid_only: '.caveat',
+  caveat_partial_text: '.caveat',
+  theme_line: '.theme-line',
+  theme_bar_strip: '.theme-bars',
+  /* the cost header lives in the shell, so it is hidden rather than rebuilt; `hidden`
+     takes it out of the layout, which is what "no empty gap" asks for */
+  cost_display: '#cost-header:not([hidden])',
+  agency_copy: '.agency-copy',
+};
+
+/* ================================================================= the keyboard
+
+   §8.9. Which key means what is a pure function, so all nine can be checked without a
+   browser (acceptance check 2) -- including the rule that matters most: NOTHING fires
+   while the reader is typing. A global handler that steals "f" while someone is writing
+   in "Why? (optional)" is the classic way to make a page impossible to type in, and the
+   only defence against it is a test.
+*/
+
+const KEYS = {
+  j: 'next',
+  k: 'previous',
+  o: 'open',
+  Escape: 'back',
+  u: 'keep_unread',
+  f: 'follow',
+  p: 'pin',
+  t: 'thread_view',
+  '?': 'help',
+  /* "/" is deliberately unbound: it will focus the assistant, which is v0.1. */
+};
+
+function keyAction(key, opts) {
+  if (opts && opts.inField) return null;
+  return Object.prototype.hasOwnProperty.call(KEYS, key) ? KEYS[key] : null;
+}
+
+function isTypingTarget(node) {
+  if (!node) return false;
+  const tag = (node.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select'
+         || Boolean(node.isContentEditable);
+}
+
+/* j and k move a cursor down the drawer without opening anything; o opens what it is
+   on. Moving and opening are separate so a reader can look down the list without
+   marking stories read on the way past. */
+function moveCursor(step) {
+  const list = stories();
+  if (!list.length) return;
+  const open = list.findIndex((s) => s.story_id === S.openStoryId);
+  const from = (S.cursor === null || S.cursor === undefined) ? open : S.cursor;
+  S.cursor = Math.min(list.length - 1, Math.max(0, (from < 0 ? 0 : from) + step));
+  renderDrawer();
+  const row = document.querySelector('.story-row[data-cursor="true"]');
+  if (row) row.scrollIntoView({ block: 'nearest' });
+}
+
+function clickAction(match) {
+  const button = [...document.querySelectorAll('.meta-actions button')]
+    .find((b) => (b.textContent || '').includes(match));
+  if (button) { button.click(); return true; }
+  return false;
+}
+
+function runKeyAction(action) {
+  const list = stories();
+  switch (action) {
+    case 'next': moveCursor(1); return;
+    case 'previous': moveCursor(-1); return;
+    case 'open': {
+      const target = list[(S.cursor === null || S.cursor === undefined) ? 0 : S.cursor];
+      if (target) openStory(target.story_id);
+      return;
+    }
+    case 'back':
+      hideToast();
+      if (S.articleOpen) { S.articleOpen = false; render(); }
+      return;
+    case 'keep_unread': clickAction('unread'); return;
+    case 'follow': if (!clickAction('Follow')) clickAction('Following'); return;
+    case 'pin': clickAction('Pin to board'); return;
+    case 'thread_view': {
+      if (!S.flags.graph_view) return;
+      const next = S.prefs.thread_view === 'graph' ? 'timeline' : 'graph';
+      S.prefs.thread_view = next;
+      api.setPref('thread_view', next);
+      render();
+      return;
+    }
+    case 'help': toggleCheatSheet(); return;
+    default:
+  }
+}
+
+const CHEAT_SHEET = [
+  ['j', 'next story'], ['k', 'previous story'], ['o', 'open it'],
+  ['Esc', 'back'], ['u', 'keep unread'], ['f', 'follow'],
+  ['p', 'pin to a board'], ['t', 'timeline or graph'], ['?', 'this list'],
+];
+
+function toggleCheatSheet() {
+  const already = document.getElementById('cheat-sheet');
+  if (already) { already.remove(); return; }
+  const sheet = el('div', { class: 'cheat-sheet', id: 'cheat-sheet', role: 'dialog',
+                            'aria-modal': 'false', 'aria-label': 'Keyboard shortcuts' },
+    el('h2', { text: 'Keys' }),
+    el('dl', {}, CHEAT_SHEET.map(([key, what]) =>
+      el('div', {}, el('dt', { text: key }), el('dd', { text: what })))),
+    el('button', { class: 'reset action', type: 'button', text: 'Close',
+                   onclick: () => toggleCheatSheet() }));
+  document.body.append(sheet);
+  sheet.querySelector('button').focus();
+}
+
+function startKeyboard() {
+  document.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const action = keyAction(e.key, { inField: isTypingTarget(e.target) });
+    if (!action) return;
+    e.preventDefault();
+    runKeyAction(action);
+  });
 }
 
 /* --------------------------------------------------------------------- the boot */
@@ -1388,6 +1531,7 @@ async function boot() {
     });
   });
 
+  startKeyboard();
   render();
   /* §8.3: Today opens with the first story already open. */
   if (stories().length) await openStory(stories()[0].story_id);
@@ -1405,6 +1549,7 @@ async function boot() {
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
+  keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 
