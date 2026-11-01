@@ -29,10 +29,18 @@ SCHEMA VERSIONS (two of them, on purpose)
   rewrite, so an older build keeps working against a newer file.
 
 WHAT "ARTICLE ID" MEANS HERE
-  `text_hash`, the identity of one distinct text in `news.db`. It is what K2's `members`
-  table holds, so "was every article in this story seen?" is a set comparison against
-  `members.text_hash` with no translation step. One wire story printed in two papers is
-  one text and so one read, which is the behaviour a reader expects.
+  `text_hash`, the identity of one distinct text in `news.db`: SHA-1 of headline + body,
+  EXACT, with no normalisation (`p2_store.py:121`). It is what K2's `members` table holds,
+  so "was every article in this story seen?" is a set comparison against `members.text_hash`
+  with no translation step -- that is the reason for this choice.
+  Measured 1 Nov on run exam-v1, so nobody has to guess at the behaviour: 6,655 distinct
+  texts in 6,662 seats; texts printed under more than one publisher = **0**; texts printed
+  on more than one date = 6. So "the same wire copy in two papers is one read" is true of
+  the mechanism but describes a case that does not occur: an exact hash cannot merge two
+  texts that differ by even one word. The error this choice CANNOT make is marking an
+  unread article read; the error it can make is the harmless opposite, two near-identical
+  pieces counting as two reads. Two papers' versions of one story are tied together by
+  K2's grouping (378 multi-paper groups), not by the hash.
 
 DATA (one owner per file)
   writes  data/intel.db   K3 tables only, listed in K3_TABLES below
