@@ -760,3 +760,17 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .plain-sub { font-size: var(--s125); color: var(--text-muted); }
 .pin-source { font-size: var(--s125); color: var(--text-muted); display: block; }
 .empty-note { font-size: var(--s14); color: var(--text-muted); }
+
+/* Reading an older morning: say so where the reader is looking, and offer the way back. */
+.past-banner {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  margin: 0 0 12px; padding: 8px 16px;
+  background: var(--chip-ground);
+  border-bottom: 1px solid var(--rule);
+}
+.past-banner-label {
+  font-size: var(--s11); font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ochre);
+}
+.past-back { font-size: var(--s125); color: var(--ink); text-decoration: underline;
+             padding: 4px 0; }

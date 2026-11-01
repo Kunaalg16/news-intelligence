@@ -765,6 +765,20 @@ eq("only three kinds say a word beside the node",
    Object.keys(APP.KIND_WORDS).sort(), ["follow_up", "run_up", "start"]);
 eq("and continuing is not one of them", APP.KIND_WORDS.continuing, undefined);
 
+// knowing whether the digest on screen is today's: the TODAY tab and the drawer's way
+// back both hang off this, and "latest" is a request, not a name
+APP.S.digest = {built_at: "2026-11-01T16:38:51"};
+APP.S.digests = [{ref: "digest_live", built_at: "2026-11-01T16:38:51"},
+                 {ref: "older", built_at: "2026-11-01T16:01:49"}];
+APP.markIfPast();
+eq("the newest digest is not a past one", APP.S.isPast, false);
+APP.S.digest = {built_at: "2026-11-01T16:01:49"};
+APP.markIfPast();
+eq("an older digest is", APP.S.isPast, true);
+APP.S.digests = [];
+APP.markIfPast();
+eq("with nothing to compare against, nothing is called past", APP.S.isPast, false);
+
 print(JSON.stringify({ran: ran, fails: fails}));
 """
 

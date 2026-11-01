@@ -23,6 +23,7 @@ const S = {
   ref: 'latest',
   digest: null,
   digests: [],
+  isPast: false,         /* the loaded digest is not the newest one */
   status: null,
   cost: null,
   read: {},              /* text_hash -> read_at | null */
@@ -334,6 +335,16 @@ function storyRow(story, number) {
 function renderDrawer() {
   const drawer = document.getElementById('drawer');
   clear(drawer);
+
+  /* Reading an older morning is easy to start and, before this, hard to stop: the window
+     in the header is the only clue, and it does not say "this is not today". */
+  if (S.isPast) {
+    drawer.append(el('p', { class: 'past-banner' },
+      el('span', { class: 'past-banner-label', text: 'Past digest' }),
+      el('button', { class: 'reset past-back', type: 'button',
+                     onclick: () => { S.screen = 'today'; loadDigest('latest', null); } },
+        'Back to today')));
+  }
 
   /* H2: every story in the digest already read, so there is nothing new to point at. */
   if (stories().length && stories().every(isRead)) {
@@ -1203,11 +1214,20 @@ async function loadDigest(ref, thenOpenStoryId) {
   S.openStoryId = null;
   S.threads = {};
   S.newSince = {};
+  markIfPast();
   await refreshRead();
   const first = thenOpenStoryId
     || (stories().length ? stories()[0].story_id : null);
   render();
   if (first) await openStory(first);
+}
+
+/* Whether what is loaded is the newest digest. The digests list is fetched at boot
+   rather than only when Past digests is opened, because this answer decides what the
+   drawer and the TODAY tab do, and it is one small request. */
+function markIfPast() {
+  S.isPast = Boolean(S.digest) && S.digests.length > 0
+             && S.digest.built_at !== S.digests[0].built_at;
 }
 
 async function refreshRead() {
@@ -1263,6 +1283,10 @@ function render() {
    with A6; A3 only moves which story is open. */
 async function openStory(storyId) {
   if (S.openStoryId && S.openStoryId !== storyId) await leaveOpenStory();
+  /* The drawer is always the digest, whatever screen is in the reading pane, so a story
+     clicked there means "show me this story" -- not "open it behind the Boards screen". */
+  S.screen = 'today';
+  S.openBoardId = null;
   S.openStoryId = storyId;
   if (!S.openedAStory) {
     S.openedAStory = true;
@@ -1313,6 +1337,10 @@ async function boot() {
     S.read = (read && read.read) || {};
   }
 
+  const list = await api.digests();
+  S.digests = (list && list.digests) || [];
+  markIfPast();
+
   const held = await api.keepUnreadList();
   for (const k of ((held && held.keep_unread) || [])) S.keepUnread.add(k.story_id);
 
@@ -1327,14 +1355,19 @@ async function boot() {
   for (const b of document.querySelectorAll('.nav-item')) {
     b.addEventListener('click', async () => {
       if (b.dataset.screen !== 'today') await leaveOpenStory();
+      if (b.dataset.screen === 'today' && S.isPast) {
+        S.screen = 'today';
+        await loadDigest('latest', null);
+        return;
+      }
       if (b.dataset.screen === 'boards') {
         const boards = await api.boards();
         S.boards = (boards && boards.boards) || [];
         S.openBoardId = null;
       }
       if (b.dataset.screen === 'past') {
-        const list = await api.digests();
-        S.digests = (list && list.digests) || [];
+        const fresh = await api.digests();
+        S.digests = (fresh && fresh.digests) || S.digests;
       }
       S.screen = b.dataset.screen;
       render();
@@ -1371,7 +1404,7 @@ async function boot() {
 */
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
-  nodeKind, KIND_WORDS, graphPlan, viewEntryIds,
+  nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 
