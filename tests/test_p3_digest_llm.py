@@ -43,6 +43,7 @@ USAGE (from ~/news-intel)
     .venv/bin/python tests/test_p3_digest_llm.py
 """
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -463,18 +464,126 @@ def so_far():
           any(d["reason"] == "number_not_in_source" for d in r["drops"]), True)
     check("too few sentences left -> the box is not shown", r["shown"], False)
 
-    cached = {D.ST.fingerprint([d["date"] for d in five]):
-              {"sentences": [{"text": "From the cache.", "cites": ["t1"]}],
-               "key_dates": [], "used_text": "From the cache."}}
+    return five, day
+
+
+# ------------------------------------------------------------------ the two caches
+
+def caches(tmp, five, day):
+    """Q8b. Both caches are keyed by content, so a hit is the same answer the same input
+    would produce, and a changed input is a different key rather than a stale answer."""
+    con = ST.open_intel(Path(tmp) / "cache.db")
+    st = story([seat(), seat(text_hash="a2", page=5, art_id="p05-a01",
+                            headline="Industry objects",
+                            body="Industry objected today. " + "filler " * 400)])
+    one_liner = {"text": "A one-liner.", "source_text_hash": "a1"}
+
     f = Fake("good")
-    r = D.story_so_far("t1", five, f, cache=cached)
-    check("a cached box is served without a call", f.calls, 0)
-    check("and is marked as cached", r["cached"], True)
-    check("and is the cached text", r["used_text"], "From the cache.")
+    first = D.write_up(st, one_liner, f, cache=con)
+    check("the first write-up costs a call", f.calls, 1)
+    check("it is not served from cache", first["cached"], False)
+    check("the cache now holds one row",
+          con.execute("SELECT COUNT(*) FROM writeup_cache").fetchone()[0], 1)
+    check("the row records the article set it was written from",
+          sorted(json.loads(con.execute("SELECT article_ids FROM writeup_cache").fetchone()[0])),
+          ["a1", "a2"])
+
+    f2 = Fake("good")
+    again = D.write_up(st, one_liner, f2, cache=con)
+    check("the same story is served from cache with NO call", f2.calls, 0)
+    check("and is marked as cached", again["cached"], True)
+    check("and is the same text", again["used_text"], first["used_text"])
+    check("and costs nothing", again["cost_usd"], 0.0)
+    check("and the cited ids survive the round trip", again["cited_ids"], first["cited_ids"])
+
+    # a changed article set is a different key, so there is nothing stale to serve
+    bigger = story(st["seats"] + [seat(text_hash="a3", page=7, art_id="p07-a01",
+                                       headline="A third paper reports",
+                                       body="A third account. " + "filler " * 400)])
+    f3 = Fake("good")
+    D.write_up(bigger, one_liner, f3, cache=con)
+    check("an article joining the story misses the cache and is rewritten", f3.calls, 1)
+    check("so the cache now holds two rows",
+          con.execute("SELECT COUNT(*) FROM writeup_cache").fetchone()[0], 2)
+
+    # `developing` changes the prompt, so it has to change the key
+    dev = story(st["seats"], developing=True)
+    dev["developing"] = True
+    f4 = Fake("good")
+    D.write_up(dev, one_liner, f4, cache=con)
+    check("the same articles under the developing instruction miss the cache", f4.calls, 1)
+    check("because developing is part of the key",
+          D.writeup_key(["a1", "a2"], True) == D.writeup_key(["a1", "a2"], False), False)
+
+    # a changed prompt version must not serve the old paragraph
+    keep = D.WRITEUP_PROMPT_VERSION
+    D.WRITEUP_PROMPT_VERSION = "w9.9"
+    f5 = Fake("good")
+    D.write_up(st, one_liner, f5, cache=con)
+    check("a new prompt version misses the cache", f5.calls, 1)
+    D.WRITEUP_PROMPT_VERSION = keep
+
+    # a fallback is never cached: it is a state of the world, not an answer
+    thin = story([seat(text_hash="t9", body="A ten word brief about a small local matter.")])
+    f6 = Fake("good")
+    r = D.write_up(thin, one_liner, f6, cache=con)
+    check("a thin story is not written", r["fallback"], "thin_input")
+    check("and nothing was cached for it",
+          con.execute("SELECT COUNT(*) FROM writeup_cache WHERE article_ids LIKE '%t9%'"
+                      ).fetchone()[0], 0)
+    # a story with no cache entry of its own, so the failure has nothing to hide behind
+    fresh = story([seat(text_hash="z1", body="Fresh account. " + "filler " * 400),
+                   seat(text_hash="z2", page=6, art_id="p06-a01",
+                        body="Second fresh account. " + "filler " * 400)], sid="s-fresh")
+    f7 = Fake("all_bad")
+    r7 = D.write_up(fresh, one_liner, f7, cache=con)
+    check("a write-up whose sentences all fail falls back", r7["fallback"], "one_liner")
+    check("and nothing is cached for it",
+          con.execute("SELECT COUNT(*) FROM writeup_cache WHERE article_ids LIKE '%z1%'"
+                      ).fetchone()[0], 0)
+    f8 = Fake("all_bad")
+    D.write_up(fresh, one_liner, f8, cache=con)
+    check("so a later visit tries again rather than serving a failure", f8.calls > 0, True)
+
+    # the other way round: a paragraph already written well is served even if the model
+    # would fail now -- the cache holds the answer, not the model's current mood
+    f8b = Fake("all_bad")
+    served = D.write_up(bigger, one_liner, f8b, cache=con)
+    check("an already-written paragraph is served without calling a failing model",
+          f8b.calls, 0)
+    check("and it is the good paragraph", len(served["sentences"]) >= 2, True)
+
+    # the story-so-far box
+    f9 = Fake("good")
+    box = D.story_so_far("t1", five, f9, cache=con)
+    check("the first box costs a call", f9.calls, 1)
+    check("and is stored",
+          con.execute("SELECT COUNT(*) FROM story_so_far_cache").fetchone()[0], 1)
+    f10 = Fake("good")
+    box2 = D.story_so_far("t1", five, f10, cache=con)
+    check("the same thread and day set is served from cache", f10.calls, 0)
+    check("and is marked as cached", box2["cached"], True)
+    check("and is shown", box2["shown"], True)
+    check("and keeps its key dates", len(box2["key_dates"]), len(box["key_dates"]))
+    check("and is the same text", box2["used_text"], box["used_text"])
 
     six = five + [day("2026-10-06", "Day 6", "A new day joins the thread.")]
-    check("a new day is a different key, so the cache misses and it is rewritten",
-          D.ST.fingerprint([d["date"] for d in six]) in cached, False)
+    f11 = Fake("good")
+    D.story_so_far("t1", six, f11, cache=con)
+    check("a new day joining the thread is a new key, so the box is rewritten", f11.calls, 1)
+    check("and both versions are kept, keyed by day set",
+          con.execute("SELECT COUNT(*) FROM story_so_far_cache").fetchone()[0], 2)
+
+    # no cache at all still works
+    f12 = Fake("good")
+    r = D.write_up(st, one_liner, f12, cache=None)
+    check("with no cache the write-up is simply written", f12.calls, 1)
+    check("and is not marked cached", r["cached"], False)
+    check("caches are rebuildable: emptying them loses nothing but money",
+          [con.execute(f"DELETE FROM {t}").rowcount >= 0 for t in ST.CACHE_TABLES],
+          [True, True])
+    con.commit()
+    con.close()
 
 
 def main():
@@ -482,9 +591,10 @@ def main():
     checks()
     writer_input()
     writeup()
-    so_far()
+    five, day = so_far()
     with tempfile.TemporaryDirectory() as tmp:
         cost(tmp)
+        caches(tmp, five, day)
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")

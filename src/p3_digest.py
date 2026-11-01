@@ -830,7 +830,7 @@ def build(date, window="day", last_visit=None, news=None, intel=None, vecs=None,
         writeup = sofar = None
         if client:
             st["developing"] = len(cover_dates) > 1
-            writeup = write_up(st, one_liner, client, intel_w, visit_id)
+            writeup = write_up(st, one_liner, client, intel_w, visit_id, cache=intel_w)
             if writeup.get("used_text") and not writeup["sentences"]:
                 fallback_counts["writeup_" + (writeup["fallback"] or "unknown")] += 1
             checked, why = check_one_liner(
@@ -842,7 +842,8 @@ def build(date, window="day", last_visit=None, news=None, intel=None, vecs=None,
                 one_liner = dict(one_liner, text=checked, fallback=f"check:{why}")
                 fallback_counts["one_liner_check_failed"] += 1
             day_rows = thread_day_rows(news, intel, st["story_id"], bodies)
-            sofar = story_so_far(st["story_id"], day_rows, client, intel_w, visit_id)
+            sofar = story_so_far(st["story_id"], day_rows, client, intel_w, visit_id,
+                                 cache=intel_w)
 
         out_stories.append({
             "story_id": st["story_id"],
@@ -881,6 +882,9 @@ def build(date, window="day", last_visit=None, news=None, intel=None, vecs=None,
         "writeup_cost_usd": round(sum((s["writeup"] or {}).get("cost_usd") or 0
                                       for s in out_stories), 6),
         "story_so_far_shown": sum(1 for s in out_stories if (s["story_so_far"] or {}).get("shown")),
+        "writeups_from_cache": sum(1 for s in out_stories if (s["writeup"] or {}).get("cached")),
+        "story_so_far_from_cache": sum(
+            1 for s in out_stories if (s["story_so_far"] or {}).get("cached")),
     })
 
     result = {
@@ -1136,6 +1140,70 @@ def writeup_prompt(articles, developing):
 
 # --------------------------------------------------------- the calls
 
+# ------------------------------------------------- the two caches (Q8b, B1-2 tables)
+# Keyed by CONTENT: a fingerprint of what the writer was shown, plus which model and
+# which prompt version wrote it. A changed article set is a different key, so a cached
+# write-up can never be stale -- it can only be unused. `developing` goes into the key
+# too, because it changes the prompt ("lead with what is new"): without it, the same
+# article set would serve a cached paragraph written under the other instruction.
+
+def writeup_key(article_ids, developing):
+    return ST.fingerprint(list(article_ids) + (["developing"] if developing else []))
+
+
+def cache_get_writeup(con, fingerprint):
+    if con is None:
+        return None
+    row = con.execute(
+        "SELECT sentences, article_ids, headline FROM writeup_cache "
+        "WHERE fingerprint = ? AND model = ? AND prompt_version = ?",
+        (fingerprint, WRITER_MODEL, WRITEUP_PROMPT_VERSION)).fetchone()
+    if not row:
+        return None
+    return {"sentences": json.loads(row[0]), "cited_ids": sorted(
+        {c for s in json.loads(row[0]) for c in s.get("cites", [])}),
+        "article_ids": json.loads(row[1]), "headline": row[2]}
+
+
+def cache_put_writeup(con, fingerprint, article_ids, sentences, headline=None):
+    if con is None:
+        return
+    con.execute(
+        "INSERT OR REPLACE INTO writeup_cache (fingerprint, model, prompt_version, "
+        "sentences, article_ids, headline, created_at) VALUES (?,?,?,?,?,?,?)",
+        (fingerprint, WRITER_MODEL, WRITEUP_PROMPT_VERSION, json.dumps(sentences),
+         json.dumps(list(article_ids)), headline,
+         dt.datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+
+
+def cache_get_sofar(con, thread_id, fingerprint):
+    if con is None:
+        return None
+    row = con.execute(
+        "SELECT sentences, key_dates, day_ids FROM story_so_far_cache "
+        "WHERE thread_id = ? AND fingerprint = ? AND model = ? AND prompt_version = ?",
+        (thread_id, fingerprint, WRITER_MODEL, STORY_SO_FAR_PROMPT_VERSION)).fetchone()
+    if not row:
+        return None
+    sentences = json.loads(row[0])
+    return {"sentences": sentences, "key_dates": json.loads(row[1] or "[]"),
+            "day_ids": json.loads(row[2] or "[]"),
+            "used_text": " ".join(s["text"] for s in sentences)}
+
+
+def cache_put_sofar(con, thread_id, fingerprint, sentences, key_dates, day_ids):
+    if con is None:
+        return
+    con.execute(
+        "INSERT OR REPLACE INTO story_so_far_cache (thread_id, fingerprint, model, "
+        "prompt_version, sentences, key_dates, day_ids, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (thread_id, fingerprint, WRITER_MODEL, STORY_SO_FAR_PROMPT_VERSION,
+         json.dumps(sentences), json.dumps(key_dates), json.dumps(list(day_ids)),
+         dt.datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+
+
 def cost_of(in_tokens, out_tokens):
     return round(in_tokens / 1e6 * PRICE_IN_PER_MTOK + out_tokens / 1e6 * PRICE_OUT_PER_MTOK, 6)
 
@@ -1165,7 +1233,7 @@ def cap_reached(intel_w, day=None):
     return spent >= KNOBS["daily_cost_cap_usd"], spent
 
 
-def write_up(story, one_liner, client, intel_w=None, visit_id=None):
+def write_up(story, one_liner, client, intel_w=None, visit_id=None, cache=None):
     """The written-up story: 3-5 cited sentences, both code checks, one retry, then drops.
 
     Returns the whole audit trail, not just the text: what went in, what came back, what
@@ -1176,9 +1244,20 @@ def write_up(story, one_liner, client, intel_w=None, visit_id=None):
     result = {"sentences": [], "cited_ids": [], "input_articles": len(articles),
               "input_words": words, "model": WRITER_MODEL,
               "prompt_version": WRITEUP_PROMPT_VERSION, "attempts": 0, "drops": [],
-              "fallback": None, "cost_usd": 0.0}
+              "fallback": None, "cost_usd": 0.0, "cached": False}
     if not articles:
         result["fallback"] = "no_input_articles"
+        return result
+
+    key = writeup_key([a["id"] for a in articles], story.get("developing"))
+    result["fingerprint"] = key
+    hit = cache_get_writeup(cache, key)
+    if hit:
+        # No call, no cost. The key covers the article set, the model and the prompt
+        # version, so a hit is the same paragraph the same input would produce.
+        result.update(sentences=hit["sentences"], cited_ids=hit["cited_ids"],
+                      used_text=" ".join(s["text"] for s in hit["sentences"]),
+                      cached=True)
         return result
 
     if words < KNOBS["writeup_min_input_words"]:
@@ -1238,6 +1317,10 @@ def write_up(story, one_liner, client, intel_w=None, visit_id=None):
     result["cited_ids"] = sorted({c for s in kept for c in s["cites"]})
     result["used_text"] = " ".join(s["text"] for s in kept)
     result["short"] = len(kept) < lo
+    # Only a real write-up is cached. A fallback (thin input, the cap, too little left
+    # after the checks) is a state of the world, not an answer: caching it would freeze
+    # today's failure into every later visit.
+    cache_put_writeup(cache, key, [a["id"] for a in articles], kept)
     return result
 
 
@@ -1268,8 +1351,10 @@ def story_so_far(thread_id, day_rows, client, intel_w=None, visit_id=None, cache
 
     key = ST.fingerprint([d["date"] for d in days])
     out["fingerprint"] = key
-    if cache is not None and key in cache:
-        out.update(cache[key]); out["cached"] = True; out["shown"] = True
+    hit = cache_get_sofar(cache, thread_id, key)
+    if hit:
+        out.update(sentences=hit["sentences"], key_dates=hit["key_dates"],
+                   used_text=hit["used_text"], cached=True, shown=True)
         return out
 
     capped, spent = cap_reached(intel_w)
@@ -1308,6 +1393,8 @@ def story_so_far(thread_id, day_rows, client, intel_w=None, visit_id=None, cache
     out["key_dates"] = out["key_dates"][:KNOBS["story_so_far_key_dates"][1]]
     out["used_text"] = " ".join(s["text"] for s in out["sentences"])
     out["shown"] = True
+    cache_put_sofar(cache, thread_id, key, out["sentences"], out["key_dates"],
+                    [d["date"] for d in days])
     return out
 
 
