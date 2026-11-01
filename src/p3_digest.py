@@ -1288,14 +1288,25 @@ def story_so_far(thread_id, day_rows, client, intel_w=None, visit_id=None, cache
     return out
 
 
-def anthropic_client(api_key=None):
+def anthropic_client():
     """The real client. NEVER called from a Claude Code session (CLAUDE.md §2.2).
 
     Kunaal runs the live command himself. Built lazily so that importing this module, and
     the whole test suite, needs no SDK and no key.
+
+    The key is found the same way every other paid script in this project finds it
+    (`p2_tag.py:480`): python-dotenv reads `~/.config/news-intel/.env` into the
+    environment and the SDK picks ANTHROPIC_API_KEY up from there. Nothing is passed on
+    the command line and no key is ever printed. `max_retries=8` matches p2_tag, so a
+    rate limit behaves here as it does in the tagger.
     """
-    import anthropic                                             # noqa: F401  (lazy)
-    sdk = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    import os                                                    # lazy: see above
+    import anthropic
+    from dotenv import load_dotenv
+    load_dotenv(Path.home() / ".config" / "news-intel" / ".env")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        sys.exit("No ANTHROPIC_API_KEY found in ~/.config/news-intel/.env")
+    sdk = anthropic.Anthropic(max_retries=8)
     schema = {"type": "object", "properties": {
         "sentences": {"type": "array", "items": {"type": "object", "properties": {
             "text": {"type": "string"},
