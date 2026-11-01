@@ -967,6 +967,13 @@ for _t, _tv in _TENS.items():                     # twenty-one .. ninety-nine
 SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "crore": 10_000_000,
           "million": 1_000_000, "billion": 1_000_000_000}
 MULTIPLIERS = {"half": 0.5, "double": 2, "twice": 2}
+# These four are ordinary English far more often than they are quantities: "to set one",
+# "no one", "one of the", "double standards", "half-hearted". Counting them as numeric
+# claims dropped a correct sentence on the first live run (1 Nov), so a BARE one of these
+# is not treated as a number. Followed by a scale word it still is ("one crore", "half a
+# million"), which is the case Q2(m) was written for. The cost is a missed check on a
+# small number; the cost of the other choice is deleting good sentences.
+BARE_NOT_NUMBERS = {"one", "half", "double", "twice"}
 _DIGITS = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)")
 _SCALE_AFTER = re.compile(r"\s*(hundred|thousand|lakh|lakhs|crore|crores|million|billion)s?\b")
 
@@ -998,20 +1005,32 @@ def numbers_in(text):
             out.add(_canon(value * SCALES[scale.group(1).rstrip("s")]))
     tokens = re.findall(r"[a-z]+(?:-[a-z]+)?", low)
     for i, token in enumerate(tokens):
-        nxt = tokens[i + 1].rstrip("s") if i + 1 < len(tokens) else ""
+        # "half a million" puts a word between the two, so look two tokens ahead
+        ahead = [w.rstrip("s") for w in tokens[i + 1:i + 3]]
+        scale = next((w for w in ahead if w in SCALES), None)
         if token in NUMBER_WORDS:
             value = NUMBER_WORDS[token]
-            out.add(_canon(value * SCALES[nxt]) if nxt in SCALES else _canon(value))
+            if scale:
+                out.add(_canon(value * SCALES[scale]))
+            elif token not in BARE_NOT_NUMBERS:
+                out.add(_canon(value))
         elif token in MULTIPLIERS:
-            out.add(_canon(MULTIPLIERS[token]))
+            if scale:
+                out.add(_canon(MULTIPLIERS[token] * SCALES[scale]))
+            elif token not in BARE_NOT_NUMBERS:
+                out.add(_canon(MULTIPLIERS[token]))
     return out
 
 
 def allowed_numbers(article_ids, by_id):
-    """Every number the cited articles state, plus the years of the papers they ran in.
+    """Every number the cited articles state, plus the DATE of the paper each ran in.
 
-    The paper's own year counts as a source number (Q2l, M2: 39 of the failures were
-    exactly that), because a writer saying "the 2026 budget" is reading the masthead.
+    Q2(l) says the paper's own year counts as a source number, because a writer saying
+    "the 2026 budget" is reading the masthead. The first live run (1 Nov) showed the rule
+    has to cover the whole date, not just the year: the model wrote "On October 13, the
+    Times of India reported...", and 13 was in no article, so a correct sentence was
+    dropped. The day and month are exactly as traceable as the year -- they are in the
+    prompt, as date="2026-10-13" on the article itself -- so year, month and day all count.
     """
     out = set()
     for aid in article_ids:
@@ -1019,8 +1038,12 @@ def allowed_numbers(article_ids, by_id):
         if not art:
             continue
         out |= numbers_in(art["headline"]) | numbers_in(art["text"])
-        if art.get("date"):
-            out.add(_canon(int(art["date"][:4])))
+        date = art.get("date") or ""
+        if len(date) >= 10:
+            year, month, day = date[:4], date[5:7], date[8:10]
+            out |= {_canon(int(year)), _canon(int(month)), _canon(int(day))}
+        elif len(date) >= 4:
+            out.add(_canon(int(date[:4])))
     return out
 
 
@@ -1330,6 +1353,16 @@ def anthropic_client():
 
 # ───────────────────────────── commands ───────────────────────────────
 
+def theme_line(theme):
+    """The theme as one printed phrase. `trend` is None when no trend could be claimed
+    (not enough earlier publication days), which is why this is a function and not an
+    f-string: the first live run crashed on exactly that None (1 Nov)."""
+    if not theme:
+        return ""
+    trend = theme.get("trend") or "no trend"
+    return f"theme {theme['topic']} ({theme['stories_21d']}, {trend}) · "
+
+
 def cmd_build(args):
     if args.no_llm == args.live:
         sys.exit("pass exactly one of --no-llm (free, no model) or --live (paid, calls Haiku)")
@@ -1364,7 +1397,7 @@ def cmd_build(args):
             print(f"  {s['rank']:2d}. [{s['score']:2d}] {s['headline']['text']}")
             print(f"      {cov['articles']} articles · {cov['papers']} papers · "
                   f"{'DEVELOPING · ' if s['developing'] else ''}"
-                  f"{'theme ' + s['theme']['topic'] + ' (' + s['theme']['trend'] + ') · ' if s['theme'] else ''}"
+                  f"{theme_line(s['theme'])}"
                   f"{len(s['views'])} views · {len(s['links'])} printed links"
                   + (f" · {', '.join(flags)}" if flags else ""))
     elif not args.out:

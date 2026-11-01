@@ -154,19 +154,50 @@ def numbers():
     check("a hyphenated number word", "25" in n("twenty-five members"), True)
     check("a number word with a scale", "300000" in n("three lakh homes"), True)
     check("ninety-nine", "99" in n("ninety-nine seats"), True)
-    check("half", "0.5" in n("half the states"), True)
-    check("twice", "2" in n("twice the rate"), True)
-    check("double", "2" in n("double the tariff"), True)
+    # half / double / twice are in Q2(m)'s list, but as BARE words they are comparative
+    # claims, not stated figures: an article reporting "from Rs 25,000 to Rs 50,000" does
+    # not print a "2" for "double the penalty" to match, so treating them as numeric
+    # claims drops a correct sentence every time. The check is therefore SILENT on a bare
+    # comparative, and still checks them when they carry a scale. Narrows Q2(m); flagged
+    # for Kunaal in the hand-off file.
+    check("a bare 'half' is not a checkable figure", "0.5" in n("half the states"), False)
+    check("a bare 'twice' is not a checkable figure", "2" in n("twice the rate"), False)
+    check("a bare 'double' is not a checkable figure", "2" in n("double the tariff"), False)
+    check("'half' with a scale is a figure", "500000" in n("half a million people"), True)
+    check("a sentence with only a bare comparative is not dropped",
+          len(D.check_sentence_numbers(
+              [{"text": "The penalty was cut to double the earlier floor.", "cites": ["a1"]}],
+              {"a1": {"headline": "", "text": "no figures", "date": "2026-10-01"}})[0]), 1)
     check("a year is a number", "2026" in n("the 2026 rules"), True)
     check("no number at all", n("the regulator commented"), set())
     check("1,200 and 1200 are the same number", n("1,200"), n("1200"))
     check("1200.0 is the same number too", n("1200.0"), n("1200"))
+
+    # a number word used as ordinary English is not a numeric claim (live run, 1 Nov)
+    check("a bare 'one' is not a number", "1" in n("gave police 24 hours to set one"), False)
+    check("but the hours in it are", "24" in n("gave police 24 hours to set one"), True)
+    check("'no one' is not a number", "1" in n("no one was hurt"), False)
+    check("'one' with a scale still is", "10000000" in n("one crore rupees"), True)
+    check("'half a million' still is", "500000" in n("half a million homes"), True)
+    check("a bare 'double' is not a number", "2" in n("accused of double standards"), False)
+    check("'double' with a scale still is", "2000000" in n("double a million"), True)
+    check("'two' is still a number", "2" in n("two states objected"), True)
 
     art = {"a1": {"headline": "Tariff up", "text": "rose by 8% for 1,200 users",
                   "date": "2026-10-01"}}
     allowed = D.allowed_numbers(["a1"], art)
     check("the article's numbers are allowed", {"8", "1200"} <= allowed, True)
     check("the paper's own year is allowed", "2026" in allowed, True)
+    # Q2(l) widened after the live run: the model writes "On October 13, X reported",
+    # and that date is in the prompt, so month and day are as traceable as the year
+    check("the cited paper's month is allowed", "10" in allowed, True)
+    check("the cited paper's day is allowed", "1" in allowed, True)
+    dated = {"a1": {"headline": "", "text": "no numbers at all", "date": "2026-10-13"}}
+    kept, drops = D.check_sentence_numbers(
+        [{"text": "On October 13, the Times of India reported the move.", "cites": ["a1"]},
+         {"text": "On October 15, the paper reported the move.", "cites": ["a1"]}], dated)
+    check("a sentence naming the cited paper's own date passes", len(kept), 1)
+    check("a sentence naming some OTHER date is still dropped", drops[0]["missing"], ["15"])
     check("an unknown article id contributes nothing", D.allowed_numbers(["zz"], art), set())
 
 

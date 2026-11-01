@@ -336,6 +336,14 @@ def rules():
     check("the page label never claims a printed page",
           {r["page_link"]["label"] for r in cov["rows"]},
           {"PDF p1", "PDF p14", "PDF p3"})
+    check("a theme with a trend prints it",
+          D.theme_line({"topic": "Energy", "stories_21d": 7, "trend": "rising"}),
+          "theme Energy (7, rising) · ")
+    check("a theme with NO trend prints 'no trend', it does not crash",
+          D.theme_line({"topic": "Energy", "stories_21d": 7, "trend": None}),
+          "theme Energy (7, no trend) · ")
+    check("no theme prints nothing", D.theme_line(None), "")
+
     views = D.views_block(st)
     check("the views line lists the opinion piece", [v["kind"] for v in views], ["opinion"])
     check("the views line leaves news out",
