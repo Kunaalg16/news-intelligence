@@ -616,10 +616,255 @@ function renderStory(pane, story) {
   const theme = themeLine(story);
   if (theme) pane.append(theme);
 
-  /* The thread section is A5; a story with no thread shows none at all (H3). */
+  const earlier = earlierCoverage(story);
+  if (earlier) pane.append(earlier);
+  const thread = threadSection(story);
+  if (thread) pane.append(thread);
+
   pane.append(coverage(story));
   pane.append(el('p', { class: 'page-footer',
     text: "Charts and photos aren't read. Use the page link to see them." }));
+}
+
+/* ==================================================================== the thread
+
+   The same entries are drawn two ways. The timeline is the default and reads downward,
+   newest first, because that is the order a reader asks the question in ("what happened,
+   and what led to it"). The graph reads left to right in time and shows the shape
+   instead -- where a follow-up branched off, what sits beside the story. Acceptance
+   check 6 is that both draw the same set of entry_ids: one of them quietly dropping an
+   entry would be the easiest bug here to miss.
+*/
+
+/* The node's shape says what kind of link it is (§8.5). The newest entry is "today"
+   whatever its link type: it is the top of the thread, not a kind of link. */
+function nodeKind(entry, index) {
+  if (index === 0) return 'today';
+  return entry.link_type || 'untyped';
+}
+
+const KIND_WORDS = {
+  follow_up: 'follow-up',
+  start: 'where it began',
+  run_up: 'run-up',
+};
+
+function nodeFor(entry, index) {
+  return el('span', { class: 'node', dataset: { kind: nodeKind(entry, index) } });
+}
+
+/* "Wrong link?" on an entry: the thread is K2's guess at what continues what, and this
+   is the only place a reader can say it guessed wrong. The note is optional. */
+function wrongLinkButton(entry) {
+  const holder = el('span', {});
+  const button = el('button', {
+    class: 'reset entry-wrong', type: 'button', text: 'Wrong link?',
+    onclick: () => {
+      clear(holder);
+      const input = el('input', { type: 'text', 'aria-label': 'Why? (optional)',
+                                  placeholder: 'Why? (optional)' });
+      const send = el('button', {
+        class: 'reset', type: 'button', text: 'Send',
+        onclick: async () => {
+          await api.feedback('thread_link', entry.entry_id, [], 'down',
+                             input.value.trim() || null);
+          clear(holder);
+          holder.append(el('span', { class: 'entry-kind', text: 'Thank you · noted' }));
+        },
+      });
+      holder.append(el('span', { class: 'why-field' }, input, send));
+      input.focus();
+    },
+  });
+  holder.append(button);
+  return holder;
+}
+
+function timelineView(thread) {
+  const list = el('ul', { class: 'timeline' }, thread.entries.map((entry, i) => {
+    const word = KIND_WORDS[entry.link_type];
+    return el('li', { class: 'entry', dataset: { entryId: entry.entry_id } },
+      el('p', { class: 'entry-when' },
+        el('span', { class: 'entry-day', text: dayName(entry.date) }),
+        dateShort(entry.date)),
+      el('span', { class: 'entry-node' }, nodeFor(entry, i)),
+      el('div', { class: 'entry-body' },
+        el('p', { class: 'entry-papers' },
+          word ? el('span', { class: 'entry-kind', text: word + ' · ' }) : null,
+          count(entry.articles, 'article')
+            + (entry.pages && entry.pages.length
+                ? ' · ' + entry.pages.map((p) => paperCode(p.paper) + ' p'
+                    + p.pdf_page).join(' · ')
+                : '')),
+        el('h4', { class: 'entry-headline', text: entry.headline }),
+        el('p', { class: 'entry-line', text: entry.one_liner }),
+        wrongLinkButton(entry)));
+  }));
+
+  if (!thread.related || !thread.related.length) return el('div', {}, list);
+  return el('div', {}, list,
+    el('ul', { class: 'related' },
+      el('p', { class: 'related-title',
+                text: 'Related, same subject (not part of this story)' }),
+      thread.related.map((r) => el('li', {},
+        dateWithDay(r.date) + ' — ' + r.headline))));
+}
+
+/* The graph: oldest on the left, follow-ups above the spine, related below it. */
+const GRAPH = { col: 120, pad: 8, spineTop: 125, followTop: 27, relTop: 245, box: 104 };
+
+/* Where each entry goes in the graph, worked out as plain data before anything is drawn.
+
+   It is separate from the drawing for one reason: acceptance check 6 says the timeline
+   and the graph must show the SAME entries, and the easiest way for that to go wrong is
+   a filter here quietly dropping one. As data it can be checked without a browser, which
+   is what tests/test_p3_app.py does. The timeline's own list is simply thread.entries,
+   so `viewEntryIds` below is the thing the check compares.
+*/
+function graphPlan(thread) {
+  const oldestFirst = thread.entries.slice().reverse();
+  const spine = oldestFirst.filter((e) => e.link_type !== 'follow_up');
+  const newestId = thread.entries.length ? thread.entries[0].entry_id : null;
+  return oldestFirst.map((entry) => {
+    const isFollow = entry.link_type === 'follow_up';
+    /* a follow-up hangs above the day it belongs to, so it shares that day's column */
+    const column = isFollow
+      ? Math.max(0, spine.findIndex((e) => e.entry_id === entry.parent_id))
+      : Math.max(0, spine.findIndex((e) => e.entry_id === entry.entry_id));
+    const kind = isFollow ? 'follow'
+      : (entry.entry_id === newestId ? 'today'
+        : (entry.link_type === 'start' ? 'start' : 'spine'));
+    return { entry: entry, entry_id: entry.entry_id, isFollow: isFollow,
+             column: column, kind: kind };
+  });
+}
+
+/* The entries a view will draw. Both views draw all of them; this is what says so. */
+function viewEntryIds(thread, view) {
+  if (view === 'graph') return graphPlan(thread).map((p) => p.entry_id);
+  return thread.entries.map((e) => e.entry_id);
+}
+
+function graphView(thread) {
+  const oldestFirst = thread.entries.slice().reverse();
+  const spine = oldestFirst.filter((e) => e.link_type !== 'follow_up');
+  const canvas = el('div', { class: 'graph' });
+  const selected = el('div', { class: 'graph-selected' });
+
+  function show(entry, index) {
+    clear(selected);
+    for (const b of canvas.querySelectorAll('.graph-node')) {
+      b.setAttribute('aria-pressed', b.dataset.entryId === entry.entry_id ? 'true' : 'false');
+    }
+    selected.append(
+      el('h4', { text: entry.headline }),
+      el('p', { text: dateWithDay(entry.date) + ' · '
+                      + count(entry.articles, 'article') + ' from '
+                      + count(entry.papers, 'paper') }),
+      el('p', { text: entry.one_liner }));
+  }
+
+  graphPlan(thread).forEach((placed) => {
+    const entry = placed.entry;
+    const isFollow = placed.isFollow;
+    const kind = placed.kind;
+    const newest = kind === 'today';
+    const left = placed.column * GRAPH.col + GRAPH.pad;
+    const top = isFollow ? GRAPH.followTop : GRAPH.spineTop;
+
+    if (isFollow) {
+      canvas.append(el('span', { class: 'graph-link',
+        style: 'left:' + (left + GRAPH.box / 2) + 'px; top:' + (GRAPH.followTop + 70)
+               + 'px; height:' + (GRAPH.spineTop - GRAPH.followTop - 70) + 'px' }));
+    }
+    canvas.append(el('button', {
+      class: 'reset graph-node', type: 'button', 'aria-pressed': 'false',
+      dataset: { kind: kind, entryId: entry.entry_id },
+      style: 'left:' + left + 'px; top:' + top + 'px',
+      onclick: () => show(entry),
+    },
+      el('span', { class: 'graph-tag',
+                   text: newest ? 'today' : (KIND_WORDS[entry.link_type] || dateShort(entry.date)) }),
+      el('span', { class: 'graph-title', text: entry.headline })));
+  });
+
+  (thread.related || []).forEach((r) => {
+    const column = Math.max(0, spine.findIndex((e) => e.entry_id === r.attaches_to));
+    const left = column * GRAPH.col + GRAPH.pad;
+    canvas.append(el('span', { class: 'graph-link', dataset: { kind: 'rel' },
+      style: 'left:' + (left + GRAPH.box / 2) + 'px; top:' + (GRAPH.spineTop + 70)
+             + 'px; height:' + (GRAPH.relTop - GRAPH.spineTop - 70) + 'px' }));
+    canvas.append(el('div', { class: 'graph-node', dataset: { kind: 'rel' },
+      style: 'left:' + left + 'px; top:' + GRAPH.relTop + 'px' },
+      el('span', { class: 'graph-tag', text: 'related' }),
+      el('span', { class: 'graph-title', text: r.headline })));
+  });
+
+  const width = Math.max(spine.length, 1) * GRAPH.col + GRAPH.pad;
+  canvas.style.width = width + 'px';
+  canvas.append(el('span', { class: 'graph-spine',
+    style: 'width:' + width + 'px; left:0' }));
+  if (thread.entries.length) show(thread.entries[0]);
+
+  return el('div', {}, el('div', { class: 'graph-scroll' }, canvas), selected);
+}
+
+function threadSection(story) {
+  const thread = S.threads[story.story_id];
+  if (!thread) return null;                 /* H3: no thread, no section at all */
+
+  const view = S.flags.graph_view && S.prefs.thread_view === 'graph' ? 'graph' : 'timeline';
+  const body = view === 'graph' ? graphView(thread) : timelineView(thread);
+
+  const switcher = !S.flags.graph_view ? null : el('div', { class: 'view-switch' },
+    ['timeline', 'graph'].map((name) => el('button', {
+      class: 'reset', type: 'button', 'aria-pressed': view === name ? 'true' : 'false',
+      text: name === 'timeline' ? 'Timeline' : 'Graph',
+      onclick: () => {
+        S.prefs.thread_view = name;
+        api.setPref('thread_view', name);
+        render();
+      },
+    })));
+
+  return el('section', { class: 'thread' },
+    el('div', { class: 'thread-head' },
+      el('h3', { class: 'thread-title' }, 'The thread',
+        thread.fixture ? el('span', { class: 'fixture-tag', text: 'sample data' }) : null),
+      el('span', { class: 'thread-count',
+        text: count(thread.days, 'day') + ' · ' + count(thread.articles, 'article')
+              + ' from ' + count(thread.papers, 'paper') }),
+      switcher),
+    body);
+}
+
+/* §8.5 — on Today, a short list of the days just before this one, so the reader can see
+   there IS earlier coverage without opening the thread. */
+function earlierCoverage(story) {
+  const thread = S.threads[story.story_id];
+  if (!thread || !thread.entries.length) return null;
+  const latest = thread.entries[0].date;
+  const cutoff = new Date(parts(latest).y, parts(latest).m - 1,
+                          parts(latest).d - (S.knobs.earlier_coverage_days || 3));
+  const recent = thread.entries.slice(1).filter((e) => {
+    const p = parts(e.date);
+    return new Date(p.y, p.m - 1, p.d) >= cutoff;
+  });
+  if (!recent.length) return null;
+
+  return el('section', { class: 'earlier' },
+    el('p', { class: 'earlier-title', text: 'Earlier coverage' }),
+    el('ul', {}, recent.map((entry) => {
+      const i = thread.entries.indexOf(entry);
+      const word = KIND_WORDS[entry.link_type];
+      return el('li', {},
+        el('span', { class: 'earlier-when', text: dateWithDay(entry.date) }),
+        el('span', { class: 'earlier-node' }, nodeFor(entry, i)),
+        el('button', { class: 'reset earlier-link', type: 'button',
+                       onclick: () => goToThreadEntry(entry.entry_id) },
+          word ? el('span', { class: 'entry-kind', text: word + ' · ' }) : null,
+          entry.headline));
+    })));
 }
 
 /* --------------------------------------------------------------- the article view */
@@ -699,6 +944,9 @@ async function openStory(storyId) {
     const since = await api.newSince(storyId, S.ref);
     S.newSince[storyId] = (since && since.new_since_read) || [];
   }
+  if (story && !(storyId in S.threads)) {
+    S.threads[storyId] = await api.thread(storyId);   /* 404 -> null -> no section (H3) */
+  }
   const ssfKey = 'ssf_seen:' + storyId;
   if (story && (story.story_so_far || {}).shown && !(ssfKey in S.prefs)) {
     const pref = await api.pref(ssfKey);
@@ -731,6 +979,9 @@ async function boot() {
     S.read = (read && read.read) || {};
   }
 
+  const view = await api.pref('thread_view');
+  S.prefs.thread_view = view ? view.value : null;
+
   /* The visit is read BEFORE it is recorded: once this visit is stored it is itself the
      last one, so "since last visit" would always mean "since a moment ago" (D10). */
   const visit = await api.visit(S.ref, S.digest && S.digest.window, false);
@@ -756,6 +1007,7 @@ async function boot() {
 */
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
+  nodeKind, KIND_WORDS, graphPlan, viewEntryIds,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 

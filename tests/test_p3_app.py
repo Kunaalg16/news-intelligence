@@ -702,6 +702,50 @@ eq("a followed story already in the digest is not counted twice", APP.unreadCoun
 APP.S.follows = [{story_id: "elsewhere", text_hashes: ["z"]}];
 eq("a followed story outside the digest is counted", APP.unreadCount(), 2);
 
+// the thread: both views draw the same entries (acceptance check 6), and the node
+// shapes say what kind of link each one is
+var thread = {
+  thread_id: "2026-10-08:aaa", days: 6, articles: 12, papers: 5,
+  entries: [
+    {entry_id: "d13", date: "2026-10-13", link_type: "continuing", parent_id: "d12"},
+    {entry_id: "d12", date: "2026-10-12", link_type: null, parent_id: "d10"},
+    {entry_id: "d10", date: "2026-10-10", link_type: "continuing", parent_id: "d09"},
+    {entry_id: "d09", date: "2026-10-09", link_type: "follow_up", parent_id: "d08"},
+    {entry_id: "d08", date: "2026-10-08", link_type: "start", parent_id: "d07"},
+    {entry_id: "d07", date: "2026-10-07", link_type: "run_up", parent_id: null}
+  ],
+  related: [{date: "2026-10-12", headline: "beside it", attaches_to: "d12"}]
+};
+
+eq("the timeline and the graph draw the same entries",
+   APP.viewEntryIds(thread, "timeline").slice().sort(),
+   APP.viewEntryIds(thread, "graph").slice().sort());
+eq("and neither drops one", APP.viewEntryIds(thread, "graph").length, 6);
+
+var plan = APP.graphPlan(thread);
+function placed(id) { return plan.filter(function (p) { return p.entry_id === id; })[0]; }
+eq("the newest day is today, whatever its link type", placed("d13").kind, "today");
+eq("where it began is drawn as the start", placed("d08").kind, "start");
+eq("a follow-up hangs off the spine", placed("d09").isFollow, true);
+eq("and sits in the column of the day it follows",
+   placed("d09").column, placed("d08").column);
+eq("the run-up is the leftmost column", placed("d07").column, 0);
+eq("the days march rightwards in time",
+   [placed("d07").column, placed("d08").column, placed("d10").column,
+    placed("d12").column, placed("d13").column], [0, 1, 2, 3, 4]);
+eq("an untyped day is drawn like a continuing one", placed("d12").kind, "spine");
+eq("no column is negative",
+   plan.filter(function (p) { return p.column < 0; }).length, 0);
+
+// the node shapes in the timeline
+eq("the newest entry is the today node", APP.nodeKind(thread.entries[0], 0), "today");
+eq("an untyped entry is named untyped, not left blank",
+   APP.nodeKind(thread.entries[1], 1), "untyped");
+eq("a follow-up keeps its own shape", APP.nodeKind(thread.entries[3], 3), "follow_up");
+eq("only three kinds say a word beside the node",
+   Object.keys(APP.KIND_WORDS).sort(), ["follow_up", "run_up", "start"]);
+eq("and continuing is not one of them", APP.KIND_WORDS.continuing, undefined);
+
 print(JSON.stringify({ran: ran, fails: fails}));
 """
 
