@@ -1,9 +1,10 @@
 """
-test_p3_app.py -- TEST (free, no API key, no internet). Checks the K1 app v0, part 1:
-src/p3_app_double.py (the §4 interface). Part 2 (the routes and the page) arrives with A2.
+test_p3_app.py -- TEST (free, no API key, no internet). Checks the K1 app v0:
+src/p3_app_double.py (the §4 interface) and src/p3_app.py (the routes). The page itself
+is checked by the markup and contrast parts that arrive with A7.
 
 WHAT IT DOES
-    Two parts, neither of which touches a database or the reader's real state file.
+    Five parts, none of which touches a database or the reader's real state file.
     1. MOCK: a synthetic digest JSON + a synthetic archive of empty PDFs in a temporary
        directory, with the double pointed at them. Every function of §4 is exercised
        there -- read on leave, keep unread, new-since, boards, pins, follows, feedback,
@@ -11,6 +12,11 @@ WHAT IT DOES
     2. REAL DATA (read-only): the two digests in `_work/`, with the state file sent to a
        temporary path so the run cannot touch Kunaal's own read state. This is where the
        numbers that the screens will show are pinned.
+    3. ROUTES: every route function of `p3_app.py` called DIRECTLY, on the real digests.
+       Not through a client: the sandbox this was built in refuses to bind a local port
+       (checked at A0), and `httpx` is not installed, so FastAPI's TestClient is out on
+       two counts. The route functions are plain `def`s for exactly this reason.
+    4. OWNERSHIP: a grep over both modules for anything they must not import.
 
 WHY IT EXISTS
     Every screen of the app reads through this one module, so a wrong answer here is a
@@ -66,9 +72,29 @@ PASS LINES (fixed before the run; brief §4 rules, §7 populations, §8.7 states
       row, an invented body, and `fixture: true`.
     - The body is at least the knob's minimum words, so the reading view always has
       enough text to need several paragraphs; an unknown hash is None.
+    The routes (brief §5, acceptance checks 1 and 8)
+    - Every route the brief lists exists, and each one answers with JSON that can be
+      serialised, for BOTH digest files.
+    - An unknown digest ref is 404, not a different digest; an unknown article is 404.
+    - A day-1 story's thread is 404, which is how the page knows to render no thread (H3).
+    - A posted body missing a required field is 400 and says which field; a feedback vote
+      that is not up/down and a target_kind that is not story/thread_link are 400.
+    - Flipping a fixture switch through the dev route changes what /api/status says, so
+      the states of §8.7 can be seen in the browser and not only in this test.
+    - `/api/flags` sends all ten flags, with `theme_bar_strip` off (R9).
+    - Paragraphs: every paragraph but the last reaches the knob's word count, no sentence
+      is split (the paragraphs joined back together are the body again, word for word),
+      and every paragraph ends on sentence punctuation.
+    - The PDF route serves a real archive PDF; `../` climbing out is 403; a name that does
+      not end .pdf is 404; a date-shaped path that holds no such file is 404.
+    - Against a planted file that really exists outside the archive, in a temporary
+      archive: `../`, an absolute path, and a symlink inside the archive pointing out of
+      it are all refused; a climb that lands back inside is still served.
     Ownership (brief §2.1, acceptance check 9)
     - The double imports no sqlite3, no p3_store, no p3_digest, and nothing that reaches
       the network. It writes exactly one file: `_work/k1_app_state.json`.
+    - `p3_app.py` has exactly ONE data import, `p3_app_double`, so integration is the
+      one-line swap the brief asks for, and it too imports no database.
     A failed line is answered by reading the failure, not by moving the line.
 
 WHEN TO RUN
@@ -440,9 +466,214 @@ def real():
         check("no real state file was written", D.STATE_FILE.exists(), False)
 
 
-# ------------------------------------------------------------------- 3. ownership
+# ---------------------------------------------------------------------- 3. routes
+
+def status_of(fn, *args, **kwargs):
+    """The HTTP status a route function answers with, 200 when it simply returns."""
+    from fastapi import HTTPException
+    try:
+        fn(*args, **kwargs)
+    except HTTPException as e:
+        return e.status_code
+    return 200
+
+
+def routes():
+    """Every route called directly: no client, no server, no bound port (see A0)."""
+    import p3_app as A
+
+    D.ROOT = ROOT
+    D.WORK = ROOT / "_work"
+    D.ARCHIVE = ROOT / "archive"
+    with tempfile.TemporaryDirectory() as tmp:
+        D.STATE_FILE = Path(tmp) / "state.json"
+
+        paths = {r.path for r in A.app.routes if hasattr(r, "path")}
+        wanted = {"/", "/api/digest", "/api/digests", "/api/status",
+                  "/api/article/{text_hash}", "/api/thread/{thread_id}", "/api/read",
+                  "/api/keep_unread", "/api/follow", "/api/follows", "/api/boards",
+                  "/api/pin", "/api/pin/{pin_id}", "/api/boards/{board_id}/pins",
+                  "/api/feedback", "/api/pref/{key}", "/api/visit", "/api/cost",
+                  "/pdf/{date}/{name:path}"}
+        check("every route the brief lists exists", sorted(wanted - paths), [])
+
+        # --- flags ----------------------------------------------------------------
+        f = A.flags()
+        check("all ten feature flags are sent to the page", len(f["flags"]), 10)
+        check("the theme bar strip is off, its data not being in the JSON (R9)",
+              f["flags"]["theme_bar_strip"], False)
+        check("the cost header is on", f["flags"]["cost_display"], True)
+
+        # --- the digests, both of them --------------------------------------------
+        for ref in ("digest_live", "k3_b1_3_digest_2026-10-11"):
+            got = A.digest(ref=ref)
+            check(f"/api/digest serialises for {ref}", bool(json.dumps(got)), True)
+            check(f"/api/digest returns ten stories for {ref}", len(got["stories"]), 10)
+        check("/api/digest with no ref is the latest",
+              A.digest()["built_at"], "2026-11-01T16:38:51")
+        check("an unknown digest ref is 404, not another digest",
+              status_of(A.digest, ref="nope"), 404)
+        check("/api/digests lists both", len(A.digests()["digests"]), 2)
+        check("/api/status is ready", A.status()["state"], "ready")
+        check("/api/cost is the live digest's spend",
+              round(A.cost()["spent_usd"], 6), 0.010941)
+
+        # --- the fixture switches, which are how the states are seen ---------------
+        A.set_fixtures(payload={"processing": True})
+        check("flipping a fixture changes what /api/status says",
+              A.status()["state"], "processing")
+        A.set_fixtures(payload={"processing": False})
+        check("an unknown fixture name is 400",
+              status_of(A.set_fixtures, payload={"nope": True}), 400)
+
+        # --- one article, and its paragraphs --------------------------------------
+        live = A.digest(ref="digest_live")
+        row = live["stories"][0]["coverage"]["rows"][0]
+        art = A.article(row["text_hash"])
+        check("the article's headline is the row's own", art["headline"], row["headline"])
+        check("an unknown article is 404", status_of(A.article, "nope"), 404)
+        paras = art["paragraphs"]
+        check("the body is broken into more than one paragraph", len(paras) > 1, True)
+        check("no sentence is split: the paragraphs joined back up are the body again",
+              " ".join(paras).split(), art["body"].split())
+        check("every paragraph but the last reaches the knob's word count",
+              [len(p.split()) >= A.KNOBS["paragraph_words"] for p in paras[:-1]],
+              [True] * len(paras[:-1]))
+        check("every paragraph ends on sentence punctuation",
+              sorted({p.strip()[-1] for p in paras}), ["."])
+
+        # --- threads --------------------------------------------------------------
+        shown = [s for s in live["stories"] if (s.get("story_so_far") or {}).get("shown")][0]
+        t = A.thread(shown["story_so_far"]["thread_id"])
+        check("/api/thread serialises", bool(json.dumps(t)), True)
+        day1 = next(s for s in live["stories"]
+                    if not s["developing"] and (s.get("story_so_far") or {}).get("days") == 1)
+        check("a day-1 story's thread is 404, which is how the page renders none (H3)",
+              status_of(A.thread, day1["story_id"]), 404)
+
+        # --- the posted routes ----------------------------------------------------
+        hashes = [r["text_hash"] for r in shown["coverage"]["rows"]]
+        check("a body missing a required field is 400",
+              status_of(A.read, payload={}), 400)
+        check("/api/read marks them read", all(A.read(payload={"text_hashes": hashes})
+                                               ["read"].values()), True)
+        check("/api/keep_unread needs all three fields",
+              status_of(A.keep_unread, payload={"story_id": "x"}), 400)
+        kept = A.keep_unread(payload={"story_id": shown["story_id"],
+                                      "text_hashes": hashes, "on": True})
+        check("keep unread through the route makes a READ story unread again",
+              any(kept["read"].values()), False)
+        A.keep_unread(payload={"story_id": shown["story_id"], "text_hashes": hashes,
+                               "on": False})
+        check("/api/follow adds the story",
+              len(A.follow(payload={"story_id": shown["story_id"],
+                                    "text_hashes": hashes, "on": True})["follows"]), 1)
+        check("/api/follows agrees", len(A.follows()["follows"]), 1)
+
+        board_id = A.new_board(payload={"name": "Protests"})["board_id"]
+        check("a board with a blank name is 400",
+              status_of(A.new_board, payload={"name": "   "}), 400)
+        pin_id = A.pin(payload={"board_id": board_id, "item_type": "story",
+                                "payload": {"story_id": shown["story_id"],
+                                            "text_hashes": hashes},
+                                "source": {"digest_ref": "digest_live"}})["pin_id"]
+        check("the board now holds one pin",
+              len(A.board_pins(board_id)["pins"]), 1)
+        check("the Boards screen can count pins without a call each",
+              A.boards()["boards"][0]["pin_count"], 1)
+        A.remove_pin(pin_id)
+        check("unpinning empties it", A.board_pins(board_id)["pins"], [])
+
+        check("a feedback vote that is not up or down is 400",
+              status_of(A.feedback, payload={"target_kind": "story", "target_id": "x",
+                                             "vote": "sideways"}), 400)
+        check("a feedback target_kind outside story/thread_link is 400",
+              status_of(A.feedback, payload={"target_kind": "paper", "target_id": "x",
+                                             "vote": "up"}), 400)
+        check("a 👎 with a note is stored",
+              A.feedback(payload={"target_kind": "story", "target_id": shown["story_id"],
+                                  "vote": "down", "note": "not what I expected",
+                                  "text_hashes": hashes})["stored"], True)
+
+        check("an unset pref reads as None", A.pref("thread_view")["value"], None)
+        check("a pref posts and reads back",
+              A.set_pref("thread_view", payload={"value": "graph"})["value"], "graph")
+        check("/api/visit answers with the visit BEFORE this one",
+              A.visit(payload={"digest_ref": "digest_live",
+                               "window": live["window"]})["last_visit"], None)
+        A.visit(payload={"digest_ref": "digest_live", "window": live["window"],
+                         "opened_story": True})
+        check("and then that visit is the last one",
+              bool(A.visit(payload={"digest_ref": "digest_live",
+                                    "window": live["window"]})["last_visit"]), True)
+
+        # --- the PDF route, which is the one route that names a file ---------------
+        pdf_rel = row["page_link"]["pdf"]
+        date, name = pdf_rel.split("/")[1], pdf_rel.split("/")[2]
+        served = A.pdf(date, name)
+        check("a real archive PDF is served",
+              str(served.path), str((ROOT / pdf_rel).resolve()))
+        check("climbing out of the archive is refused",
+              status_of(A.pdf, date, "../../secrets.pdf"), 403)
+        check("and so is a deeper climb",
+              status_of(A.pdf, date, "../../../../etc/passwd.pdf"), 403)
+        check("a name that is not a PDF is 404",
+              status_of(A.pdf, date, "../../CLAUDE.md"), 404)
+        check("a path that is not a date is 404",
+              status_of(A.pdf, "not-a-date", name), 404)
+        check("a PDF that is not there is 404",
+              status_of(A.pdf, date, "2026-10-09_The Daily Invention.pdf"), 404)
+        check("the page route answers even before the page is built",
+              A.page().status_code, 200)
+
+
+def pdf_guard():
+    """The path guard against files that really exist outside the archive.
+
+    The route checks are above; these are the hostile ones, and they need a planted file
+    to be worth anything — so they run against a TEMPORARY archive with a real PDF
+    outside it and a symlink pointing at it. The real `archive/` is never written to.
+    """
+    import p3_app as A
+    real_archive = A.ARCHIVE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            outside = tmp / "outside" / "real_secret.pdf"
+            outside.parent.mkdir(parents=True)
+            outside.write_bytes(b"%PDF-1.4 a real PDF that is not in the archive")
+            day = tmp / "archive" / "2026-10-09"
+            day.mkdir(parents=True)
+            (day / "2026-10-09_Mint.pdf").write_bytes(b"%PDF-1.4 legitimate")
+            (day / "2026-10-09_Sneaky.pdf").symlink_to(outside)
+            A.ARCHIVE = tmp / "archive"
+
+            check("the legitimate PDF is served",
+                  status_of(A.pdf, "2026-10-09", "2026-10-09_Mint.pdf"), 200)
+            check("a PDF that really exists outside, reached with ../, is refused",
+                  status_of(A.pdf, "2026-10-09", "../../outside/real_secret.pdf"), 403)
+            check("an absolute path to it is refused",
+                  status_of(A.pdf, "2026-10-09", str(outside)), 403)
+            check("a symlink inside the archive pointing outside it is refused",
+                  status_of(A.pdf, "2026-10-09", "2026-10-09_Sneaky.pdf"), 403)
+            check("a climb that lands back inside the archive is still served",
+                  status_of(A.pdf, "2026-10-09", "../2026-10-09/2026-10-09_Mint.pdf"), 200)
+            check("the archive root itself is not a PDF",
+                  status_of(A.pdf, "2026-10-09", "../"), 404)
+    finally:
+        A.ARCHIVE = real_archive
+
+
+# ------------------------------------------------------------------- 5. ownership
 
 def ownership():
+    app_src = (ROOT / "src" / "p3_app.py").read_text()
+    app_imports = re.findall(r"^\s*(?:import|from)\s+([\w.]+)", app_src, re.M)
+    check("p3_app has exactly one data import, so integration is a one-line swap",
+          [i for i in app_imports if i.startswith("p3_")], ["p3_app_double"])
+    check("p3_app opens no database either",
+          sorted({"sqlite3", "p3_store", "p3_digest"} & set(app_imports)), [])
+
     src = (ROOT / "src" / "p3_app_double.py").read_text()
     imports = re.findall(r"^\s*(?:import|from)\s+([\w.]+)", src, re.M)
     forbidden = {"sqlite3", "p3_store", "p3_digest", "p3_index", "p3_group", "p3_label",
@@ -457,12 +688,14 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
     real()
+    routes()
+    pdf_guard()
     ownership()
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")
     print(f"{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed "
-          f"(mock world + the two real digests + ownership)")
+          f"(mock world + the two real digests + the routes + ownership)")
     print("no database was opened and no real read state was touched by this test")
     print("PASS" if not bad else "FAIL")
     return 1 if bad else 0
