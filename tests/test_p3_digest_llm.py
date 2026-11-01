@@ -125,7 +125,7 @@ def seat(**kw):
                 event="policy or regulation", events_more="[]", text_check="ok",
                 body="The regulator raised power tariffs by 8% across four states today. "
                      "The order covers 1,200 industrial users and 45 lakh homes. "
-                     "It was issued under the 2026 tariff rules.")
+                     "It was issued under the 2026 tariff rules. " + "filler " * 400)
     base.update(kw)
     lab = L.label_text(base)
     lab.update({k: base[k] for k in ("date", "publisher", "art_id", "page", "number", "deck",
@@ -254,7 +254,7 @@ def writeup():
     st = story([seat(), seat(text_hash="a2", page=5, art_id="p05-a01",
                             headline="Industry objects to the order",
                             body="Industry groups objected to the order today. "
-                                 "A crowd of 500 gathered outside.")])
+                                 "A crowd of 500 gathered outside. " + "filler " * 400)])
     one_liner = {"text": "The regulator raised tariffs by 8%.", "source_text_hash": "a1"}
 
     f = Fake("good")
@@ -273,7 +273,6 @@ def writeup():
     r = D.write_up(st, one_liner, f)
     check("a sentence citing an article never shown is dropped", len(r["sentences"]), 2)
     check("and the drop is logged", r["drops"][0]["reason"], "no_valid_citation")
-    check("enough survived, so no retry was paid for", f.calls, 1)
 
     f = Fake("wrong_number")
     r = D.write_up(st, one_liner, f)
@@ -292,6 +291,7 @@ def writeup():
           r["used_text"], "The regulator raised tariffs by 8%.")
     check("the retry was spent first", f.calls, 1 + D.KNOBS["check_retries"])
     check("every drop from both attempts is logged", len(r["drops"]) >= 4, True)
+    check("only one retry is ever paid for", r["attempts"], 1 + D.KNOBS["check_retries"])
 
     # an instruction planted inside an article is data, and the checks still run
     planted = seat(text_hash="a2", page=5, art_id="p05-a01",
@@ -317,10 +317,43 @@ def writeup():
                                    "cites": ["a1"]}]}, 2800, 120
     f = Brief("good")
     r = D.write_up(st, one_liner, f)
-    check("a short but clean answer is not retried", f.calls, 1)
-    check("it is marked as short, not as a failed check", r.get("short_answer"), True)
-    check("nothing was dropped", r["drops"], [])
-    check("and with fewer than 2 sentences the one-liner is used", r["fallback"], "one_liner")
+    check("a clean but short answer IS repaired once", f.calls, 2)
+    check("it is marked as short", r.get("short_answer"), True)
+    check("the repair names the problem", r.get("repaired"), ["too_short"])
+    check("the retry prompt says the previous answer was not usable",
+          "NOT USABLE" in f.prompts[1], True)
+    check("and restates the rule that was broken", "3 to 5" in f.prompts[1], True)
+    check("the repair does not name the offending number",
+          "44" in f.prompts[1] or "99" in f.prompts[1], False)
+    check("no check dropped anything", r["drops"], [])
+    check("still short after the repair -> the one-liner is used", r["fallback"], "one_liner")
+
+    # the thin-input gate: no call at all when there is too little printing to summarise
+    thin = story([seat(text_hash="t1", body="A ten word brief about a small local matter.")])
+    f = Fake("good")
+    r = D.write_up(thin, one_liner, f)
+    check("a thin story makes NO call", f.calls, 0)
+    check("and says why", r["fallback"], "thin_input")
+    check("and the one-liner stands", r["used_text"], one_liner["text"])
+    check("and it cost nothing", r["cost_usd"], 0.0)
+    check("the gate is a knob with a reason", D.KNOBS["writeup_min_input_words"], 400)
+
+    # a dropped sentence that still leaves enough is NOT re-asked
+    f = Fake("bad_citation")
+    r = D.write_up(st, one_liner, f)
+    check("losing one sentence of three is handled by dropping it, not by paying again",
+          f.calls, 1)
+    check("and the surviving sentences are used", len(r["sentences"]), 2)
+
+    # a failed check that leaves too little IS repaired, and the repair names the rule
+    f = Fake("all_bad")
+    r = D.write_up(st, one_liner, f)
+    check("too little left after the checks -> one repair", f.calls, 2)
+    check("the repair names every problem, including that it was short too",
+          sorted(set(r["repaired"])),
+          ["no_valid_citation", "number_not_in_source", "too_short"])
+    check("the repair restates the number rule",
+          "copied exactly" in f.prompts[1], True)
 
     empty = story([seat(kind="sponsored")])
     f = Fake("good")
