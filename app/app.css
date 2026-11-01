@@ -829,3 +829,6 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   background: var(--chip-ground);
   border-color: var(--ochre);
 }
+
+/* The article view's own actions: the printed page, and pinning this one piece. */
+.article-actions { display: flex; gap: 14px; align-items: center; margin-top: 20px; }

@@ -570,7 +570,22 @@ function storyActions(story) {
 
 /* §8.6 — the boards menu: most recently used first, a new board inline, and six seconds
    to undo, because pinning to the wrong board is the easy mistake. */
+/* §8.6 gives the same menu two jobs: pinning the story you are reading, and pinning one
+   article from the article view. Only what goes on the board differs, so the menu, its
+   keyboard and its undo stay one control and `what()` says what is being pinned. */
 function pinButton(story) {
+  return pinControl('story', () => pinPayload(story));
+}
+
+function articlePinButton(article) {
+  return pinControl('article', () => ({
+    payload: { text_hash: article.text_hash, headline: article.headline },
+    source: { digest_ref: S.ref, paper: article.paper, date: article.date,
+              page_link: article.page_link },
+  }));
+}
+
+function pinControl(itemType, what) {
   const wrap = el('span', { class: 'pin-wrap' });
   const menu = el('div', { class: 'pin-menu' });
   menu.hidden = true;
@@ -585,7 +600,7 @@ function pinButton(story) {
         S.boards = (boards && boards.boards) || [];
         const shut = () => { menu.hidden = true;
                              button.setAttribute('aria-expanded', 'false'); };
-        fillPinMenu(menu, story, shut);
+        fillPinMenu(menu, itemType, what, shut);
         pinMenuKeys(menu, shut, button);
       }
       menu.hidden = !open;
@@ -635,14 +650,14 @@ function pinMenuKeys(menu, close, button) {
   });
 }
 
-function fillPinMenu(menu, story, close) {
+function fillPinMenu(menu, itemType, what, close) {
   clear(menu);
-  const { payload, source } = pinPayload(story);
+  const { payload, source } = what();
 
   menu.append(el('ul', {}, S.boards.map((b) => el('li', {},
     el('button', { class: 'reset', type: 'button', onclick: async () => {
       close();
-      const res = await api.pin(b.board_id, 'story', payload, source);
+      const res = await api.pin(b.board_id, itemType, payload, source);
       pinnedToast(b.name, res && res.pin_id);
     } },
       b.name, ' ', el('span', { class: 'pin-count',
@@ -659,7 +674,7 @@ function fillPinMenu(menu, story, close) {
       const made = await api.newBoard(name);
       if (!made) return;
       S.boards = made.boards || S.boards;
-      const res = await api.pin(made.board_id, 'story', payload, source);
+      const res = await api.pin(made.board_id, itemType, payload, source);
       pinnedToast(name, res && res.pin_id);
     },
   });
@@ -1191,9 +1206,10 @@ async function openArticle(textHash) {
   pane.append(el('div', { class: 'article-body' },
     (article.paragraphs || []).map((p) => el('p', { text: p }))));
 
-  pane.append(el('p', {},
+  pane.append(el('p', { class: 'article-actions' },
     el('a', { href: pdfHref(article.page_link), target: '_blank', rel: 'noopener' },
-      'Open page')));
+      'Open page'),
+    articlePinButton(article)));
   pane.scrollTop = 0;
 }
 

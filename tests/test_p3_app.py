@@ -607,6 +607,15 @@ def routes():
               len(A.board_pins(board_id)["pins"]), 1)
         check("the Boards screen can count pins without a call each",
               A.boards()["boards"][0]["pin_count"], 1)
+        # §8.6: one article can be pinned on its own, from the article view
+        art_pin = A.pin(payload={"board_id": board_id, "item_type": "article",
+                                 "payload": {"text_hash": hashes[0]},
+                                 "source": {"digest_ref": "digest_live"}})["pin_id"]
+        kinds = sorted(p["item_type"] for p in A.board_pins(board_id)["pins"])
+        check("a board holds a story and a single article side by side",
+              kinds, ["article", "story"])
+        A.remove_pin(art_pin)
+
         A.remove_pin(pin_id)
         check("unpinning empties it", A.board_pins(board_id)["pins"], [])
 
@@ -1058,6 +1067,13 @@ def markup():
     check("no single node kind moves itself off that axis",
           [b.strip()[:30] for b in per_kind_offsets
            if re.search(r"(^|;)\s*(left|top)\s*:", b)], [])
+
+    # §8.6 asks for the same pin menu in the article view; it was missed once already
+    check("the article view offers the same pin menu",
+          bool(re.search(r"article-actions[^;]*?articlePinButton", js, re.S)), True)
+    check("and it pins an article, not the story it came from",
+          bool(re.search(r"function articlePinButton[^}]*?pinControl\('article'", js, re.S)),
+          True)
 
     check("reduced motion turns every transition off",
           bool(re.search(r"prefers-reduced-motion[^}]*\{[^}]*transition:\s*none",
