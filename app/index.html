@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>News Intelligence</title>
+<!--
+  K1 app v0 · the shell. Everything inside the three panes is built by app.js from the
+  JSON routes; this file holds only what never changes. The fonts come from Google Fonts
+  in Kunaal's browser (the sandbox this was built in has no network, and does not need
+  one): Newsreader for headlines and write-ups, IBM Plex Sans for everything else, with
+  Georgia and system-ui behind them.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Newsreader:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<a class="skip" href="#reading">Skip to the story</a>
+
+<header class="shell-header">
+  <div class="masthead">
+    <h1 class="wordmark">News Intelligence</h1>
+    <p class="window" id="window-text"></p>
+  </div>
+
+  <nav class="nav" aria-label="Screens">
+    <button class="reset nav-item" type="button" data-screen="today" aria-current="page">Today</button>
+    <button class="reset nav-item" type="button" data-screen="boards">Boards</button>
+    <button class="reset nav-item" type="button" data-screen="past">Past digests</button>
+  </nav>
+
+  <div class="header-right">
+    <p class="today-date" id="today-date"></p>
+    <p class="unread" id="unread-count"></p>
+    <p class="cost" id="cost-header" hidden></p>
+  </div>
+
+  <p class="status-line" id="status-line" role="status" hidden></p>
+</header>
+
+<main class="panes">
+  <aside class="drawer" id="drawer" aria-label="The digest"></aside>
+
+  <section class="reading" id="reading" tabindex="-1" aria-label="Reading"></section>
+
+  <!--
+    The assistant is v0.1. The brief says to show the rail collapsed and disabled rather
+    than hide it, so the pane it will live in is already part of the layout.
+  -->
+  <aside class="assistant-rail">
+    <button class="reset rail-button" type="button" disabled
+            aria-label="Assistant, version 0.1, not available yet">
+      <span class="rail-label">Assistant · v0.1</span>
+    </button>
+  </aside>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

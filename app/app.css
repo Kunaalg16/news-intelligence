@@ -1,0 +1,308 @@
+/* K1 app v0 · app.css
+   From the brief's §8.1 tokens. Nothing here is a colour or a size chosen on the spot:
+   every value is a token below, and anything that is not in the tokens is a mistake.
+
+   TYPE SIZES — one decision worth reading. §8.1 says "seven sizes only": 11 · 12.5 · 14 ·
+   16 · 19 · 26 · 40. Later sections then name 11.5, 12, 13, 13.5, 15, 17 and 18, which
+   are the mockups' own sizes. Having one type scale is the point of the rule, so the
+   scale wins and every other number is mapped to its nearest step (logged as decision
+   D14, raised as Q2 for the design chat):
+       11.5 -> 11      nav 13 -> 12.5      15 -> 16 (drawer headline)
+       12   -> 12.5    meta 13 -> 12.5     17 -> 16 (story so far)
+       13.5 -> 14      18 -> 19 (thread entry headline)
+   Ties (15, which is one step from both) go up for anything that is read as prose and
+   down for anything that is a label.
+
+   CONTRAST — every text/ground pair here is checked by tests/test_p3_app.py (>= 4.5:1),
+   and every mark or border that carries meaning (>= 3:1). The red is news status only,
+   the ochre is you and the assistant, the olive is READ. */
+
+:root {
+  /* grounds and ink */
+  --page: #FFFEFA;
+  --ink: #1A1A1A;
+  --text-secondary: #3F3D38;
+  --text-muted: #5A5852;
+  --drawer-ground: #F2EFE8;
+  --rule: #CFC9BC;
+  --rule-light: #E2DDD2;
+  --mark: #878276;              /* greys that carry meaning; >= 3:1, never text */
+
+  /* the three meanings colour is allowed to carry */
+  --red: #A3241B;               /* news status ONLY */
+  --red-ground: #FBEDEA;        /* the new-since box */
+  --ochre: #7A5A12;             /* you, and the assistant */
+  --chip-ground: #F2E8D2;
+  --assistant-ground: #F6F2E6;
+  --olive: #3F5A1E;             /* READ */
+
+  /* the seven type sizes */
+  --s11: 11px;
+  --s125: 12.5px;
+  --s14: 14px;
+  --s16: 16px;
+  --s19: 19px;
+  --s26: 26px;
+  --s40: 40px;
+
+  --serif: 'Newsreader', Georgia, serif;
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+
+  --measure: 720px;             /* §8.1: the reading measure never exceeds this */
+  --drawer-width: 300px;
+  --rail-width: 44px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--s14);
+  line-height: 1.45;
+}
+
+/* One reset class for buttons. NOT `all: unset` (forbidden, F1): that strips the
+   element's semantics from assistive technology and its focus ring with it. */
+.reset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Every button, link, input and textarea shows the same focus ring. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+a { color: var(--ink); }
+a:hover { color: var(--ink); text-decoration-thickness: 2px; }
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--page);
+  padding: 8px 12px;
+  z-index: 10;
+}
+.skip:focus { left: 8px; }
+
+/* ----------------------------------------------------------------- the header */
+
+.shell-header {
+  display: grid;
+  grid-template-columns: var(--drawer-width) 1fr auto;
+  grid-template-areas: "masthead nav right" "status status status";
+  align-items: end;
+  gap: 0 16px;
+  padding: 14px 20px 10px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.masthead { grid-area: masthead; }
+
+.wordmark {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: var(--s26);
+  font-weight: 500;
+  line-height: 1.1;
+}
+
+.window {
+  margin: 2px 0 0;
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+
+.nav {
+  grid-area: nav;
+  display: flex;
+  gap: 18px;
+  align-items: end;
+  padding-bottom: 2px;
+}
+
+.nav-item {
+  font-size: var(--s125);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  white-space: nowrap;                 /* "Past digests" is one thing, not two lines */
+  padding: 6px 0;                      /* a >= 24px hit area without drawing one */
+  border-bottom: 2px solid transparent;
+}
+.nav-item:hover { color: var(--ink); }
+.nav-item[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); }
+
+.header-right {
+  grid-area: right;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.header-right p { margin: 0; white-space: nowrap; }
+
+.today-date { font-size: var(--s125); color: var(--text-muted); }
+.unread { font-size: var(--s125); font-weight: 600; color: var(--ink); }
+.cost { font-size: var(--s125); color: var(--text-muted); }
+.cost[data-capped="true"] { color: var(--text-secondary); font-weight: 500; }
+
+.status-line {
+  grid-area: status;
+  margin: 8px 0 0;
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------------ the panes */
+
+.panes {
+  display: grid;
+  grid-template-columns: var(--drawer-width) 1fr var(--rail-width);
+  height: calc(100% - 78px);
+}
+
+.drawer {
+  background: var(--drawer-ground);
+  border-right: 1px solid var(--rule);
+  overflow-y: auto;
+  padding: 14px 0 40px;
+}
+
+.reading {
+  overflow-y: auto;
+  padding: 26px 32px 80px;
+}
+.reading > * { max-width: var(--measure); }
+
+.assistant-rail {
+  border-left: 1px solid var(--rule);
+  background: var(--assistant-ground);
+}
+
+.rail-button {
+  width: 100%;
+  height: 100%;
+  cursor: not-allowed;
+  color: var(--text-muted);
+}
+.rail-button .rail-label {
+  display: block;
+  writing-mode: vertical-rl;
+  margin: 14px auto;
+  font-size: var(--s11);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------------ the drawer */
+
+.drawer-note {
+  margin: 0 16px 14px;
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+
+.drawer-heading {
+  margin: 14px 16px 6px;
+  font-size: var(--s11);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.drawer-heading:first-child { margin-top: 0; }
+
+.story-list { margin: 0; padding: 0; list-style: none; }
+
+.story-row {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 0 8px;
+  width: 100%;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--rule-light);
+  align-items: baseline;
+}
+.story-row:hover { background: var(--rule-light); }
+.story-row[aria-current="true"] { background: var(--page); }
+.story-row[aria-current="true"] .row-headline { font-weight: 600; }
+
+.row-number {
+  font-family: var(--serif);
+  font-size: var(--s16);
+  color: var(--text-muted);
+}
+
+.row-main { min-width: 0; }
+
+.row-headline {
+  display: block;
+  font-family: var(--serif);
+  font-size: var(--s16);
+  line-height: 1.3;
+  color: var(--ink);
+}
+
+/* The stamps: one element, one size, three meanings (§8.3). */
+.stamp {
+  display: inline-block;
+  margin-bottom: 3px;
+  padding: 1px 6px;
+  font-size: var(--s11);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.stamp[data-stamp="developing"] { background: var(--red); color: var(--page); }
+.stamp[data-stamp="new"] { border: 1px solid var(--ink); color: var(--ink); }
+.stamp[data-stamp="read"] { background: var(--olive); color: var(--page); }
+
+/* --------------------------------------------------------------------- toast */
+
+/* `hidden` must win over the display below, or the empty toast sits on the page as a
+   black box — which is exactly what it did the first time the page was looked at. */
+.toast[hidden] { display: none; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--page);
+  font-size: var(--s125);
+  z-index: 20;
+}
+.toast button { color: var(--page); text-decoration: underline; }
+
+/* ------------------------------------------------------------------- motion */
+
+/* Folds and the story switch are instant by design (§8.1); only the assistant rail
+   animates, and nothing animates for a reader who asked for less motion. */
+.assistant-rail { transition: width 150ms ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

@@ -4,7 +4,7 @@ src/p3_app_double.py (the §4 interface) and src/p3_app.py (the routes). The pag
 is checked by the markup and contrast parts that arrive with A7.
 
 WHAT IT DOES
-    Five parts, none of which touches a database or the reader's real state file.
+    Six parts, none of which touches a database or the reader's real state file.
     1. MOCK: a synthetic digest JSON + a synthetic archive of empty PDFs in a temporary
        directory, with the double pointed at them. Every function of §4 is exercised
        there -- read on leave, keep unread, new-since, boards, pins, follows, feedback,
@@ -16,7 +16,11 @@ WHAT IT DOES
        Not through a client: the sandbox this was built in refuses to bind a local port
        (checked at A0), and `httpx` is not installed, so FastAPI's TestClient is out on
        two counts. The route functions are plain `def`s for exactly this reason.
-    4. OWNERSHIP: a grep over both modules for anything they must not import.
+    4. THE PAGE'S LOGIC: app.js run under JavaScriptCore, which macOS ships, so the
+       words the header and the drawer put on screen are pinned exactly like the Python.
+       The brief expected this to be impossible here; only the DOM-building functions
+       and the look of the thing still need Kunaal's eye.
+    5. OWNERSHIP: a grep over both modules for anything they must not import.
 
 WHY IT EXISTS
     Every screen of the app reads through this one module, so a wrong answer here is a
@@ -627,6 +631,118 @@ def routes():
               A.page().status_code, 200)
 
 
+JS_TEST = r"""
+load(ROOT + "/app/app.js");
+var fails = [], ran = 0;
+function eq(name, got, want) {
+  ran += 1;
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    fails.push(name + " :: got " + JSON.stringify(got) + ", want " + JSON.stringify(want));
+  }
+}
+
+// the window as words (decision D4: one digest's window is a day, not a week)
+eq("a week inside one month",
+   APP.windowText({kind: "week", from: "2026-10-09", to: "2026-10-15"}),
+   "Week 9–15 Oct");
+eq("a week across two months",
+   APP.windowText({kind: "week", from: "2026-09-28", to: "2026-10-03"}),
+   "Week 28 Sep–3 Oct");
+eq("a single-day window names its day",
+   APP.windowText({kind: "day", from: "2026-10-11", to: "2026-10-11"}),
+   "Sun 11 Oct");
+eq("no window, no words", APP.windowText(null), "");
+
+// paper codes for the chips
+eq("a named paper", APP.paperCode("The Hindu"), "TH");
+eq("another named paper", APP.paperCode("Business Line"), "BL");
+eq("Mint keeps its name", APP.paperCode("Mint"), "Mint");
+eq("a paper the list has never seen takes its initials",
+   APP.paperCode("Economic Times"), "ET");
+eq("and skips the small words", APP.paperCode("The Daily Star of India"), "DSI");
+
+// money, which is read at a glance and must never say "0.01¢"
+eq("a penny", APP.money(0.010941), "1¢");
+eq("less than a penny", APP.money(0.0004), "<1¢");
+eq("nothing spent", APP.money(0), "0¢");
+eq("more than a dollar", APP.money(1.5), "$1.50");
+
+eq("an afternoon build time", APP.timeOfDay("2026-11-01T16:38:51"), "4.38pm");
+eq("midnight is 12am, not 0am", APP.timeOfDay("2026-10-11T00:05:00"), "12.05am");
+eq("noon is 12pm", APP.timeOfDay("2026-10-11T12:00:00"), "12.00pm");
+
+// the stamp, and READ overriding the other two
+var story = {story_id: "s1", developing: true,
+             coverage: {rows: [{text_hash: "a"}, {text_hash: "b"}]}};
+APP.S.read = {};
+eq("a developing story is DEVELOPING", APP.stamp(story).kind, "developing");
+APP.S.read = {a: "2026-11-02T09:00:00"};
+eq("half read is still DEVELOPING", APP.stamp(story).kind, "developing");
+APP.S.read = {a: "2026-11-02T09:00:00", b: "2026-11-02T09:00:00"};
+eq("every article read means READ, whatever else it is", APP.stamp(story).kind, "read");
+eq("and a story with no coverage is never READ",
+   APP.isRead({coverage: {rows: []}}), false);
+APP.S.read = {};
+eq("a story that is not developing is NEW", APP.stamp({story_id: "s2", developing: false,
+   coverage: {rows: [{text_hash: "c"}]}}).kind, "new");
+
+// "N unread" counts the digest's stories plus followed ones, without double counting
+APP.S.digest = {stories: [story, {story_id: "s2", developing: false,
+                coverage: {rows: [{text_hash: "c"}]}}]};
+APP.S.follows = [];
+eq("both stories unread", APP.unreadCount(), 2);
+APP.S.read = {a: "t", b: "t"};
+eq("one read leaves one", APP.unreadCount(), 1);
+APP.S.follows = [{story_id: "s1", text_hashes: ["a", "b"]}];
+eq("a followed story already in the digest is not counted twice", APP.unreadCount(), 1);
+APP.S.follows = [{story_id: "elsewhere", text_hashes: ["z"]}];
+eq("a followed story outside the digest is counted", APP.unreadCount(), 2);
+
+print(JSON.stringify({ran: ran, fails: fails}));
+"""
+
+JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
+
+
+def js_logic():
+    """Run the page's own pure functions, with no browser.
+
+    The brief expected this to be impossible here -- no headless browser in the sandbox,
+    so the page's logic would go unchecked and become a click list for Kunaal. But macOS
+    ships JavaScriptCore, which runs app.js directly: everything in its EXPORTS takes
+    data and returns a value, so the words the header and the drawer put on screen can
+    be pinned exactly like the Python. The DOM-building functions still need the eye.
+    If jsc is ever missing, this part says so rather than passing quietly.
+    """
+    import subprocess
+    if not Path(JSC).exists():
+        check("JavaScriptCore is available to test the page's logic", False, True)
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "run.js"
+        script.write_text('var ROOT = "%s";\n%s' % (ROOT, JS_TEST))
+        done = subprocess.run([JSC, str(script)], capture_output=True, text=True,
+                              timeout=60)
+        out = (done.stdout or "").strip().splitlines()
+        if done.returncode != 0 or not out:
+            check("the page's script loads and runs",
+                  (done.stderr or done.stdout or "no output").strip()[:200], "")
+            return
+        try:
+            result = json.loads(out[-1])
+        except json.JSONDecodeError:
+            check("the page's checks report cleanly", out[-1][:200], "{}")
+            return
+        for f in result["fails"]:
+            name, _, detail = f.partition(" :: ")
+            check("page logic: " + name, detail, "")
+        # Count every assertion the page's own checks made, not just the failures, so
+        # the total this test prints is the number of things actually checked.
+        passed = result["ran"] - len(result["fails"])
+        for i in range(passed):
+            CHECKS.append((f"page logic check {i + 1}", True, True))
+
+
 def pdf_guard():
     """The path guard against files that really exist outside the archive.
 
@@ -690,12 +806,14 @@ def main():
     real()
     routes()
     pdf_guard()
+    js_logic()
     ownership()
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")
     print(f"{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed "
-          f"(mock world + the two real digests + the routes + ownership)")
+          f"(mock world + the two real digests + the routes + the page's logic "
+          f"+ ownership)")
     print("no database was opened and no real read state was touched by this test")
     print("PASS" if not bad else "FAIL")
     return 1 if bad else 0
