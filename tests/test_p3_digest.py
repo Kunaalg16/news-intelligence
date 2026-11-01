@@ -260,21 +260,46 @@ def rules():
     check("and the fallback is named", fallback["fallback"], "printed_headline")
 
     # --- theme line --------------------------------------------------------------------
+    # A full three weeks of papers: the rates are then this week's count and the earlier
+    # weekly average, which is 7a exactly.
     counts = {"Banking": {"total": 5, "recent": 4, "earlier": 2},
               "Energy": {"total": 2, "recent": 2, "earlier": 0},
               "Health": {"total": 6, "recent": 1, "earlier": 5},
-              "Sport": {"total": 4, "recent": 2, "earlier": 4}}
+              "Sport": {"total": 4, "recent": 2, "earlier": 4},
+              "__days__": {"recent": 7, "earlier": 14}}
     th = lambda topic: D.theme_block(story([seat(topic=topic)]), counts)
     check("4 this week vs 1 a week before -> rising", th("Banking")["trend"], "rising")
     check("and the 21-day count is shown", th("Banking")["stories_21d"], 5)
     check("below the minimum -> no theme line", th("Energy"), None)
     check("1 this week vs 2.5 before -> falling", th("Health")["trend"], "falling")
     check("2 this week vs 2 before -> steady", th("Sport")["trend"], "steady")
-    check("nothing before and something now -> rising",
+    check("papers ran but carried nothing on it before -> rising",
           D.theme_block(story([seat(topic="New")]),
-                        {"New": {"total": 3, "recent": 3, "earlier": 0}})["trend"], "rising")
+                        {"New": {"total": 3, "recent": 3, "earlier": 0},
+                         "__days__": {"recent": 7, "earlier": 14}})["trend"], "rising")
     check("no topic at all -> no theme line",
           D.theme_block(story([seat(topic=None)]), counts), None)
+
+    # the guard: no papers at all in the earlier two weeks -> no trend word, count kept
+    gapped = {"Banking": {"total": 4, "recent": 4, "earlier": 0},
+              "__days__": {"recent": 7, "earlier": 0}}
+    g = D.theme_block(story([seat(topic="Banking")]), gapped)
+    check("no papers in the earlier weeks -> no trend is claimed", g["trend"], None)
+    check("and the reason is given", g["no_trend_because"], "no papers in the earlier weeks")
+    check("but the 21-day count is still shown", g["stories_21d"], 4)
+    D.KNOBS["theme_trend_needs_earlier_days"] = False
+    check("with the guard switched off a trend is stated again",
+          D.theme_block(story([seat(topic="Banking")]), gapped)["trend"], "rising")
+    D.KNOBS["theme_trend_needs_earlier_days"] = True
+
+    # rates are per PUBLICATION week, so a half-covered earlier fortnight is not a dip
+    half = {"Banking": {"total": 8, "recent": 4, "earlier": 4},
+            "__days__": {"recent": 7, "earlier": 7}}
+    check("4 this week vs 4 in the one earlier week with papers -> steady, not rising",
+          D.theme_block(story([seat(topic="Banking")]), half)["trend"], "steady")
+    check("the publication days behind the trend are reported",
+          D.theme_block(story([seat(topic="Banking")]), half)["publication_days"],
+          {"recent": 7, "earlier": 7})
 
     # --- coverage, views, page links ----------------------------------------------------
     mixed = [seat(text_hash="c1", page=1, words=900),
@@ -445,10 +470,19 @@ def pipeline(tmp):
     check("a one-paper story is flagged single source", single["caveats"]["single_source"], True)
     check("a one-paper story has one paper", single["coverage"]["papers"], 1)
 
+    # Every Banking story in the mock has a single article, so none of them counts
+    # towards a theme any more (Kunaal, 1 Nov): a lone brief is not a theme.
     banking = next(s for s in result["stories"] if s["story_id"] == "2026-10-01:gC")
-    check("the theme line appears at three stories in the window",
-          banking["theme"]["stories_21d"], 3)
-    check("its topic", banking["theme"]["topic"], "Banking")
+    check("a single-article story no longer carries a theme line", banking["theme"], None)
+    check("nor does the three-article story, whose topic has only one story",
+          top["theme"], None)
+    D.KNOBS["theme_min_articles_per_story"] = 1
+    loose = D.build("2026-10-01", "day", news=con[0], intel=con[1], vecs=con[2])
+    D.KNOBS["theme_min_articles_per_story"] = 2
+    loose_banking = next(s for s in loose["stories"] if s["story_id"] == "2026-10-01:gC")
+    check("counting lone briefs again brings the theme line back",
+          loose_banking["theme"]["stories_21d"], 3)
+    check("its topic", loose_banking["theme"]["topic"], "Banking")
     check("a short headline was refused and reported",
           "too_short" in str(result["report"]["headline_fallbacks"]) or
           all(s["headline"]["fallbacks"] == [] for s in result["stories"]), True)

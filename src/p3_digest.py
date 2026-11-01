@@ -142,6 +142,18 @@ KNOBS = {
     "theme_rising": 1.5,
     "theme_falling": 0.67,
     "theme_min_stories": 3,
+    # A "story on this theme" must have at least this many covering articles (Kunaal,
+    # 1 Nov). Counting every lone brief made the line meaningless: the biggest 21-day
+    # count was 126 stories and 74 of 75 topics cleared the 3-story guard, so the guard
+    # hid nothing. At 2 the biggest count is 23 and 34 of 53 topics clear it.
+    "theme_min_articles_per_story": 2,
+    # Say nothing about the trend when the earlier two weeks hold no publication days
+    # (Kunaal, 1 Nov). The archive has gaps, so an empty earlier week is usually missing
+    # papers, not a quiet fortnight. Set False to always state a trend.
+    # NOTE: the rates below are per publication week, so with continuous papers
+    # (7 recent days, 14 earlier days) this arithmetic IS 7a unchanged and the guard
+    # never fires. It is a correction for gaps, not a new rule to undo later.
+    "theme_trend_needs_earlier_days": True,
 
     # --- the rest -----------------------------------------------------------
     "views_kinds": ["opinion", "analysis", "interview"],
@@ -571,7 +583,14 @@ def views_block(story):
 
 
 def theme_block(story, topic_counts):
-    """7a. The story's topic, how many stories carried it in 21 days, and the trend."""
+    """7a. The story's topic, how many stories carried it in 21 days, and the trend.
+
+    Rates are per publication WEEK on both sides, so a gap in the archive cannot read as
+    a quiet fortnight. With papers on every day the two rates are simply "this week's
+    count" and "the earlier weekly average", which is 7a exactly. When the earlier two
+    weeks hold no papers at all there is nothing to compare with, and `trend` comes back
+    None with the reason — the count is still shown (Kunaal, 1 Nov).
+    """
     topics = collections.Counter(s["topic"] for s in story["seats"]
                                  if s["counts_as_coverage"] and s["topic"])
     if not topics:
@@ -580,19 +599,29 @@ def theme_block(story, topic_counts):
     counts = topic_counts.get(topic)
     if not counts or counts["total"] < KNOBS["theme_min_stories"]:
         return None
-    earlier_week = counts["earlier"] / 2 if counts["earlier"] else 0
-    if earlier_week == 0:
-        # Nothing in the two weeks before: a topic going from nothing to three stories is
-        # rising, and dividing by zero is not an answer. (Claude's call, 1 Nov.)
+
+    recent_days = topic_counts["__days__"]["recent"]
+    earlier_days = topic_counts["__days__"]["earlier"]
+    recent_rate = counts["recent"] * 7 / recent_days if recent_days else 0
+    earlier_rate = counts["earlier"] * 7 / earlier_days if earlier_days else 0
+
+    trend, no_trend = None, None
+    if earlier_days == 0 and KNOBS["theme_trend_needs_earlier_days"]:
+        no_trend = "no papers in the earlier weeks"
+    elif earlier_rate == 0:
+        # Papers were published and carried nothing on this topic: a genuine rise.
         trend = "rising" if counts["recent"] else "steady"
-    elif counts["recent"] >= KNOBS["theme_rising"] * earlier_week:
+    elif recent_rate >= KNOBS["theme_rising"] * earlier_rate:
         trend = "rising"
-    elif counts["recent"] <= KNOBS["theme_falling"] * earlier_week:
+    elif recent_rate <= KNOBS["theme_falling"] * earlier_rate:
         trend = "falling"
     else:
         trend = "steady"
     return {"topic": topic, "stories_21d": counts["total"], "trend": trend,
-            "recent_7d": counts["recent"], "earlier_week_avg": round(earlier_week, 2)}
+            "no_trend_because": no_trend, "recent_7d": counts["recent"],
+            "recent_per_week": round(recent_rate, 2),
+            "earlier_per_week": round(earlier_rate, 2),
+            "publication_days": {"recent": recent_days, "earlier": earlier_days}}
 
 
 def topic_counts_over(news, intel, end_date):
@@ -609,7 +638,8 @@ def topic_counts_over(news, intel, end_date):
     counts = collections.defaultdict(lambda: {"total": 0, "recent": 0, "earlier": 0})
     for st in stories:
         cover = [s for s in st["seats"] if s["counts_as_coverage"] and s["topic"]]
-        if not cover:
+        # A lone brief is not a theme: a story needs this many covering articles to count.
+        if len({s["text_hash"] for s in cover}) < KNOBS["theme_min_articles_per_story"]:
             continue
         topic = collections.Counter(s["topic"] for s in cover).most_common(1)[0][0]
         counts[topic]["total"] += 1
@@ -617,6 +647,10 @@ def topic_counts_over(news, intel, end_date):
             counts[topic]["recent"] += 1
         else:
             counts[topic]["earlier"] += 1
+    # How many days actually carried papers on each side, so the trend compares rates
+    # per publication week rather than per calendar week (the archive has gaps).
+    counts["__days__"] = {"recent": sum(1 for d in days if d >= recent_start),
+                          "earlier": sum(1 for d in days if d < recent_start)}
     return counts
 
 
