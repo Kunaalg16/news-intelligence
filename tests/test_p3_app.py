@@ -1034,6 +1034,20 @@ def markup():
     # a chip is drawn small; its hit area must not be
     check("the small controls are given a >= 24px hit area",
           bool(re.search(r"\.chip::after[^}]*height:\s*24px", css, re.S)), True)
+    # The thread's line and its nodes must stay on one axis. The nodes are deliberately
+    # different sizes -- that is what says which kind of link each is -- so any rule that
+    # places one by its left edge puts its centre off the line, which is what made the
+    # column look ragged the first time it was used.
+    check("the nodes are centred on the column, not placed by their left edge",
+          bool(re.search(r"\.node\s*\{[^}]*left:\s*50%[^}]*"
+                         r"transform:\s*translate\(-50%", css, re.S)), True)
+    check("and the line is centred on the same axis",
+          bool(re.search(r"\.entry-node::before\s*\{[^}]*left:\s*50%", css, re.S)), True)
+    per_kind_offsets = re.findall(r"\.node\[data-kind=\"[a-z_]+\"\][^{]*\{([^}]*)\}", css)
+    check("no single node kind moves itself off that axis",
+          [b.strip()[:30] for b in per_kind_offsets
+           if re.search(r"(^|;)\s*(left|top)\s*:", b)], [])
+
     check("reduced motion turns every transition off",
           bool(re.search(r"prefers-reduced-motion[^}]*\{[^}]*transition:\s*none",
                          css, re.S)), True)

@@ -555,21 +555,34 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 }
 .entry-when .entry-day { display: block; color: var(--text-secondary); font-weight: 500; }
 
-/* The 2px ink line runs THROUGH the node column; the node sits on top of it. */
+/* ONE AXIS. The line and every node sit on the same vertical centre line, and on the
+   same point 20px down each row -- `left: 50%` with a translate, rather than a left edge
+   per node. The nodes are deliberately different SIZES (that is what says which kind of
+   link each is), so positioning them by their left edges put their centres 1-2px apart
+   from each other and from the line, and the column read as ragged. Centring each node
+   on the point means a node's size can change and nothing moves. */
 .entry-node { position: relative; min-height: 100%; }
 .entry-node::before {
   content: "";
   position: absolute;
-  left: 13px; top: 0; bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 0; bottom: 0;
   width: 2px;
   background: var(--ink);
 }
+/* the line starts at the first node and stops at the last, not at the row edges */
 .entry:first-child .entry-node::before { top: 20px; }
 .entry:last-child .entry-node::before { bottom: calc(100% - 20px); }
 
-.node { position: absolute; left: 7px; top: 14px; }
+.node {
+  position: absolute;
+  left: 50%;
+  top: 20px;
+  transform: translate(-50%, -50%);
+}
 .node[data-kind="today"] {
-  left: 6px; top: 13px; width: 12px; height: 12px;
+  width: 12px; height: 12px;
   background: var(--red); border: 2px solid var(--page); outline: 2px solid var(--red);
 }
 .node[data-kind="continuing"], .node[data-kind="untyped"] {
@@ -695,7 +708,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
               gap: 0 6px; margin: 0 0 6px; }
 .earlier-when { font-size: var(--s125); color: var(--text-muted); }
 .earlier-node { position: relative; height: 1em; }
-.earlier-node .node { top: 3px; left: 2px; }
+.earlier-node .node { top: 0.55em; }
 .earlier-link { font-size: var(--s14); color: var(--ink); text-align: left; }
 .earlier-link:hover { text-decoration: underline; }
 
