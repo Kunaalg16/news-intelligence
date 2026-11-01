@@ -154,6 +154,12 @@ KNOBS = {
     # (7 recent days, 14 earlier days) this arithmetic IS 7a unchanged and the guard
     # never fires. It is a correction for gaps, not a new rule to undo later.
     "theme_trend_needs_earlier_days": True,
+    # How many publication days the earlier two weeks must hold before a trend is stated
+    # at all (Kunaal, 1 Nov). At 0 the guard let 2026-10-11 through on TWO days of earlier
+    # papers, and all 9 of its themes read "rising" -- the same symptom the guard was
+    # added to remove. Half a week, rounded up, is the least that can stand for "the
+    # earlier weeks". Placed guess; with continuous papers this is 14 and never fires.
+    "theme_min_earlier_days": 4,
 
     # --- the rest -----------------------------------------------------------
     "views_kinds": ["opinion", "analysis", "interview"],
@@ -606,8 +612,10 @@ def theme_block(story, topic_counts):
     earlier_rate = counts["earlier"] * 7 / earlier_days if earlier_days else 0
 
     trend, no_trend = None, None
-    if earlier_days == 0 and KNOBS["theme_trend_needs_earlier_days"]:
-        no_trend = "no papers in the earlier weeks"
+    if (KNOBS["theme_trend_needs_earlier_days"]
+            and earlier_days < KNOBS["theme_min_earlier_days"]):
+        no_trend = ("no papers in the earlier weeks" if earlier_days == 0 else
+                    f"only {earlier_days} publication days in the earlier weeks")
     elif earlier_rate == 0:
         # Papers were published and carried nothing on this topic: a genuine rise.
         trend = "rising" if counts["recent"] else "steady"

@@ -292,6 +292,18 @@ def rules():
           D.theme_block(story([seat(topic="Banking")]), gapped)["trend"], "rising")
     D.KNOBS["theme_trend_needs_earlier_days"] = True
 
+    # two earlier publication days is not "the earlier weeks" either
+    thin = {"Banking": {"total": 4, "recent": 4, "earlier": 0},
+            "__days__": {"recent": 7, "earlier": 2}}
+    th2 = D.theme_block(story([seat(topic="Banking")]), thin)
+    check("two earlier publication days -> still no trend claimed", th2["trend"], None)
+    check("and the reason says how thin it was",
+          th2["no_trend_because"], "only 2 publication days in the earlier weeks")
+    enough = {"Banking": {"total": 6, "recent": 4, "earlier": 2},
+              "__days__": {"recent": 7, "earlier": 4}}
+    check("four earlier publication days is enough to state a trend",
+          D.theme_block(story([seat(topic="Banking")]), enough)["trend"], "steady")
+
     # rates are per PUBLICATION week, so a half-covered earlier fortnight is not a dip
     half = {"Banking": {"total": 8, "recent": 4, "earlier": 4},
             "__days__": {"recent": 7, "earlier": 7}}
