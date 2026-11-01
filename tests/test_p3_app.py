@@ -799,8 +799,19 @@ Object.keys(NINE).forEach(function (key) {
   eq("and " + key + " does nothing while typing",
      APP.keyAction(key, {inField: true}), null);
 });
-eq("exactly nine keys are bound", Object.keys(APP.KEYS).length, 9);
-eq("the cheat sheet lists every one of them", APP.CHEAT_SHEET.length, 9);
+eq("exactly nine plain keys are bound", Object.keys(APP.KEYS).length, 9);
+eq("the cheat sheet lists all ten, the nine plus undo", APP.CHEAT_SHEET.length, 10);
+
+// the tenth key: undo, the only one with a modifier
+eq("cmd-Z undoes", APP.keyAction("z", {meta: true}), "undo");
+eq("ctrl-Z too, for a keyboard without cmd", APP.keyAction("z", {ctrl: true}), "undo");
+eq("shift does not stop it", APP.keyAction("Z", {meta: true}), "undo");
+eq("a bare z is still free", APP.keyAction("z", {}), null);
+eq("and inside a text field cmd-Z stays the browser's own undo",
+   APP.keyAction("z", {meta: true, inField: true}), null);
+eq("a modifier does not turn another key into a shortcut",
+   APP.keyAction("f", {meta: true}), null);
+eq("nor does alt", APP.keyAction("j", {alt: true}), null);
 eq("slash is left unbound for the assistant", APP.keyAction("/", {}), null);
 eq("an ordinary letter does nothing", APP.keyAction("z", {}), null);
 eq("and neither does a key that only looks like one",

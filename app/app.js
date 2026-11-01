@@ -35,6 +35,7 @@ const S = {
   keepUnread: new Set(),  /* story ids the reader is holding unread */
   pins: [],
   votes: {},             /* "<kind>:<id>" -> the vote already given, so it can be shown */
+  lastUndo: null,        /* the one step ⌘Z and the toast's Undo both run */
   openBoardId: null,
   openStoryId: null,
   lastVisit: null,
@@ -492,6 +493,13 @@ function storyActions(story) {
       if (on) S.keepUnread.add(story.story_id); else S.keepUnread.delete(story.story_id);
       const res = await api.keepUnread(story.story_id, hashes, on);
       if (res && res.read) Object.assign(S.read, res.read);
+      remember(on ? 'keep unread' : 'mark unread', async () => {
+        if (held) S.keepUnread.add(story.story_id);
+        else S.keepUnread.delete(story.story_id);
+        const back = await api.keepUnread(story.story_id, hashes, held);
+        if (back && back.read) Object.assign(S.read, back.read);
+        render();
+      });
       render();
     },
   });
@@ -503,6 +511,11 @@ function storyActions(story) {
     onclick: async () => {
       const res = await api.follow(story.story_id, hashes, !following);
       S.follows = (res && res.follows) || S.follows;
+      remember(following ? 'unfollow' : 'follow', async () => {
+        const back = await api.follow(story.story_id, hashes, following);
+        S.follows = (back && back.follows) || S.follows;
+        render();
+      });
       render();
     },
   });
@@ -676,11 +689,39 @@ function hideToast() {
   if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
 }
 
+/* UNDO, in one place, so the Undo in the toast and ⌘Z are the same thing.
+
+   One step, not a stack. A stack would mean ⌘Z pressed twice undoes something from
+   several minutes ago that is no longer on screen, which is worse than no undo at all:
+   the reader cannot see what they are undoing.
+
+   It covers the three actions that change a list you would otherwise have to go and
+   hunt through to put right -- a pin, a follow, a keep-unread. It deliberately does NOT
+   cover read-on-leave, which happens constantly just by reading and is already undone
+   by `u` on the story itself, nor a vote, which is visibly marked and changed by
+   clicking the other one. An undo that might mean any of those is one you stop trusting.
+*/
+function remember(label, run) {
+  S.lastUndo = { label: label, run: run };
+}
+
+async function undoLast() {
+  const step = S.lastUndo;
+  if (!step) { toast('Nothing to undo'); return; }
+  S.lastUndo = null;
+  await step.run();
+  toast('Undone · ' + step.label);
+}
+
 function pinnedToast(boardName, pinId) {
-  toast('Pinned to ' + boardName, pinId ? async () => {
+  if (!pinId) { toast('Pinned to ' + boardName); return; }
+  remember('pin to ' + boardName, async () => {
     await api.unpin(pinId);
-    toast('Unpinned');
-  } : null);
+    const boards = await api.boards();
+    S.boards = (boards && boards.boards) || S.boards;
+    render();
+  });
+  toast('Pinned to ' + boardName, undoLast);
 }
 
 /* §8.4.5 — open the first time this story is seen, folded after that (a pref per
@@ -1409,8 +1450,16 @@ const KEYS = {
   /* "/" is deliberately unbound: it will focus the assistant, which is v0.1. */
 };
 
+/* ⌘Z (⌃Z elsewhere) is the tenth key, and the only one that needs a modifier -- asked
+   for because the toast already offers Undo and the hand is already on the keyboard.
+   It is kept apart from KEYS because it is the one binding where the modifier is part
+   of the key: a bare "z" must stay free, and inside a text field ⌘Z has to remain the
+   browser's own undo, which is why `inField` refuses it like every other key. */
 function keyAction(key, opts) {
-  if (opts && opts.inField) return null;
+  const o = opts || {};
+  if (o.inField) return null;
+  if (String(key).toLowerCase() === 'z' && (o.meta || o.ctrl)) return 'undo';
+  if (o.meta || o.ctrl || o.alt) return null;
   return Object.prototype.hasOwnProperty.call(KEYS, key) ? KEYS[key] : null;
 }
 
@@ -1477,6 +1526,7 @@ function runKeyAction(action) {
       if (drawn) drawn.scrollIntoView({ block: 'start' });
       return;
     }
+    case 'undo': undoLast(); return;
     case 'help': toggleCheatSheet(); return;
     default:
   }
@@ -1485,7 +1535,8 @@ function runKeyAction(action) {
 const CHEAT_SHEET = [
   ['j', 'next story'], ['k', 'previous story'], ['o', 'open it'],
   ['Esc', 'back'], ['u', 'keep unread'], ['f', 'follow'],
-  ['p', 'pin to a board'], ['t', 'timeline or graph'], ['?', 'this list'],
+  ['p', 'pin to a board'], ['t', 'timeline or graph'],
+  ['\u2318Z', 'undo the last pin, follow or keep unread'], ['?', 'this list'],
 ];
 
 function toggleCheatSheet() {
@@ -1504,8 +1555,10 @@ function toggleCheatSheet() {
 
 function startKeyboard() {
   document.addEventListener('keydown', (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const action = keyAction(e.key, { inField: isTypingTarget(e.target) });
+    const action = keyAction(e.key, {
+      inField: isTypingTarget(e.target),
+      meta: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey,
+    });
     if (!action) return;
     e.preventDefault();
     runKeyAction(action);
@@ -1607,7 +1660,7 @@ async function boot() {
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
-  keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render,
+  keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render, remember, undoLast,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 
