@@ -815,9 +815,10 @@ var document = {
 
 JS_TEST = r"""
 load(ROOT + "/app/app.js");
-var fails = [], ran = 0;
+var fails = [], ran = 0, names = [];
 function eq(name, got, want) {
   ran += 1;
+  names.push(name);
   if (JSON.stringify(got) !== JSON.stringify(want)) {
     fails.push(name + " :: got " + JSON.stringify(got) + ", want " + JSON.stringify(want));
   }
@@ -1020,6 +1021,9 @@ eq("[fixture] two pages are two pointers and 'pages'",
              link: {pdf: "archive/2026-10-11/2026-10-11_Business Line.pdf", pdf_page: 7},
              headlines: ["b"], text: "BL PDF p7"}],
     total: 2, tail: "2 stories on the same pages"});
+
+eq("[fixture] check 8 · see_also_line names the element it removes",
+   APP.FLAG_ELEMENTS.see_also_line, ".see-also");
 
 // Q3 B: "Earlier coverage" is gone, function and all. A leftover call would throw in
 // the browser and not here, so the check is that the name itself is unknown to the page.
@@ -1681,7 +1685,10 @@ PS.facets = null;
 eq("every flag names the element it removes",
    Object.keys(APP.FLAG_ELEMENTS).sort(), FLAGS_FROM_SERVER.sort());
 
-print(JSON.stringify({ran: ran, fails: fails}));
+/* The names of the passing checks travel back too, not only the failures: the report
+   counts how many checks are `behaviour` (K3 must pass them) and how many are
+   `fixture`, and a tally that cannot see the names cannot say. */
+print(JSON.stringify({ran: ran, fails: fails, names: names}));
 """
 
 JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
@@ -1719,14 +1726,21 @@ def js_logic():
         except json.JSONDecodeError:
             check("the page's checks report cleanly", out[-1][:200], "{}")
             return
+        failed = {}
         for f in result["fails"]:
             name, _, detail = f.partition(" :: ")
+            failed[name] = detail
+        # Every assertion the page's own checks made is registered under its own name,
+        # not only the failures: the total this test prints is the number of things
+        # actually checked, and the names carry the behaviour/fixture tags the report
+        # counts (brief §1 C1).
+        for name in result.get("names") or []:
+            if name in failed:
+                check("page logic: " + name, failed.pop(name), "")
+            else:
+                CHECKS.append(("page logic: " + name, True, True))
+        for name, detail in failed.items():
             check("page logic: " + name, detail, "")
-        # Count every assertion the page's own checks made, not just the failures, so
-        # the total this test prints is the number of things actually checked.
-        passed = result["ran"] - len(result["fails"])
-        for i in range(passed):
-            CHECKS.append((f"page logic check {i + 1}", True, True))
 
 
 def pdf_guard():
@@ -2734,6 +2748,104 @@ def v01_routes():
               D.FIXTURES["assistant_error"], False)
 
 
+def v01_states():
+    """B8 · acceptance check 3: every state of §8.3 can be PRODUCED, not just drawn.
+
+    The page checks under jsc prove each state renders with the brief's words. This is
+    the other half: that the data behind it comes out of the double from a real query
+    or a fixture switch, so Kunaal can reach every state in the browser without a
+    special build.
+
+    Pass lines, written before the run: each of the nine states below is reachable, and
+    the input that reaches it is named here so the report's manual list can repeat it.
+    """
+    import p3_app_double as D
+
+    with tempfile.TemporaryDirectory() as tmp:
+        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
+        D.WORK = Path(tmp)
+        D.STATE_FILE = Path(tmp) / "state.json"
+        D.KNOBS["fixture_stream_delay_ms"] = 0
+        D.FIXTURES["assistant_error"] = False
+        D.FIXTURES["cap_reached"] = False
+
+        # 1 and 2 · answering, then an answer, from the query "police"
+        events = list(D.ask("police", None))
+        answer = events[-1]["answer"]
+        check("[fixture] state 1 · 'police' gives a results event before any sentence",
+              [events[0]["type"], events[0]["search"]["verdict"]],
+              ["results", "enough"])
+        check("[fixture] state 2 · and an answer with sentences and cites",
+              [len(answer["sentences"]) >= 2, len(answer["cited"]) >= 1], [True, True])
+
+        # 3 · think harder
+        harder = list(D.think_harder(answer["answer_id"]))[-1]["answer"]
+        check("[fixture] state 3 · Think harder on it gives a Sonnet answer",
+              harder["model"], "sonnet")
+
+        # 4 · weak match, from the query "GST"
+        thin = list(D.ask("GST", None))[-1]["answer"]
+        check("[fixture] state 4 · 'GST' gives a thin answer with a count to show",
+              [thin["verdict"], thin["found_count"] > 0], ["thin", True])
+
+        # 5 and 6 · nothing found, then background on request
+        empty = list(D.ask("Norway", None))[-1]["answer"]
+        check("[fixture] state 5 · 'Norway' gives an empty verdict and three closest",
+              [empty["verdict"], len(empty["closest"])], ["empty", 3])
+        check("[fixture] state 6 · and background on request answers for it",
+              bool(D.ask_background(empty["answer_id"])["text"]), True)
+
+        # 7 · a divider, from opening another story
+        conv = D.current_conversation()
+        D.add_divider(conv["conversation_id"], "sid", "ANOTHER STORY")
+        check("[fixture] state 7 · opening another story adds a divider turn",
+              D.current_conversation()["turns"][-1]["kind"], "divider")
+
+        # 8 · the conversation kept across a restart
+        check("[fixture] state 8 · and the conversation survives a restart",
+              _fresh_double(D.STATE_FILE).current_conversation()["conversation_id"],
+              conv["conversation_id"])
+
+        # 9 · the error reasons and the cap, both from fixture switches
+        reached = {}
+        for reason in ("model_busy", "no_network", "key_rejected", "timeout",
+                       "checks_failed", "other"):
+            D.FIXTURES["assistant_error"] = reason
+            reached[reason] = list(D.ask("police", None))[-1]["reason"]
+        check("[fixture] state 9 · every error reason is reachable by its switch",
+              sorted(k for k, v in reached.items() if k == v), sorted(reached))
+        D.FIXTURES["assistant_error"] = False
+        D.FIXTURES["cap_reached"] = True
+        check("[fixture] state 9 · and the cap band by the cap_reached switch",
+              list(D.ask("police", None))[-1]["code"], "cap_reached")
+        D.FIXTURES["cap_reached"] = False
+
+        # 10 (D3) and 11 · suggestions and Explore, both from real data
+        story_id = "2026-10-11:56eaf7aa4d5b"
+        story = D._find_story(lambda s: s.get("story_id") == story_id)
+        sugg = D.suggest_connections(story_id, D._story_hashes(story))
+        check("[fixture] state 10 · the Delhi story gives three to five suggestions",
+              D.KNOBS["suggest_min"] <= len(sugg["suggestions"])
+              <= D.KNOBS["suggest_max"], True)
+        bare = [s["story_id"] for s in D._search_corpus()
+                if D.thread(s["story_id"]) is None][0]
+        bare_story = D._find_story(lambda s: s.get("story_id") == bare)
+        target = D._find_story(
+            lambda s: s.get("story_id") == sugg["suggestions"][0]["story_id"])
+        link_id = D.add_user_link(bare, D._story_hashes(bare_story),
+                                  target["story_id"], D._story_hashes(target))
+        check("[fixture] state 10 · and + on one gives a thread where there was none",
+              [e["link_type"] for e in D.thread(bare)["entries"]
+               if e["link_type"] == "user"], ["user"])
+        D.remove_user_link(link_id)
+        check("[fixture] state 11 · Explore's filters all have something behind them",
+              [v for key in ("papers", "topics", "kinds")
+               for v in D.facets()[key]
+               if not D.search("", filters={key: [v]})["total_stories"]], [])
+        check("[fixture] state 11 · and H6 is reachable with a real filter pair",
+              D.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
@@ -2742,6 +2854,7 @@ def main():
     v01_ask()
     routes()
     v01_routes()
+    v01_states()
     pdf_guard()
     js_logic()
     contrast()
