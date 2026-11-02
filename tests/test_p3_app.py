@@ -1774,6 +1774,195 @@ def v01_ask():
               D.STATE_FILE.exists(), True)
 
 
+def drain(response):
+    """Every line a streamed route really sends, as parsed events.
+
+    The brief (§5) asks for the response body iterator itself rather than the generator
+    behind it, so this is what the browser would read: Starlette's async iterator, run
+    to the end. A chunk is NOT assumed to be a line -- the chunks are joined and then
+    split, which is the same thing the page's own parser has to do."""
+    import asyncio
+
+    async def collect():
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk if isinstance(chunk, str) else chunk.decode())
+        return "".join(chunks)
+
+    body = asyncio.run(collect())
+    return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+
+def v01_routes():
+    """B4 · the routes of brief 2 §5, called directly (v0 D5: no port to bind).
+
+    Pass lines, written before the run:
+    - Every one of the fourteen new routes the brief lists exists on the app.
+    - `/api/search` searches and browses, and each filter arrives through the query
+      string; `Query(None)`'s placeholder object is read as "no filter", not as a crash.
+    - `/api/facets` answers the five keys.
+    - [behaviour] `/api/ask` is `application/x-ndjson`, one JSON event per line, and the
+      `results` event really is the first line out -- read off the response body
+      iterator, not the generator behind it (acceptance check 4).
+    - `/api/think_harder` streams without a `results` event, and 404s on an answer id
+      that does not exist.
+    - `/api/background` 400s on an answer that already has a background line and on one
+      that does not exist.
+    - `/api/estimate` answers the four kinds and 400s on a fifth.
+    - The conversation routes: read it, add a divider, start a new one.
+    - `/api/suggest` answers, and 404s on a story that does not exist.
+    - `/api/cap/raise` raises today's cap and returns the new cost object.
+    - `/api/user_link` creates, `/api/user_links` lists, DELETE removes, and deleting a
+      link that is not there is a 404.
+    - A posted body missing a required field is a 400 on every new POST route.
+    - The `assistant_error` switch takes a reason by name through the dev route, keeps
+      it as a string (it is not a yes/no), and refuses a reason the double never heard
+      of rather than letting the pane show the wrong wording.
+    """
+    import p3_app as A
+    import p3_app_double as D
+
+    with tempfile.TemporaryDirectory() as tmp:
+        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
+        D.WORK = Path(tmp)
+        D.STATE_FILE = Path(tmp) / "state.json"
+        D.KNOBS["fixture_stream_delay_ms"] = 0
+        D.FIXTURES["assistant_error"] = False
+        D.FIXTURES["cap_reached"] = False
+
+        paths = {r.path for r in A.app.routes if hasattr(r, "path")}
+        wanted = {"/api/search", "/api/facets", "/api/ask", "/api/think_harder",
+                  "/api/background", "/api/estimate", "/api/conversation",
+                  "/api/conversation/new", "/api/conversation/divider", "/api/suggest",
+                  "/api/cap/raise", "/api/user_link", "/api/user_link/{link_id}",
+                  "/api/user_links"}
+        check("[fixture] every route brief 2 §5 lists exists",
+              sorted(wanted - paths), [])
+
+        # --- search and facets --------------------------------------------------
+        found = A.search(q="police")
+        check("[fixture] /api/search searches",
+              [found["verdict"], found["total_stories"]], ["enough", 4])
+        browse = A.search(q="")
+        check("[fixture] and browses when the query is empty",
+              [browse["verdict"], browse["total_stories"]], [None, 19])
+        check("[fixture] a filter arrives through the query string",
+              sorted({a["paper"] for s in A.search(q="", papers=["Mint"])["stories"]
+                      for a in s["articles"]}), ["Mint"])
+        check("[fixture] the Query placeholder is read as 'no filter', not a crash",
+              A.search(q="")["total_stories"], 19)
+        check("[fixture] the limit is capped so one request cannot ask for everything",
+              len(A.search(q="", limit=10_000)["stories"]), 19)
+        check("[fixture] /api/facets answers its five keys", sorted(A.facets()),
+              ["date_max", "date_min", "kinds", "papers", "topics"])
+
+        # --- the streamed answer ------------------------------------------------
+        response = A.ask(payload={"question": "police"})
+        check("[behaviour] /api/ask is NDJSON", response.media_type,
+              "application/x-ndjson")
+        events = drain(response)
+        check("[behaviour] and the results event is the first line out",
+              [e["type"] for e in events][0], "results")
+        check("[behaviour] with sentences between it and done",
+              [e["type"] for e in events][-1], "done")
+        check("[fixture] one JSON object per line, newline-terminated",
+              list(A.ndjson([{"a": 1}, {"b": 2}])), ['{"a": 1}\n', '{"b": 2}\n'])
+        answer = events[-1]["answer"]
+
+        harder = A.think_harder(payload={"answer_id": answer["answer_id"]})
+        check("[fixture] /api/think_harder streams without a results event",
+              [e["type"] for e in drain(harder) if e["type"] == "results"], [])
+        check("[fixture] and 404s on an answer that does not exist",
+              status_of(A.think_harder, payload={"answer_id": "ans_nope"}), 404)
+        check("[fixture] a missing answer_id is a 400",
+              status_of(A.think_harder, payload={}), 400)
+
+        # --- background and estimates -------------------------------------------
+        empty = drain(A.ask(payload={"question": "Norway"}))[-1]["answer"]
+        got = A.background(payload={"answer_id": empty["answer_id"]})
+        check("[fixture] /api/background answers with the paragraph and its cost",
+              [bool(got["text"]), got["cost_usd"]], [True, 0.0003])
+        check("[fixture] and 400s when the answer already has one",
+              status_of(A.background, payload={"answer_id": empty["answer_id"]}), 400)
+        check("[fixture] and on an answer that does not exist",
+              status_of(A.background, payload={"answer_id": "ans_nope"}), 400)
+        check("[fixture] /api/estimate answers the four kinds",
+              [A.estimate(kind=k)["cost_usd"]
+               for k in ("ask", "think_harder", "background", "suggest")],
+              [0.0005, 0.011, 0.0003, 0.0005])
+        check("[fixture] and 400s on a kind it does not know",
+              status_of(A.estimate, kind="nonsense"), 400)
+
+        # --- the conversation ---------------------------------------------------
+        conv = A.conversation()
+        check("[fixture] /api/conversation answers the running one",
+              sorted(conv), ["conversation_id", "started_at", "turns"])
+        divider = A.conversation_divider(payload={"story_id": "sid_1",
+                                                  "headline": "A HEADLINE"})
+        check("[fixture] a divider is added as its own turn",
+              [divider["kind"], A.conversation()["turns"][-1]["kind"]],
+              ["divider", "divider"])
+        check("[fixture] a divider without a headline is a 400",
+              status_of(A.conversation_divider, payload={"story_id": "x"}), 400)
+        fresh = A.conversation_new()["conversation_id"]
+        check("[fixture] /api/conversation/new starts an empty one",
+              [fresh != conv["conversation_id"], A.conversation()["turns"]], [True, []])
+
+        # --- suggestions and the reader's links ---------------------------------
+        story_id = "2026-10-11:56eaf7aa4d5b"
+        story = D._find_story(lambda s: s.get("story_id") == story_id)
+        sugg = A.suggest(payload={"story_id": story_id,
+                                  "text_hashes": D._story_hashes(story)})
+        check("[fixture] /api/suggest answers with three to five suggestions",
+              D.KNOBS["suggest_min"] <= len(sugg["suggestions"])
+              <= D.KNOBS["suggest_max"], True)
+        check("[fixture] and 404s on a story that does not exist",
+              status_of(A.suggest, payload={"story_id": "nope"}), 404)
+        check("[fixture] a missing story_id is a 400",
+              status_of(A.suggest, payload={}), 400)
+
+        target_id = sugg["suggestions"][0]["story_id"]
+        target = D._find_story(lambda s: s.get("story_id") == target_id)
+        made = A.user_link(payload={"story_id": story_id,
+                                    "text_hashes": D._story_hashes(story),
+                                    "target_story_id": target_id,
+                                    "target_text_hashes": D._story_hashes(target)})
+        check("[fixture] /api/user_link answers with the new link's id",
+              bool(made["link_id"]), True)
+        listed = A.user_links(hashes=D._story_hashes(story))["user_links"]
+        check("[fixture] /api/user_links lists it, so the + icon is dark after a reload",
+              [len(listed), listed[0]["link_id"]], [1, made["link_id"]])
+        check("[fixture] DELETE removes it",
+              A.user_link_remove(link_id=made["link_id"])["removed"], made["link_id"])
+        check("[fixture] and removing it twice is a 404",
+              status_of(A.user_link_remove, link_id=made["link_id"]), 404)
+        check("[fixture] a user link missing an end is a 400",
+              status_of(A.user_link, payload={"story_id": story_id}), 400)
+
+        # --- the cap ------------------------------------------------------------
+        was = A.cost()["cap_usd"]
+        raised = A.cap_raise(payload={"amount_usd": 1.00})
+        check("[fixture] /api/cap/raise answers with the new cost object",
+              [sorted(raised), raised["override_usd"]],
+              [["cap_usd", "fixture", "override_usd", "spent_usd"], 1.0])
+        check("[fixture] and the cap really went up by the dollar",
+              raised["cap_usd"], round(was + 1.00, 6))
+        check("[fixture] an empty body uses the knob's own amount",
+              A.cap_raise(payload=None)["override_usd"], 2.0)
+
+        # --- the error switch takes a reason by name ----------------------------
+        state = A.set_fixtures(payload={"assistant_error": "timeout"})
+        check("[fixture] the error switch keeps its reason as a string, not a bool",
+              state["fixtures"]["assistant_error"], "timeout")
+        check("[fixture] and the pane gets that reason",
+              drain(A.ask(payload={"question": "police"}))[-1]["reason"], "timeout")
+        check("[fixture] a reason the double never heard of is refused here",
+              status_of(A.set_fixtures, payload={"assistant_error": "sulking"}), 400)
+        A.set_fixtures(payload={"assistant_error": False})
+        check("[fixture] and switching it off still works",
+              D.FIXTURES["assistant_error"], False)
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
@@ -1781,6 +1970,7 @@ def main():
     v01_search()
     v01_ask()
     routes()
+    v01_routes()
     pdf_guard()
     js_logic()
     contrast()

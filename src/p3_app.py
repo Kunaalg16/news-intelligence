@@ -51,13 +51,16 @@ KNOBS AND FLAGS
   Two blocks below: the knobs, each with its reason, and the §8.8 feature flags.
 """
 
+import itertools
+import json
 import os
 import re
 import sys
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, StreamingResponse)
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / "app"
@@ -405,12 +408,26 @@ def fixtures():
 @app.post("/api/dev/fixtures")
 def set_fixtures(payload: dict = Body(...)):
     """Flip a fixture switch so a state that no real data can produce can be seen in the
-    browser: still processing (H1), nothing new (H2), cap reached (H5)."""
+    browser: still processing (H1), nothing new (H2), cap reached (H5), the assistant
+    failing (H4 / state 9).
+
+    `assistant_error` is the one switch that is not a yes/no: its value picks WHICH
+    failure (§4.2), so a string is kept as it is and only the others are coerced. A
+    reason the double does not know is refused here rather than silently becoming
+    "other" in the pane."""
     unknown = [k for k in (payload or {}) if k not in data.FIXTURES]
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown fixture: {unknown[0]}")
     for k, v in (payload or {}).items():
-        data.FIXTURES[k] = bool(v)
+        if k == "assistant_error" and isinstance(v, str):
+            if v not in data.ERROR_RETRYABLE:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown error reason: {v} "
+                           f"(try {', '.join(sorted(data.ERROR_RETRYABLE))})")
+            data.FIXTURES[k] = v
+        else:
+            data.FIXTURES[k] = bool(v)
     return {"fixtures": dict(data.FIXTURES)}
 
 
@@ -446,3 +463,169 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ============================================ v0.1 · search, Explore, the ask pane
+#
+# Brief 2 §5. Every one of these calls the double and nothing else: no database, no
+# model, no network. The two answer routes stream NDJSON -- one JSON event per line --
+# so the results list is on the screen before the first sentence is written.
+
+def _as_list(value):
+    """A repeated query parameter as a plain list.
+
+    `Query(None)` is a placeholder object that FastAPI replaces with the real value
+    when a request comes in. The tests call these route functions DIRECTLY (v0 D5: the
+    sandbox cannot bind a port), so they see the placeholder itself -- and anything that
+    is not a list means "this filter was not asked for"."""
+    return list(value) if isinstance(value, (list, tuple)) else None
+
+
+def _filters_from_query(date_from, date_to, papers, topics, kinds, story_ids,
+                        exclude_story_ids, hashes):
+    """Build the double's filter object out of query parameters, leaving out what was
+    not asked for. An empty list and a missing parameter mean the same thing here: no
+    filter on that field, rather than "match nothing"."""
+    wanted = {"date_from": date_from, "date_to": date_to,
+              "papers": _as_list(papers), "topics": _as_list(topics),
+              "kinds": _as_list(kinds), "story_ids": _as_list(story_ids),
+              "exclude_story_ids": _as_list(exclude_story_ids),
+              "text_hashes": _as_list(hashes)}
+    return {k: v for k, v in wanted.items() if v}
+
+
+@app.get("/api/search")
+def search(q: str = "", sort: str = "relevance", limit: int = 20,
+           date_from: str = None, date_to: str = None,
+           papers: list[str] = Query(None), topics: list[str] = Query(None),
+           kinds: list[str] = Query(None), story_ids: list[str] = Query(None),
+           exclude_story_ids: list[str] = Query(None),
+           hashes: list[str] = Query(None)):
+    """Search, or browse when `q` is empty. Lists arrive as repeated parameters
+    (`?papers=Mint&papers=The+Hindu`) rather than one comma-joined string, because a
+    paper's name is not ours to promise has no comma in it."""
+    filters = _filters_from_query(date_from, date_to, papers, topics, kinds, story_ids,
+                                  exclude_story_ids, hashes)
+    return data.search(q, filters=filters, sort=sort, limit=max(0, min(limit, 200)))
+
+
+@app.get("/api/facets")
+def facets():
+    """The values the Explore filters may offer. Every one has stories behind it."""
+    return data.facets()
+
+
+def ndjson(events):
+    """One JSON object per line. The page reads it with `fetch` and a stream reader, so
+    a line may arrive split across two chunks -- which is the reader's problem, and is
+    why the page has its own tested parser (acceptance check 4) rather than assuming a
+    chunk is a line."""
+    for event in events:
+        yield json.dumps(event, ensure_ascii=False) + "\n"
+
+
+def _stream(events):
+    return StreamingResponse(ndjson(events), media_type="application/x-ndjson")
+
+
+@app.post("/api/ask")
+def ask(payload: dict = Body(...)):
+    """Ask a question. Streams `results`, then sentences, then `done` -- or an error."""
+    (question,) = _need(payload, "question")
+    return _stream(data.ask(question, payload.get("scope"),
+                            payload.get("conversation_id")))
+
+
+@app.post("/api/think_harder")
+def think_harder(payload: dict = Body(...)):
+    """Read the same passages again with the bigger model. No `results` event: the list
+    on the screen is the one the answer was built from, and must not change under it."""
+    (answer_id,) = _need(payload, "answer_id")
+    try:
+        events = data.think_harder(answer_id)
+        first = next(events)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return _stream(itertools.chain([first], events))
+
+
+@app.post("/api/background")
+def background(payload: dict = Body(...)):
+    """A paragraph from the model's own knowledge, for an answer that has none."""
+    (answer_id,) = _need(payload, "answer_id")
+    try:
+        return data.ask_background(answer_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/estimate")
+def estimate(kind: str, answer_id: str = None):
+    """What a call would cost, for the buttons that print their own price."""
+    try:
+        return {"kind": kind, "answer_id": answer_id,
+                "cost_usd": data.estimate_cost(kind, answer_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/conversation")
+def conversation():
+    """The running conversation, which the pane redraws on load (§8.3 state 8)."""
+    return data.current_conversation()
+
+
+@app.post("/api/conversation/new")
+def conversation_new():
+    return {"conversation_id": data.new_conversation()}
+
+
+@app.post("/api/conversation/divider")
+def conversation_divider(payload: dict = Body(...)):
+    """"NOW READING · <HEADLINE>" when the reader opens a different story."""
+    story_id, headline = _need(payload, "story_id", "headline")
+    return data.add_divider(payload.get("conversation_id"), story_id, headline)
+
+
+@app.post("/api/suggest")
+def suggest(payload: dict = Body(...)):
+    """Other stories that may belong with this one. On request only (D4)."""
+    (story_id,) = _need(payload, "story_id")
+    try:
+        return data.suggest_connections(story_id, payload.get("text_hashes"))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/cap/raise")
+def cap_raise(payload: dict = Body(None)):
+    """Allow more spending for today only. The page confirms in the page first; this
+    route is the Yes, and the amount is the double's knob unless one is sent."""
+    try:
+        return data.raise_cap_today((payload or {}).get("amount_usd"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/user_link")
+def user_link(payload: dict = Body(...)):
+    """R13 · the reader's own thread link, from one story to another."""
+    story_id, hashes, target_id, target_hashes = _need(
+        payload, "story_id", "text_hashes", "target_story_id", "target_text_hashes")
+    link_id = data.add_user_link(story_id, hashes, target_id, target_hashes)
+    return {"link_id": link_id, "story_id": story_id, "target_story_id": target_id}
+
+
+@app.delete("/api/user_link/{link_id}")
+def user_link_remove(link_id: str):
+    removed = data.remove_user_link(link_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="no such link")
+    return {"removed": link_id}
+
+
+@app.get("/api/user_links")
+def user_links(hashes: list[str] = Query(None)):
+    """The reader's links out of the story these hashes belong to, so the + icons are
+    dark again after a reload (§8.4)."""
+    return {"user_links": data.list_user_links(_as_list(hashes) or [])}
