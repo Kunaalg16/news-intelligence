@@ -100,7 +100,12 @@ FLAGS = {
     "theme_line": True,            # "<topic> · N stories in 21 days"
     "theme_bar_strip": False,      # OFF: the daily series it needs is not in the JSON (R9)
     "cost_display": True,          # the cost header; review after one week of real use
-    "agency_copy": False,          # OFF until the v0.1 assistant exists
+    # OFF until A5 (agency-copy measurement); the note "May include shared agency copy"
+    # is designed then. v0 named the v0.1 assistant as what it was waiting for, which had
+    # expired by brief 2 and was never the right reason anyway: the note is a caveat
+    # about syndicated wire copy turning up in several papers at once, which wants a
+    # measurement, not a screen the assistant draws. Corrected at C4.
+    "agency_copy": False,
 
     # --- v0.1, brief 2 §8.6 -------------------------------------------------
     # Each one off removes its element completely; `assistant` off puts v0's disabled

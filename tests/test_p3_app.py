@@ -1003,30 +1003,30 @@ eq("and inside a text field cmd-Z stays the browser's own undo",
 eq("a modifier does not turn another key into a shortcut",
    APP.keyAction("f", {meta: true}), null);
 eq("nor does alt", APP.keyAction("j", {alt: true}), null);
-eq("[fixture] slash now focuses the pane's composer (§8.7)",
+eq("[page] slash now focuses the pane's composer (§8.7)",
    APP.keyAction("/", {}), "ask");
-eq("[fixture] and does nothing while the reader is typing, composer included",
+eq("[page] and does nothing while the reader is typing, composer included",
    APP.keyAction("/", {inField: true}), null);
-eq("[fixture] a modifier does not turn slash into the shortcut",
+eq("[page] a modifier does not turn slash into the shortcut",
    APP.keyAction("/", {meta: true}), null);
 eq("an ordinary letter does nothing", APP.keyAction("z", {}), null);
 eq("and neither does a key that only looks like one",
    APP.keyAction("constructor", {}), null);
 
 // --- B1 · Q1 B, the printed "see also" line (brief 2 §8.1) ------------------------
-// Tagged [fixture]: K1's own page logic, not a rule K3 has to pass.
+// Tagged [page]: K1's own page logic, not a rule K3 has to pass.
 
-eq("[fixture] the paper's name comes out of the archive file name",
+eq("[page] the paper's name comes out of the archive file name",
    APP.paperFromPdf("archive/2026-10-11/2026-10-11_The Hindu.pdf"), "The Hindu");
-eq("[fixture] a file name with no date prefix is taken whole",
+eq("[page] a file name with no date prefix is taken whole",
    APP.paperFromPdf("Mint.pdf"), "Mint");
-eq("[fixture] no pdf, no paper", APP.paperFromPdf(null), "");
+eq("[page] no pdf, no paper", APP.paperFromPdf(null), "");
 
-eq("[fixture] a story with no links has no see-also line",
+eq("[page] a story with no links has no see-also line",
    APP.seeAlsoPlan({links: []}), null);
-eq("[fixture] a story with no links field at all has none either",
+eq("[page] a story with no links field at all has none either",
    APP.seeAlsoPlan({}), null);
-eq("[fixture] an item with no from page is dropped rather than drawn empty",
+eq("[page] an item with no from page is dropped rather than drawn empty",
    APP.seeAlsoPlan({links: [{kind: "see_also_page", to_headline: "x"}]}), null);
 
 var manyOnOnePage = {links: [1, 2, 3].map(function (i) {
@@ -1034,10 +1034,10 @@ var manyOnOnePage = {links: [1, 2, 3].map(function (i) {
           from: {pdf: "archive/2026-10-11/2026-10-11_The Hindu.pdf", pdf_page: 1,
                  label: "PDF p1"}};
 })};
-eq("[fixture] pointers to the same page are one pointer, not three",
+eq("[page] pointers to the same page are one pointer, not three",
    APP.seeAlsoPlan(manyOnOnePage).pages.map(function (p) { return p.text; }),
    ["TH PDF p1"]);
-eq("[fixture] the line says how many stories that pointer is worth",
+eq("[page] the line says how many stories that pointer is worth",
    APP.seeAlsoPlan(manyOnOnePage).tail, "3 stories on the same page");
 eq("[page] the headlines ride along, for D1's fold to open",
    APP.seeAlsoPlan(manyOnOnePage).pages[0].headlines,
@@ -1111,11 +1111,11 @@ eq("[page] D1 · a story with one pointer and no headline has nothing to fold",
      {pdf: "archive/2026-10-11/2026-10-11_Mint.pdf", pdf_page: 4}}]}))
      .filter(function (c) { return c.tag === "BUTTON"; }), []);
 
-eq("[fixture] one pointer to one story reads in the singular",
+eq("[page] one pointer to one story reads in the singular",
    APP.seeAlsoPlan({links: [{to_headline: "One",
      from: {pdf: "archive/2026-10-11/2026-10-11_Mint.pdf", pdf_page: 4}}]}).tail,
    "1 story on the same page");
-eq("[fixture] two pages are two pointers and 'pages'",
+eq("[page] two pages are two pointers and 'pages'",
    APP.seeAlsoPlan({links: [
      {to_headline: "a", from: {pdf: "archive/2026-10-11/2026-10-11_The Hindu.pdf", pdf_page: 1}},
      {to_headline: "b", from: {pdf: "archive/2026-10-11/2026-10-11_Business Line.pdf", pdf_page: 7}}]}),
@@ -1127,12 +1127,12 @@ eq("[fixture] two pages are two pointers and 'pages'",
              headlines: ["b"], text: "BL PDF p7"}],
     total: 2, tail: "2 stories on the same pages"});
 
-eq("[fixture] check 8 · see_also_line names the element it removes",
+eq("[page] check 8 · see_also_line names the element it removes",
    APP.FLAG_ELEMENTS.see_also_line, ".see-also");
 
 // Q3 B: "Earlier coverage" is gone, function and all. A leftover call would throw in
 // the browser and not here, so the check is that the name itself is unknown to the page.
-eq("[fixture] Q3 B · the page has no earlierCoverage function left",
+eq("[page] Q3 B · the page has no earlierCoverage function left",
    typeof APP.earlierCoverage, "undefined");
 
 
@@ -1143,17 +1143,17 @@ eq("[fixture] Q3 B · the page has no earlierCoverage function left",
 
 // §7's money: "0.05¢" under a cent, "1.1¢" from a cent, "$1.02" from a dollar.
 // the plural rule, which the pane is the first thing to need
-eq("[fixture] a consonant then y pluralises to -ies", APP.count(9, "story"),
+eq("[page] a consonant then y pluralises to -ies", APP.count(9, "story"),
    "9 stories");
-eq("[fixture] one of them stays singular", APP.count(1, "story"), "1 story");
-eq("[fixture] a vowel then y just takes an s", APP.count(3, "day"), "3 days");
+eq("[page] one of them stays singular", APP.count(1, "story"), "1 story");
+eq("[page] a vowel then y just takes an s", APP.count(3, "day"), "3 days");
 
-eq("[fixture] half a twentieth of a cent", APP.moneyFine(0.0005), "0.05¢");
-eq("[fixture] a background's three hundredths", APP.moneyFine(0.0003), "0.03¢");
-eq("[fixture] Think harder's 1.1 cents", APP.moneyFine(0.011), "1.1¢");
-eq("[fixture] a dollar and two cents", APP.moneyFine(1.02), "$1.02");
-eq("[fixture] nothing spent is a flat 0¢", APP.moneyFine(0), "0¢");
-eq("[fixture] and v0's own money() is untouched, still saying <1¢",
+eq("[page] half a twentieth of a cent", APP.moneyFine(0.0005), "0.05¢");
+eq("[page] a background's three hundredths", APP.moneyFine(0.0003), "0.03¢");
+eq("[page] Think harder's 1.1 cents", APP.moneyFine(0.011), "1.1¢");
+eq("[page] a dollar and two cents", APP.moneyFine(1.02), "$1.02");
+eq("[page] nothing spent is a flat 0¢", APP.moneyFine(0), "0¢");
+eq("[page] and v0's own money() is untouched, still saying <1¢",
    APP.money(0.0004), "<1¢");
 
 // Acceptance check 4 · a line split across two chunks is still one event
@@ -1164,11 +1164,11 @@ var second = APP.ndjsonSplit(first.rest, 'tence","text":"x"}\n');
 eq("[behaviour] which the next chunk completes",
    second.events, [{type: "sentence", text: "x"}]);
 eq("[behaviour] leaving nothing behind", second.rest, "");
-eq("[fixture] a chunk with no newline at all yields nothing yet",
+eq("[page] a chunk with no newline at all yields nothing yet",
    APP.ndjsonSplit("", '{"a":1}').events, []);
-eq("[fixture] blank lines are not events",
+eq("[page] blank lines are not events",
    APP.ndjsonSplit("", '\n\n{"a":1}\n').events, [{a: 1}]);
-eq("[fixture] three events in one chunk all arrive",
+eq("[page] three events in one chunk all arrive",
    APP.ndjsonSplit("", '{"a":1}\n{"a":2}\n{"a":3}\n').events.length, 3);
 
 // Acceptance check 11 · the six reasons, word for word
@@ -1189,15 +1189,15 @@ var REASONS = {
 Object.keys(REASONS).forEach(function (reason) {
   var want = REASONS[reason];
   var got = APP.errorWording({reason: reason, retryable: want[2]});
-  eq("[fixture] " + reason + " says its first line", got.first, want[0]);
-  eq("[fixture] " + reason + " says its hint", got.hint, want[1]);
-  eq("[fixture] " + reason + " offers Retry only when it is worth it",
+  eq("[page] " + reason + " says its first line", got.first, want[0]);
+  eq("[page] " + reason + " says its hint", got.hint, want[1]);
+  eq("[page] " + reason + " offers Retry only when it is worth it",
      got.retry, want[2]);
 });
-eq("[fixture] a reason the page has never heard of still gets words, not a blank",
+eq("[page] a reason the page has never heard of still gets words, not a blank",
    APP.errorWording({reason: "sulking", retryable: true}).first,
    REASONS.other[0]);
-eq("[fixture] and retryable, not the table, decides the button",
+eq("[page] and retryable, not the table, decides the button",
    APP.errorWording({reason: "timeout", retryable: false}).retry, false);
 
 // --- the nine states, built ------------------------------------------------------
@@ -1238,38 +1238,38 @@ var resultsFixture = {query: "Delhi", filters: {}, sort: "relevance", verdict: "
 
 // State 2 · answer done
 var state2 = APP.answerTurn(answerFixture(), {});
-eq("[fixture] state 2 · the question is yours, in ochre",
+eq("[page] state 2 · the question is yours, in ochre",
    textOf(state2).indexOf("You · what happened in Delhi?"), 0);
-eq("[fixture] state 2 · both sentences are there",
+eq("[page] state 2 · both sentences are there",
    textOf(state2).indexOf("Sample answer, continued · two.") > 0, true);
-eq("[fixture] state 2 · the cost line names the model and the money",
+eq("[page] state 2 · the cost line names the model and the money",
    textOf(state2).indexOf("Haiku · 0.05¢") > 0, true);
-eq("[fixture] state 2 · Think harder prints its own estimate",
+eq("[page] state 2 · Think harder prints its own estimate",
    textOf(state2).indexOf("Think harder · ≈ 1.1¢") > 0, true);
-eq("[fixture] state 2 · and every fixture answer says it is sample data",
+eq("[page] state 2 · and every fixture answer says it is sample data",
    textOf(state2).indexOf("sample data") > 0, true);
-eq("[fixture] state 2 · every control in it is a real button with a label",
+eq("[page] state 2 · every control in it is a real button with a label",
    controlsOf(state2).filter(function (c) {
      return c.tag !== "BUTTON" || !c.label; }), []);
 
 // State 1 · answering: the results list is there before the answer is
 PS.results.a1 = resultsFixture;
 var state1 = APP.answerTurn(answerFixture(), {});
-eq("[fixture] state 1 · the heading counts the stories found",
+eq("[page] state 1 · the heading counts the stories found",
    textOf(state1).indexOf("Found · 9 stories") > 0, true);
-eq("[fixture] state 1 · five story rows, no more",
+eq("[page] state 1 · five story rows, no more",
    classesOf(state1).filter(function (c) { return c === "result-row"; }).length, 5);
-eq("[fixture] state 1 · and an offer to see the rest in Explore",
+eq("[page] state 1 · and an offer to see the rest in Explore",
    textOf(state1).indexOf("Show all 9 in Explore") > 0, true);
-eq("[fixture] state 1 · the cited story is marked CITED, the rest FOUND",
+eq("[page] state 1 · the cited story is marked CITED, the rest FOUND",
    [textOf(APP.resultRow(resultsFixture.stories[0], answerFixture())).indexOf("CITED") > 0,
     textOf(APP.resultRow(resultsFixture.stories[1], answerFixture())).indexOf("FOUND") > 0],
    [true, true]);
-eq("[fixture] the mark is decided by the answer's own cites",
+eq("[page] the mark is decided by the answer's own cites",
    [APP.markFor(resultsFixture.stories[0], answerFixture()).word,
     APP.markFor(resultsFixture.stories[1], answerFixture()).word],
    ["CITED", "FOUND"]);
-eq("[fixture] a browse cannot be sorted by relevance, so that switch is off",
+eq("[page] a browse cannot be sorted by relevance, so that switch is off",
    controlsOf(APP.resultsList("a1", {query: "", filters: {}, sort: "newest",
                                      total_stories: 2, stories: resultsFixture.stories},
                               null))
@@ -1278,18 +1278,18 @@ var live = APP.liveTurn.call(null);
 
 // State 3 · Think harder: the Haiku answer folds to one line
 var folded = APP.answerTurn(answerFixture(), {folded: true});
-eq("[fixture] state 3 · the Haiku answer folds to one line with its cost",
+eq("[page] state 3 · the Haiku answer folds to one line with its cost",
    textOf(folded).indexOf("▸ Haiku answer · 0.05¢") > 0, true);
-eq("[fixture] state 3 · and its sentences are gone while folded",
+eq("[page] state 3 · and its sentences are gone while folded",
    textOf(folded).indexOf("Sample answer · one.") > 0, false);
-eq("[fixture] state 3 · the Sonnet label names the passage count",
+eq("[page] state 3 · the Sonnet label names the passage count",
    APP.sonnetLabel({parent_answer_id: "a1"}), "Sonnet · same 6 passages");
-eq("[fixture] state 3 · with the results gone, it claims no number",
+eq("[page] state 3 · with the results gone, it claims no number",
    APP.sonnetLabel({parent_answer_id: "nothing"}), "Sonnet · the same passages");
 
 // State 4 · weak match
 var weak = APP.answerTurn(answerFixture({verdict: "thin", found_count: 5}), {});
-eq("[fixture] state 4 · a thin answer says so above itself",
+eq("[page] state 4 · a thin answer says so above itself",
    textOf(weak).indexOf("Weak match · 5 articles found") > 0, true);
 
 // State 5 · not in your papers
@@ -1300,46 +1300,46 @@ var none = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 
             {story_id: "s7", headline: "A third", dates: ["2026-10-13"]}]});
 delete PS.results.a1;
 var state5 = APP.answerTurn(none, {});
-eq("[fixture] state 5 · it says what it did not find, and how far it looked",
+eq("[page] state 5 · it says what it did not find, and how far it looked",
    textOf(state5).indexOf("Not in your papers · searched 7 days") > 0, true);
 // After a restart the results are gone (D12). The number has to come off the answer,
 // and if it is not there either the clause goes rather than claiming "0 days".
 var noResults = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 0,
                                searched_days: 7, closest: []});
 delete PS.results.a1;
-eq("[fixture] state 5 · the day count survives a reload, off the answer itself",
+eq("[page] state 5 · the day count survives a reload, off the answer itself",
    textOf(APP.answerTurn(noResults, {})).indexOf("searched 7 days") > 0, true);
 var noDays = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 0,
                             closest: []});
 delete noDays.searched_days;
-eq("[fixture] state 5 · and an answer with no count says nothing, never '0 days'",
+eq("[page] state 5 · and an answer with no count says nothing, never '0 days'",
    [textOf(APP.answerTurn(noDays, {})).indexOf("Not in your papers") >= 0,
     textOf(APP.answerTurn(noDays, {})).indexOf("searched") >= 0],
    [true, false]);
-eq("[fixture] state 5 · the three closest stories are offered",
+eq("[page] state 5 · the three closest stories are offered",
    textOf(state5).indexOf("The closest story") > 0
    && textOf(state5).indexOf("A third") > 0, true);
-eq("[fixture] state 5 · no model was asked, and the cost line says exactly that",
+eq("[page] state 5 · no model was asked, and the cost line says exactly that",
    textOf(state5).indexOf("no model call · 0¢") > 0, true);
-eq("[fixture] state 5 · and the offer is background knowledge, not a cheap answer",
+eq("[page] state 5 · and the offer is background knowledge, not a cheap answer",
    textOf(state5).indexOf("Answer from background knowledge") > 0, true);
-eq("[fixture] state 5 · Think harder is not offered on nothing",
+eq("[page] state 5 · Think harder is not offered on nothing",
    textOf(state5).indexOf("Think harder") > 0, false);
 
 // State 6 · background on request
 var withBack = APP.backgroundBlock(answerFixture({verdict: "empty",
   background: "Sample background paragraph."}));
-eq("[fixture] state 6 · an empty answer's background says it is not in the archive",
+eq("[page] state 6 · an empty answer's background says it is not in the archive",
    textOf(withBack).indexOf("Not in the archive · background"), 0);
 var matched = APP.backgroundBlock(answerFixture({background: "Sample background."}));
-eq("[fixture] state 2 · a matched answer's says it is not from your papers",
+eq("[page] state 2 · a matched answer's says it is not from your papers",
    textOf(matched).indexOf("Background · not from your papers"), 0);
-eq("[fixture] background carries no chips, because it cites nothing",
+eq("[page] background carries no chips, because it cites nothing",
    classesOf(matched).filter(function (c) { return c === "chips"; }), []);
-eq("[fixture] check 13 · the Background button is on an answer with no line",
+eq("[page] check 13 · the Background button is on an answer with no line",
    controlsOf(APP.actionsRow(answerFixture()))
      .filter(function (c) { return c.label.indexOf("Background") === 0; }).length, 1);
-eq("[fixture] check 13 · and not on one that already has one",
+eq("[page] check 13 · and not on one that already has one",
    controlsOf(APP.actionsRow(answerFixture({background: "x"})))
      .filter(function (c) { return c.label.indexOf("Background") === 0; }).length, 0);
 
@@ -1347,12 +1347,12 @@ eq("[fixture] check 13 · and not on one that already has one",
 PS.live = {question: "q", sentences: [], results: null,
            error: {reason: "key_rejected", retryable: false}};
 var errored = APP.liveTurn();
-eq("[fixture] state 9 · the reason is the first line",
+eq("[page] state 9 · the reason is the first line",
    textOf(errored).indexOf("the API key was rejected") > 0, true);
-eq("[fixture] state 9 · with no Retry, because retrying will not help",
+eq("[page] state 9 · with no Retry, because retrying will not help",
    controlsOf(errored).filter(function (c) { return c.label === "Retry"; }), []);
 PS.live.error = {reason: "timeout", retryable: true};
-eq("[fixture] state 9 · a retryable one offers Retry",
+eq("[page] state 9 · a retryable one offers Retry",
    controlsOf(APP.liveTurn()).filter(function (c) { return c.label === "Retry"; })
      .length, 1);
 PS.live = null;
@@ -1365,23 +1365,23 @@ PS.live = null;
 // conversation turn, so nulling the live turn wiped it and state 9's Retry could never
 // be clicked. The decision now has a name, so it can be checked as one.
 
-eq("[fixture] a finished answer is dropped, the conversation has it now",
+eq("[page] a finished answer is dropped, the conversation has it now",
    APP.keepLiveAfterStream({question: "q", answer: {answer_id: "a1"}, sentences: []}),
    false);
-eq("[fixture] an errored ask is KEPT, or its Retry can never be reached",
+eq("[page] an errored ask is KEPT, or its Retry can never be reached",
    APP.keepLiveAfterStream({question: "q", error: {code: "model_error",
                                                   reason: "timeout",
                                                   retryable: true}}), true);
-eq("[fixture] every retryable reason is kept",
+eq("[page] every retryable reason is kept",
    ["model_busy", "no_network", "timeout", "other"].filter(function (r) {
      return !APP.keepLiveAfterStream({error: {code: "model_error", reason: r}}); }), []);
-eq("[fixture] and so is one that cannot be retried, so its hint can still be read",
+eq("[page] and so is one that cannot be retried, so its hint can still be read",
    ["key_rejected", "checks_failed"].filter(function (r) {
      return !APP.keepLiveAfterStream({error: {code: "model_error", reason: r}}); }), []);
-eq("[fixture] the cap is NOT kept: its band above the composer says it",
+eq("[page] the cap is NOT kept: its band above the composer says it",
    APP.keepLiveAfterStream({question: "q", error: {code: "cap_reached",
                                                    retryable: false}}), false);
-eq("[fixture] and nothing at all is kept when nothing was asked",
+eq("[page] and nothing at all is kept when nothing was asked",
    [APP.keepLiveAfterStream(null), APP.keepLiveAfterStream({question: "q",
                                                             sentences: []})],
    [false, false]);
@@ -1398,11 +1398,11 @@ var errored = afterStream({question: "Delhi police", sentences: [], results: nul
                            error: {type: "error", code: "model_error",
                                    reason: "no_network", retryable: true,
                                    message: "no internet connection"}});
-eq("[fixture] the error is drawn with its own wording",
+eq("[page] the error is drawn with its own wording",
    errored.drawn.indexOf("no internet connection") > 0, true);
-eq("[fixture] and it is STILL THERE after the stream ends",
+eq("[page] and it is STILL THERE after the stream ends",
    errored.kept.indexOf("no internet connection") > 0, true);
-eq("[fixture] with its Retry, which was the whole point",
+eq("[page] with its Retry, which was the whole point",
    errored.kept.indexOf("Retry") > 0, true);
 
 // the cap, which flashed the wrong wording for one frame
@@ -1410,56 +1410,56 @@ var capped = afterStream({question: "police", sentences: [], results: null,
                           error: {type: "error", code: "cap_reached",
                                   retryable: false,
                                   message: "Daily cap $0.50 reached"}});
-eq("[fixture] the cap never says 'unexpected error', not even for one frame",
+eq("[page] the cap never says 'unexpected error', not even for one frame",
    capped.drawn.indexOf("unexpected error") >= 0, false);
-eq("[fixture] nor offers a Retry that would only be refused again",
+eq("[page] nor offers a Retry that would only be refused again",
    capped.drawn.indexOf("Retry") >= 0, false);
-eq("[fixture] and the turn is gone afterwards, the band having said it", capped.kept, "");
+eq("[page] and the turn is gone afterwards, the band having said it", capped.kept, "");
 PS.live = null;
 
-eq("[fixture] under the cap there is room to ask", APP.atCap(), false);
-eq("[fixture] and the cap band is not drawn", APP.capBand(), null);
+eq("[page] under the cap there is room to ask", APP.atCap(), false);
+eq("[page] and the cap band is not drawn", APP.capBand(), null);
 PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};
-eq("[fixture] check 10 · spent to the cap, there is no room", APP.atCap(), true);
+eq("[page] check 10 · spent to the cap, there is no room", APP.atCap(), true);
 var band = APP.capBand();
-eq("[fixture] check 10 · the band says the cap and what was spent",
+eq("[page] check 10 · the band says the cap and what was spent",
    textOf(band).indexOf("Daily cap $0.50 reached · spent $0.50 today"), 0);
-eq("[fixture] check 10 · it offers a day's override, and says it ends at midnight",
+eq("[page] check 10 · it offers a day's override, and says it ends at midnight",
    [textOf(band).indexOf("Allow $1 more today") > 0,
     textOf(band).indexOf("Ends at midnight · logged") > 0], [true, true]);
-eq("[fixture] at the cap Think harder greys with its reason",
+eq("[page] at the cap Think harder greys with its reason",
    APP.roomFor("think_harder").why, "· not enough left today");
 PS.cost = {spent_usd: 0.5, cap_usd: 1.5, override_usd: 1.0};
-eq("[fixture] check 10 · after the override there is room again",
+eq("[page] check 10 · after the override there is room again",
    [APP.atCap(), APP.capBand()], [false, null]);
 PS.cost = {spent_usd: 0.01, cap_usd: null, override_usd: 0};
-eq("[fixture] a digest with no cap knob has no cap to hit (v0 D1)",
+eq("[page] a digest with no cap knob has no cap to hit (v0 D1)",
    APP.atCap(), false);
 PS.cost = {spent_usd: 0.01, cap_usd: 0.5, override_usd: 0};
 
 // The scope chips, and the widths
-eq("[fixture] the open story is one chip, each filter another",
+eq("[page] the open story is one chip, each filter another",
    APP.scopeChips({story_id: "s1", headline: "A headline",
                    filters: {papers: ["Mint"], date_from: "2026-10-09"}})
      .map(function (c) { return c.key + "=" + c.text; }),
    ["story=A headline", "papers=Mint", "date_from=from 2026-10-09"]);
-eq("[fixture] a selection from Explore is one chip saying how many",
+eq("[page] a selection from Explore is one chip saying how many",
    APP.scopeChips({filters: {story_ids: ["a", "b", "c"]}})[0].text, "3 stories");
-eq("[fixture] and a label given for it wins",
+eq("[page] and a label given for it wins",
    APP.scopeChips({filters: {story_ids: ["a"]}}, "these 4")[0].text, "these 4");
-eq("[fixture] the hashes of a scope are not a chip of their own",
+eq("[page] the hashes of a scope are not a chip of their own",
    APP.scopeChips({filters: {text_hashes: ["h1"]}}), []);
-eq("[fixture] no scope, no chips", APP.scopeChips({}), []);
-eq("[fixture] the three pane widths",
+eq("[page] no scope, no chips", APP.scopeChips({}), []);
+eq("[page] the three pane widths",
    [APP.PANE_WIDTHS.open, APP.PANE_WIDTHS.wide, APP.PANE_WIDTHS.collapsed],
    ["360px", "520px", "var(--rail-width)"]);
-eq("[fixture] five results shown in the pane, the rest in Explore",
+eq("[page] five results shown in the pane, the rest in Explore",
    APP.PANE_RESULTS_SHOWN, 5);
-eq("[fixture] a query string carries every filter, repeated for a list",
+eq("[page] a query string carries every filter, repeated for a list",
    APP.searchQueryString("police", {papers: ["Mint", "The Hindu"],
                                     date_from: "2026-10-09"}, "newest"),
    "q=police&sort=newest&papers=Mint&papers=The%20Hindu&date_from=2026-10-09");
-eq("[fixture] and the hashes filter travels as 'hashes'",
+eq("[page] and the hashes filter travels as 'hashes'",
    APP.searchQueryString("", {text_hashes: ["h1"]}), "q=&hashes=h1");
 
 // --- the whole pane, and acceptance check 8 (a flag off removes its element) ------
@@ -1488,43 +1488,43 @@ function paneClasses() {
 }
 
 var whole = paneText();
-eq("[fixture] the pane names itself", whole.indexOf("Assistant"), 0);
-eq("[fixture] it offers a new conversation, widening and collapsing",
+eq("[page] the pane names itself", whole.indexOf("Assistant"), 0);
+eq("[page] it offers a new conversation, widening and collapsing",
    ["New conversation", "Widen", "Collapse"].filter(function (w) {
      return whole.indexOf(w) < 0; }), []);
-eq("[fixture] state 8 · a reloaded conversation says when it started",
+eq("[page] state 8 · a reloaded conversation says when it started",
    whole.indexOf("Conversation from Mon 9.30am") > 0, true);
-eq("[fixture] state 7 · the divider names the story now being read",
+eq("[page] state 7 · the divider names the story now being read",
    whole.indexOf("Now reading · ANOTHER STORY") > 0, true);
-eq("[fixture] both answers are in it",
+eq("[page] both answers are in it",
    whole.indexOf("what happened in Delhi?") > 0 && whole.indexOf("and then?") > 0, true);
-eq("[fixture] the composer invites a question about your papers",
+eq("[page] the composer invites a question about your papers",
    controlsOf(document.byId.assistant).filter(function (c) {
      return c.placeholder === "Ask about your papers…"; }).length, 1);
 PS.scope = {story_id: "s1", headline: "A headline", text_hashes: [], filters: {}};
 paneText();
-eq("[fixture] and about this story, with the key that focuses it, when one is open",
+eq("[page] and about this story, with the key that focuses it, when one is open",
    controlsOf(document.byId.assistant).filter(function (c) {
      return c.placeholder === "Ask about this story… ( / )"; }).length, 1);
-eq("[fixture] the open story is a scope chip you can take off",
+eq("[page] the open story is a scope chip you can take off",
    controlsOf(document.byId.assistant).filter(function (c) {
      return c.aria === "Remove A headline from the question"; }).length, 1);
 
-eq("[fixture] check 7 · every control in the whole pane is a real labelled control",
+eq("[page] check 7 · every control in the whole pane is a real labelled control",
    controlsOf(document.byId.assistant).filter(function (c) {
      return ["BUTTON", "INPUT", "A"].indexOf(c.tag) < 0 || !c.label; }), []);
-eq("[fixture] check 7 · and every button says it is a button",
+eq("[page] check 7 · and every button says it is a button",
    controlsOf(document.byId.assistant).filter(function (c) {
      return c.tag === "BUTTON" && !c.type; }), []);
 
 // collapsed and wide
 PS.pane = "collapsed";
-eq("[fixture] collapsed, the pane is a rail that opens it again",
+eq("[page] collapsed, the pane is a rail that opens it again",
    [paneText(), controlsOf(document.byId.assistant).length], ["Assistant", 1]);
-eq("[fixture] and the collapsed rail is as wide as v0's", APP.paneWidth(),
+eq("[page] and the collapsed rail is as wide as v0's", APP.paneWidth(),
    "var(--rail-width)");
 PS.pane = "wide";
-eq("[fixture] widened, it offers to narrow instead",
+eq("[page] widened, it offers to narrow instead",
    [paneText().indexOf("Narrow") > 0, APP.paneWidth()], [true, "520px"]);
 PS.pane = "open";
 
@@ -1538,20 +1538,20 @@ PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};
 Object.keys(PANE_FLAG_ELEMENTS).forEach(function (flag) {
   var cls = PANE_FLAG_ELEMENTS[flag];
   var on = paneClasses().filter(function (c) { return (c || "").indexOf(cls) >= 0; });
-  eq("[fixture] check 8 · " + flag + " on draws " + cls, on.length > 0, true);
+  eq("[page] check 8 · " + flag + " on draws " + cls, on.length > 0, true);
   PS.flags[flag] = false;
   var off = paneClasses().filter(function (c) { return (c || "").indexOf(cls) >= 0; });
-  eq("[fixture] check 8 · " + flag + " off removes it completely", off, []);
-  eq("[fixture] check 8 · and the pane still renders without it",
+  eq("[page] check 8 · " + flag + " off removes it completely", off, []);
+  eq("[page] check 8 · and the pane still renders without it",
      paneText().indexOf("Assistant"), 0);
   PS.flags[flag] = true;
 });
 PS.flags.assistant = false;
-eq("[fixture] check 8 · assistant off puts v0's disabled rail back, with no gap",
+eq("[page] check 8 · assistant off puts v0's disabled rail back, with no gap",
    [paneClasses().filter(function (c) { return c === "pane"; }),
     paneClasses().filter(function (c) { return c === "pane-collapsed"; }).length],
    [[], 1]);
-eq("[fixture] check 8 · and that rail is disabled, as it was in v0",
+eq("[page] check 8 · and that rail is disabled, as it was in v0",
    [controlsOf(document.byId.assistant)[0].aria,
     controlsOf(document.byId.assistant)[0].disabled],
    ["Assistant, version 0.1, not available yet", true]);
@@ -1813,38 +1813,38 @@ var suggestSetFixture = {story_id: "open1", suggestions: [suggestionFixture],
 
 // before it is asked for: a button that prints its own price, and no box
 var offer = APP.suggestSection(openStoryFixture);
-eq("[fixture] §8.4 · on demand, the button says what it will cost",
+eq("[page] §8.4 · on demand, the button says what it will cost",
    textOf(offer), "Suggest connections · ≈ 0.05¢");
-eq("[fixture] D4 · and nothing has been fetched to draw a box with",
+eq("[page] D4 · and nothing has been fetched to draw a box with",
    classesOf(offer).filter(function (c) { return c === "suggest-box"; }), []);
 
 // once asked for, the button is REPLACED by the box
 PS.suggestions.open1 = suggestSetFixture;
 var box = APP.suggestSection(openStoryFixture);
-eq("[fixture] §8.4 · the box is headed by who suggested it and that it is unchecked",
+eq("[page] §8.4 · the box is headed by who suggested it and that it is unchecked",
    [textOf(box).indexOf("Suggested by assistant"), textOf(box).indexOf("Not checked") > 0],
    [0, true]);
-eq("[fixture] §8.4 · the button is gone, not left beside the box",
+eq("[page] §8.4 · the button is gone, not left beside the box",
    controlsOf(box).filter(function (c) {
      return c.label.indexOf("Suggest connections") === 0; }), []);
-eq("[fixture] §8.4 · the row says which paper, which day and why",
+eq("[page] §8.4 · the row says which paper, which day and why",
    textOf(box).indexOf("TH · 13 Oct · Why: Sample reason · shares the words "
                        + "'delhi', 'jantar'") > 0, true);
-eq("[fixture] §8.4 · a closing cost line, marked sample data",
+eq("[page] §8.4 · a closing cost line, marked sample data",
    [textOf(box).indexOf("Suggestions · 0.05¢") > 0,
     textOf(box).indexOf("sample data") > 0], [true, true]);
-eq("[fixture] §8.4 · the box has no Pin of its own, only the rows' icons",
+eq("[page] §8.4 · the box has no Pin of its own, only the rows' icons",
    classesOf(box).filter(function (c) { return c === "suggest-box"; }).length, 1);
 
 // the two icon buttons: light, labelled, 32x32 targets
 var icons = controlsOf(box).filter(function (c) {
   return c.label === "Pin to board" || c.label === "Add to thread"; });
-eq("[fixture] §8.4 · two icon buttons, each with its own label",
+eq("[page] §8.4 · two icon buttons, each with its own label",
    icons.map(function (c) { return c.aria; }).sort(),
    ["Add to thread", "Pin to board"]);
-eq("[fixture] §8.4 · and both are real buttons, not clickable spans",
+eq("[page] §8.4 · and both are real buttons, not clickable spans",
    icons.filter(function (c) { return c.tag !== "BUTTON"; }), []);
-eq("[fixture] §8.4 · neither is pressed before anything is done",
+eq("[page] §8.4 · neither is pressed before anything is done",
    APP.suggestionRow(openStoryFixture, suggestionFixture) &&
    classesOf(APP.suggestionRow(openStoryFixture, suggestionFixture))
      .filter(function (c) { return (c || "").indexOf("is-done") >= 0; }), []);
@@ -1856,33 +1856,33 @@ PS.pinnedStories = new Set(["sug1"]);
 PS.pinIds.sug1 = {pin_id: "pin1", board_id: "b1", name: "Delhi",
                   payload: {story_id: "sug1"}, source: {}};
 var doneRow = APP.suggestionRow(openStoryFixture, suggestionFixture);
-eq("[fixture] §8.4 · both icons are dark once both are done",
+eq("[page] §8.4 · both icons are dark once both are done",
    classesOf(doneRow).filter(function (c) {
      return (c || "").indexOf("is-done") >= 0; }).length, 2);
-eq("[fixture] §8.4 · and say so to a screen reader",
+eq("[page] §8.4 · and say so to a screen reader",
    controlsOf(doneRow).filter(function (c) {
      return c.tag === "BUTTON"; }).length >= 2, true);
-eq("[fixture] §8.4 · the muted line gains 'Added to the thread'",
+eq("[page] §8.4 · the muted line gains 'Added to the thread'",
    textOf(doneRow).indexOf("· Added to the thread") > 0, true);
-eq("[fixture] §8.4 · a dark pin offers to unpin, not to pin again",
+eq("[page] §8.4 · a dark pin offers to unpin, not to pin again",
    controlsOf(doneRow).filter(function (c) {
      return (c.aria || "").indexOf("click to unpin") > 0; }).length, 1);
-eq("[fixture] §8.4 · and a dark + offers to take it out of the thread",
+eq("[page] §8.4 · and a dark + offers to take it out of the thread",
    controlsOf(doneRow).filter(function (c) {
      return c.aria === "Remove from the thread"; }).length, 1);
-eq("[fixture] the link is found by the story it points at",
+eq("[page] the link is found by the story it points at",
    APP.userLinkTo("sug1").link_id, "ul1");
-eq("[fixture] and a story with no link has none", APP.userLinkTo("nothing"), null);
-eq("[fixture] a pinned story is known as pinned", APP.suggestionPinned("sug1"), true);
+eq("[page] and a story with no link has none", APP.userLinkTo("nothing"), null);
+eq("[page] a pinned story is known as pinned", APP.suggestionPinned("sug1"), true);
 
 // check 8 · user_links off hides the + icon
 PS.flags.user_links = false;
-eq("[fixture] check 8 · user_links off removes the + icon completely",
+eq("[page] check 8 · user_links off removes the + icon completely",
    controlsOf(APP.suggestionRow(openStoryFixture, suggestionFixture))
      .filter(function (c) { return (c.aria || "").indexOf("thread") > 0; }), []);
 PS.flags.user_links = true;
 PS.flags.suggest_connections = false;
-eq("[fixture] check 8 · suggest_connections off removes the whole thing",
+eq("[page] check 8 · suggest_connections off removes the whole thing",
    APP.suggestSection(openStoryFixture), null);
 PS.flags.suggest_connections = true;
 
@@ -1916,17 +1916,17 @@ eq("[behaviour] check 12 · the graph gives it its own kind, so its box is ochre
 PS.threads = {open1: threadFixture};
 PS.prefs = {thread_view: "timeline"};
 var timeline = APP.timelineView(threadFixture);
-eq("[fixture] R13 · the entry is tagged as yours beside its headline",
+eq("[page] R13 · the entry is tagged as yours beside its headline",
    textOf(timeline).indexOf("Added by you") > 0, true);
-eq("[fixture] R13 · 'Wrong link?' is replaced by 'Remove' on an entry you added",
+eq("[page] R13 · 'Wrong link?' is replaced by 'Remove' on an entry you added",
    controlsOf(timeline).filter(function (c) { return c.text === "Remove"; }).length, 1);
-eq("[fixture] R13 · and the pipeline's own entry still offers Wrong link?",
+eq("[page] R13 · and the pipeline's own entry still offers Wrong link?",
    controlsOf(timeline).filter(function (c) {
      return c.text === "Wrong link?"; }).length, 1);
 var head = APP.threadSection(openStoryFixture);
-eq("[fixture] R13 · the thread header counts what you added",
+eq("[page] R13 · the thread header counts what you added",
    textOf(head).indexOf("1 added by you") > 0, true);
-eq("[fixture] R13 · the ? sheet explains the new node with the others",
+eq("[page] R13 · the ? sheet explains the new node with the others",
    APP.CHEAT_MARKS.map(function (m) { return m[0]; }),
    ["today", "follow_up", "start", "run_up", "user"]);
 
@@ -1947,32 +1947,32 @@ PS.facets = {papers: ["Mint", "The Hindu"], topics: ["AI", "Protests & movements
              kinds: ["news", "opinion"], date_min: "2026-10-09", date_max: "2026-10-15"};
 PS.explore = null;
 var ex = APP.exploreState();
-eq("[fixture] §8.5 · it opens as a browse, newest first, nothing chosen",
+eq("[page] §8.5 · it opens as a browse, newest first, nothing chosen",
    [ex.query, ex.sort, ex.rows, ex.selected.size, Object.keys(ex.filters).length],
    ["", "newest", "stories", 0, 0]);
 
-eq("[fixture] §8.5 · the count line counts both populations",
+eq("[page] §8.5 · the count line counts both populations",
    APP.exploreCounts({total_stories: 24, total_articles: 61}),
    "24 stories · 61 articles");
-eq("[fixture] §8.5 · and one of each reads in the singular",
+eq("[page] §8.5 · and one of each reads in the singular",
    APP.exploreCounts({total_stories: 1, total_articles: 1}), "1 story · 1 article");
-eq("[fixture] §8.5 · nothing found counts to nothing",
+eq("[page] §8.5 · nothing found counts to nothing",
    APP.exploreCounts(null), "0 stories · 0 articles");
 
 // the chips say what is narrowing the screen
-eq("[fixture] §8.5 · the keyword is a chip, in quotes",
+eq("[page] §8.5 · the keyword is a chip, in quotes",
    APP.exploreChips({query: "police", filters: {}}),
    [{key: "query", text: "“police”"}]);
-eq("[fixture] §8.5 · each filter is its own chip, dates read from and to",
+eq("[page] §8.5 · each filter is its own chip, dates read from and to",
    APP.exploreChips({query: "", filters: {papers: ["Mint", "The Hindu"],
                                           date_from: "2026-10-11",
                                           kinds: ["opinion"]}})
      .map(function (c) { return c.key + "=" + c.text; }),
    ["papers=Mint, The Hindu", "date_from=from 2026-10-11", "kinds=opinion"]);
-eq("[fixture] §8.5 · a selection carried in from the pane says how many",
+eq("[page] §8.5 · a selection carried in from the pane says how many",
    APP.exploreChips({query: "", filters: {story_ids: ["a", "b"]}})[0].text,
    "2 stories chosen");
-eq("[fixture] §8.5 · and the machinery of a scope is not a chip",
+eq("[page] §8.5 · and the machinery of a scope is not a chip",
    APP.exploreChips({query: "", filters: {text_hashes: ["h"],
                                           exclude_story_ids: ["s"]}}), []);
 
@@ -1995,25 +1995,25 @@ var exResult = {query: "police", filters: {}, sort: "relevance", verdict: "enoug
         kind: "opinion", snippet: "Third article",
         page_link: {pdf: "x/y/v.pdf", pdf_page: 1, label: "PDF p1", paper: "Mint"}}]}]};
 
-eq("[fixture] §8.5 · Articles flattens each story into its own articles",
+eq("[page] §8.5 · Articles flattens each story into its own articles",
    APP.exploreArticleRows(exResult).map(function (r) {
      return r.story.story_id + "/" + r.article.text_hash; }),
    ["e1/a1", "e1/a2", "e2/a3"]);
-eq("[fixture] §8.5 · and Stories keeps one row per story",
+eq("[page] §8.5 · and Stories keeps one row per story",
    exResult.stories.length, 2);
 
 var storyRow = APP.exploreRow(exResult.stories[0], null);
-eq("[fixture] §8.5 · a row names its best article's page and snippet",
+eq("[page] §8.5 · a row names its best article's page and snippet",
    textOf(storyRow).indexOf("Mint PDF p3 · First article") > 0, true);
-eq("[fixture] §8.5 · and the day, the papers and how many matched",
+eq("[page] §8.5 · and the day, the papers and how many matched",
    textOf(storyRow).indexOf("11 Oct · 2 papers · 2 matching articles") > 0, true);
-eq("[fixture] §8.5 · with a checkbox that says what it chooses",
+eq("[page] §8.5 · with a checkbox that says what it chooses",
    controlsOf(storyRow).filter(function (c) {
      return c.tag === "INPUT" && c.aria === "Choose The first story"; }).length, 1);
-eq("[fixture] §8.5 · every control in a row is real and labelled",
+eq("[page] §8.5 · every control in a row is real and labelled",
    controlsOf(storyRow).filter(function (c) { return !c.label; }), []);
 var articleRow = APP.exploreRow(exResult.stories[0], exResult.stories[0].articles[1]);
-eq("[fixture] §8.5 · an article row is headed by the article, not the story",
+eq("[page] §8.5 · an article row is headed by the article, not the story",
    textOf(articleRow).indexOf("Second article"), 0);
 
 // the whole screen, including H6
@@ -2028,35 +2028,35 @@ function exploreText(result, over) {
   return {text: textOf(pane), controls: controlsOf(pane), node: pane};
 }
 var screen = exploreText(exResult, {query: "police", sort: "relevance"});
-eq("[fixture] §8.5 · the screen names itself", screen.text.indexOf("Explore"), 0);
-eq("[fixture] §8.5 · both switches are there",
+eq("[page] §8.5 · the screen names itself", screen.text.indexOf("Explore"), 0);
+eq("[page] §8.5 · both switches are there",
    ["Relevance", "Newest", "Stories", "Articles"].filter(function (w) {
      return screen.controls.filter(function (c) {
        return c.text === w; }).length !== 1; }), []);
-eq("[fixture] §8.5 · the filter menus come from the facets",
+eq("[page] §8.5 · the filter menus come from the facets",
    screen.controls.filter(function (c) {
      return c.text.indexOf("Papers ▾") === 0 || c.text.indexOf("Topics ▾") === 0
             || c.text.indexOf("Kinds ▾") === 0; }).length, 3);
-eq("[fixture] §8.5 · the date fields are bounded by the archive's own range",
+eq("[page] §8.5 · the date fields are bounded by the archive's own range",
    [APP.FILTER_MENUS.length, PS.facets.date_min], [3, "2026-10-09"]);
 
 var browsing = exploreText(exResult, {query: ""});
-eq("[fixture] §8.5 · with no keyword, Relevance cannot be chosen",
+eq("[page] §8.5 · with no keyword, Relevance cannot be chosen",
    browsing.controls.filter(function (c) {
      return c.text === "Relevance" && c.disabled; }).length, 1);
-eq("[fixture] §8.5 · and Newest is the one that is pressed",
+eq("[page] §8.5 · and Newest is the one that is pressed",
    browsing.controls.filter(function (c) {
      return c.text === "Newest" && !c.disabled; }).length, 1);
 
 var chosen = exploreText(exResult, {query: "police", selected: new Set(["e1", "e2"])});
-eq("[fixture] §8.5 · the actions say how many are chosen, and cost nothing",
+eq("[page] §8.5 · the actions say how many are chosen, and cost nothing",
    [chosen.controls.filter(function (c) {
       return c.text === "Ask about these 2"; }).length,
     chosen.text.indexOf("no model call · 0¢") > 0,
     chosen.controls.filter(function (c) { return c.text === "Pin selected"; }).length],
    [1, true, 1]);
 var none = exploreText(exResult, {});
-eq("[fixture] §8.5 · with nothing chosen both actions are off",
+eq("[page] §8.5 · with nothing chosen both actions are off",
    none.controls.filter(function (c) {
      return c.text.indexOf("Ask about these") === 0 && c.disabled; }).length, 1);
 
@@ -2065,15 +2065,15 @@ var empty = exploreText({query: "Norway", filters: {papers: ["Mint"]}, sort: "re
                          verdict: "empty", total_stories: 0, total_articles: 0,
                          searched_days: 7, stories: []},
                         {query: "Norway", filters: {papers: ["Mint"]}});
-eq("[fixture] H6 · it says nothing matches", empty.text.indexOf("No stories match") > 0,
+eq("[page] H6 · it says nothing matches", empty.text.indexOf("No stories match") > 0,
    true);
-eq("[fixture] H6 · the chips that caused it are still on screen",
+eq("[page] H6 · the chips that caused it are still on screen",
    [empty.text.indexOf("“Norway”") > 0, empty.text.indexOf("Mint") > 0], [true, true]);
-eq("[fixture] H6 · and Clear all is the way out",
+eq("[page] H6 · and Clear all is the way out",
    empty.controls.filter(function (c) { return c.text === "Clear all"; }).length, 1);
 
 // check 8 · explore off takes the nav item away
-eq("[fixture] check 8 · the flag names the nav item it removes",
+eq("[page] check 8 · the flag names the nav item it removes",
    APP.FLAG_ELEMENTS.explore, '.nav-item[data-screen="explore"]');
 
 PS.explore = null;
@@ -3795,9 +3795,9 @@ def page_contract():
         return any(route.startswith(path) for route in routes)
 
     urls = sorted(set(re.findall(r"'(/(?:api|pdf)[^'\s]*)'", js)))
-    check("[fixture] every URL the page builds hits a real route",
+    check("[page] every URL the page builds hits a real route",
           [u for u in urls if not resolves(u.split("?")[0])], [])
-    check("[fixture] and there are enough of them to be the whole page",
+    check("[page] and there are enough of them to be the whole page",
           len(urls) >= 30, True)
 
     drawn = set()
@@ -3809,25 +3809,26 @@ def page_contract():
     # `reset` is the shared button reset; `background-button` is a hook the flag map
     # needs, drawn on top of `.action`, and styling it again would say nothing.
     HOOKS = {"reset", "background-button"}
-    check("[fixture] every class the page draws is styled", sorted(drawn - styled - HOOKS),
+    check("[page] every class the page draws is styled", sorted(drawn - styled - HOOKS),
           [])
-    check("[fixture] and the sweep really saw the whole page", len(drawn) > 140, True)
+    check("[page] and the sweep really saw the whole page", len(drawn) > 140, True)
 
     flag_block = re.search(r"const FLAG_ELEMENTS = \{(.*?)\n\};", js, re.S).group(1)
     flag_sel = dict(re.findall(r"(\w+):\s*'([^']+)'", flag_block))
-    check("[fixture] every server flag is in the page's flag map",
+    check("[page] every server flag is in the page's flag map",
           sorted(set(A.FLAGS) - set(flag_sel)), [])
-    check("[fixture] and the map names no flag the server does not send",
+    check("[page] and the map names no flag the server does not send",
           sorted(set(flag_sel) - set(A.FLAGS)), [])
 
     # Two v0 flags name an element that is never drawn and never styled. Both are OFF,
     # so nothing is broken -- a flag that is off and has no element removes nothing --
-    # but v0's own check compares flag KEYS only, so it never noticed, and this build
-    # found it. `theme_bar_strip` is off by design (request R9's data is not in the
-    # JSON). `agency_copy`'s stated reason, "OFF until the v0.1 assistant exists", has
-    # now expired, and brief 2 §8.6 does not ask for it, so it is logged for Kunaal
-    # rather than turned on here. Naming them keeps the check honest AND catches any
-    # NEW dangling selector.
+    # but v0's own check compares flag KEYS only, so it never noticed, and build 2 found
+    # it. Both reasons are now stated where the flag is, and both are waiting on data
+    # rather than on code: `theme_bar_strip` on request R9's daily series, which is not
+    # in the JSON, and `agency_copy` on A5's agency-copy measurement, after which the
+    # note "May include shared agency copy" gets designed. v0 said that one was waiting
+    # for the v0.1 assistant, which was never what it was waiting for; corrected at C4.
+    # Naming the two keeps the check honest AND catches any NEW dangling selector.
     KNOWN_DEAD = {"theme_bar_strip", "agency_copy"}
     dangling = []
     for flag, selector in flag_sel.items():
@@ -3838,24 +3839,37 @@ def page_contract():
             seen = re.search(r'\[data-screen="(\w+)"\]', one)
             if seen and f'data-screen="{seen.group(1)}"' not in html:
                 dangling.append(flag)
-    check("[fixture] every flag selector matches something drawn, bar the two known dead",
+    check("[page] every flag selector matches something drawn, bar the two known dead",
           sorted(set(dangling) - KNOWN_DEAD), [])
-    check("[fixture] and the two known dead ones are still exactly those two",
+    check("[page] and the two known dead ones are still exactly those two",
           sorted(set(dangling) & KNOWN_DEAD), sorted(KNOWN_DEAD))
-    check("[fixture] both of which are off, so they remove nothing",
+    check("[page] both of which are off, so they remove nothing",
           [A.FLAGS[f] for f in sorted(KNOWN_DEAD)], [False, False])
+    # A dangling selector is only forgivable while the reason for it is written down
+    # next to the flag. The expired reason survived two builds because nothing read it.
+    flags_src = (ROOT / "src" / "p3_app.py").read_text()
+    for flag, waiting_on in (("theme_bar_strip", "not in the JSON"),
+                             ("agency_copy", "A5 (agency-copy measurement)")):
+        where = flags_src.index(f'"{flag}":')
+        # Both sides: one reason sits in a comment block above its flag, the other on
+        # the same line after it, and both are "next to the flag".
+        near = flags_src[max(0, where - 420):where + 220]
+        check(f"[page] and {flag} says what it is waiting for, next to the flag",
+              waiting_on in near, True)
+    check("[page] and agency_copy no longer blames the assistant, which has existed "
+          "since v0.1", "until the v0.1 assistant exists" in flags_src, False)
 
     used = set(re.findall(r"getElementById\('([\w-]+)'\)", js))
     in_html = set(re.findall(r'id="([\w-]+)"', html))
     built = set(re.findall(r"id:\s*'([\w-]+)'", js))
-    check("[fixture] every id the page looks up is in the shell or built by the page",
+    check("[page] every id the page looks up is in the shell or built by the page",
           sorted(used - in_html - built), [])
 
     screens = set(re.findall(r'data-screen="(\w+)"', html))
     handled = set(re.findall(r"S\.screen === '(\w+)'", js)) | {"today"}
-    check("[fixture] every nav item in the shell is a screen the page draws",
+    check("[page] every nav item in the shell is a screen the page draws",
           sorted(screens - handled), [])
-    check("[fixture] and Explore is one of them", "explore" in screens, True)
+    check("[page] and Explore is one of them", "explore" in screens, True)
 
 
 def main():
