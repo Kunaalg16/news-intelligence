@@ -1,14 +1,39 @@
-"""p3_store.py — Phase 3 · K3's tables in `data/intel.db` (K3 schema 1).
+"""p3_store.py — Phase 3 · K3's tables in `data/intel.db` (K3 schema 2).
   v0.1 1 Nov 2026 (K3 B1-2): the nine tables of K3 build brief 1 §B1-2, additive only.
+  v0.2 3 Nov 2026 (K3 B2-1): K3 schema 2 — the reader tables reshaped, eight tables added.
+
+THE ONE NON-ADDITIVE CHANGE (schema 1 → 2, and why it was allowed exactly once)
+  Schema 1's reader tables were never written to; reshaped once (brief 2 of 2 Nov 2026,
+  run 3 Nov); **additive-only applies from schema 2.** Four tables — `read_state`,
+  `boards`, `pins`, `feedback` — were built before K1's app said what it needed, and
+  held 0 rows on 3 Nov with no reader anywhere in `src/` outside K1's test double
+  (facts §2a). Reshaping an empty table with no readers costs nothing; reshaping one
+  with a single real row costs Kunaal his own data. So the window was used now and is
+  closed: `migrate_1_to_2` REFUSES to drop a table that holds rows, and says which one.
+  From schema 2 on, changes are additive only (§8c) — new tables, new columns, never a
+  rewrite — so an older build keeps working against a newer file.
 
 WHAT IT DOES
   Owns the K3 side of `data/intel.db`: creates its tables if they are missing, hands
-  back a connection, and says what it found. Nine tables in three groups (Q8):
-      records       visit_records        every visit's digest exactly as it was shown
-      caches        writeup_cache · story_so_far_cache        deletable, rebuildable
-      Kunaal's own  read_state · boards · pins · feedback · cost_log · viewer_prefs
+  back a connection, and says what it found. Seventeen tables in three groups (Q8):
+      records       visit_records   every visit's digest exactly as it was shown
+                    visits          one row per sitting, lightweight (schema 2)
+      caches        writeup_cache · story_so_far_cache · suggest_cache
+                    deletable, rebuildable — nothing is lost but money
+      Kunaal's own  read_state · keep_unread · follows · boards · pins · feedback ·
+                    cost_log · viewer_prefs · user_links · conversations · turns ·
+                    passage_sets
   K2's tables (`group_runs`, `groups`, `members`, `pairs`, `track_runs`, `links`) live
-  in the same file and are never read or written here.
+  in the same file and are never read or written here. Kunaal's own thread links go in
+  K3's `user_links`, NEVER in K2's `links` (contract R13).
+
+  Two records tables, on purpose. `visit_records` is one row per digest AS BUILT, with
+  the versions and knobs that explain it — written by the digest builder, for
+  reproducibility. `visits` is one row per SITTING — written on every page load, updated
+  in place inside the same sitting (30 min) so a reload does not reset "since last
+  visit". One row per digest and one row per sitting are different counts of different
+  things; the question "what did it say in October?" is answered by `visit_records`,
+  "when was I last here?" by `visits`.
 
 WHY
   The digest is built on open and must be reproducible afterwards: a visit record keeps
@@ -66,7 +91,7 @@ INTEL_DB = ROOT / "data" / "intel.db"
 
 # ---------------------------------------------------------------- KNOBS / versions
 
-K3_SCHEMA_VERSION = 1              # own row, `meta.k3_schema_version`; additive bumps only
+K3_SCHEMA_VERSION = 2              # own row, `meta.k3_schema_version`; additive from 2 on
 K3_SCHEMA_KEY = "k3_schema_version"
 
 # K2's row and tables. Listed to be left alone: the test checks their row counts are
@@ -76,14 +101,29 @@ K2_TABLES = ("group_runs", "groups", "members", "pairs", "track_runs", "links")
 
 # Deletable and rebuildable from news.db + the models (Q8b): they may be dropped to
 # save space or after a prompt change, and nothing is lost but money.
-CACHE_TABLES = ("writeup_cache", "story_so_far_cache")
+CACHE_TABLES = ("writeup_cache", "story_so_far_cache", "suggest_cache")
 
 # Kunaal's own data + the visit records: these join the backup routine (Q8b). A rebuild
 # cannot recreate them, because they are what he did, not what the pipeline computed.
-OWN_TABLES = ("visit_records", "read_state", "boards", "pins", "feedback", "cost_log",
-              "viewer_prefs")
+# `passage_sets` is here and not in CACHE_TABLES on purpose: a stored answer's citation
+# chips are drawn by reading its passage set back (contract v2.3), so deleting it would
+# turn every cited sentence of every old answer into an uncited one.
+OWN_TABLES = ("visit_records", "visits", "read_state", "keep_unread", "follows",
+              "boards", "pins", "feedback", "cost_log", "viewer_prefs", "user_links",
+              "conversations", "turns", "passage_sets")
 
 K3_TABLES = OWN_TABLES + CACHE_TABLES
+
+# The four tables reshaped once at schema 2 (see the header). `migrate_1_to_2` drops and
+# recreates these and NOTHING else: `visit_records`, both schema-1 caches, `cost_log`
+# (11 rows of real spend) and `viewer_prefs` (already the right shape) are never touched.
+RESHAPED_AT_2 = ("read_state", "boards", "pins", "feedback")
+
+# Closed sets, repeated here so a caller can check without parsing the DDL comments.
+CREATED_BY = ("app", "assistant", "claude_mcp")
+ITEM_TYPES = ("story", "article", "thread", "answer", "passage", "own_line")
+TARGET_KINDS = ("story", "thread_link", "writeup", "answer", "digest")
+VOTES = ("up", "down")
 
 SCHEMA = """
 -- `meta` is shared with K2; the DDL is identical to p3_group.py's, so this is a no-op
@@ -107,6 +147,19 @@ CREATE TABLE IF NOT EXISTS visit_records (
     writer_prompt TEXT,               -- write-up prompt version, NULL with --no-llm
     knobs TEXT                        -- JSON of the knob values used for this digest
 );
+
+-- One row per SITTING (schema 2). Re-opening the same digest inside
+-- `visit_same_sitting_minutes` (30) UPDATES this row instead of adding one, so a reload
+-- does not reset "since last visit"; `opened_story` is sticky (ORed in), because a
+-- sitting in which a story was opened stays one even if the next load opens none.
+CREATE TABLE IF NOT EXISTS visits (
+    visit_id TEXT PRIMARY KEY,        -- 'v_' + 12 hex
+    digest_ref TEXT,                  -- which digest was on screen ('latest' or a stem)
+    window TEXT,                      -- JSON: the digest's own window object
+    opened_story INTEGER NOT NULL DEFAULT 0,   -- 0 | 1, sticky within the sitting
+    at TEXT NOT NULL                  -- ISO time, updated within the same sitting
+);
+CREATE INDEX IF NOT EXISTS visits_at ON visits (at);
 
 -- ------------------------------------------------------------- caches (rebuildable)
 -- Keyed by content: fingerprint of the article set + which model + which prompt. A
@@ -134,40 +187,99 @@ CREATE TABLE IF NOT EXISTS story_so_far_cache (
     PRIMARY KEY (thread_id, fingerprint, model, prompt_version)
 );
 
--- ------------------------------------------------- Kunaal's own data (backed up)
--- Against text_hash, never a story id (Q8a).
-CREATE TABLE IF NOT EXISTS read_state (
-    text_hash TEXT PRIMARY KEY,
-    seen_at TEXT NOT NULL,
-    keep_unread INTEGER NOT NULL DEFAULT 0   -- 1 = "leave this marked unread"
+-- ---------------------------------------------- caches, part 2 (rebuildable)
+-- Suggest connections costs a Haiku call per press; keyed by content like the write-up
+-- cache, so pressing the button twice on an unchanged story is free.
+CREATE TABLE IF NOT EXISTS suggest_cache (
+    fingerprint TEXT NOT NULL,        -- fingerprint() over the story's text_hashes
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    suggestions TEXT NOT NULL,        -- JSON: the suggestions list as returned
+    verdict TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (fingerprint, model, prompt_version)
 );
 
+-- ------------------------------------------------- Kunaal's own data (backed up)
+-- Against text_hash, never a story id (Q8a): a story is only as stable as the last
+-- clustering run, a text_hash is forever. Where a story id is stored it is marked
+-- "at that moment" and is for the record only -- never the key anything is found by.
+--
+-- Closed sets (also in CREATED_BY / ITEM_TYPES / TARGET_KINDS / VOTES above):
+--   created_by  app | assistant | claude_mcp     who made the row; `claude_mcp` is the
+--                                               MCP server, so a pin Claude made is
+--                                               tellable from one Kunaal made
+--   item_type   story | article | thread | answer | passage | own_line
+--   target_kind story | thread_link | writeup | answer | digest
+--   vote        up | down          -- words, not +/-1: the app sends words (p3_app.py:362)
+
+-- Read is per ARTICLE and has one column: the time it was read. Schema 1's
+-- `keep_unread` flag lived here and is gone -- it was per article while the mark is per
+-- story, which is the `keep_unread` table below.
+CREATE TABLE IF NOT EXISTS read_state (
+    text_hash TEXT PRIMARY KEY,
+    read_at TEXT NOT NULL
+);
+
+-- "Leave these unread." Per story, with the article set AS IT WAS when the mark was
+-- made, because that is exactly what the mark means: THESE articles, leave them unread.
+CREATE TABLE IF NOT EXISTS keep_unread (
+    story_id TEXT PRIMARY KEY,        -- the story id at that moment
+    article_ids TEXT NOT NULL,        -- JSON: [text_hash, ...] held unread
+    set_at TEXT NOT NULL
+);
+
+-- "Tell me when this moves on." Keyed on the THREAD root, because following is about
+-- the future of a thread, not about today's article set -- but the article set is stored
+-- too, and is what re-attaches the follow after a re-clustering run: the thread holding
+-- most of `article_ids` is the same follow (contract R1; facts D1a).
+CREATE TABLE IF NOT EXISTS follows (
+    thread_id TEXT PRIMARY KEY,       -- K2's thread root id
+    story_id_at_follow TEXT,          -- the story id then, for the record only
+    article_ids TEXT NOT NULL,        -- JSON: [text_hash, ...] at follow time
+    followed_at TEXT NOT NULL
+);
+
+-- `last_used_at` is STORED, not derived from the pins: a board you opened and read but
+-- did not pin to has still been used, and deriving it from MAX(pins.created_at) would
+-- quietly change what the Boards screen's order means (facts D3).
 CREATE TABLE IF NOT EXISTS boards (
-    board_id TEXT PRIMARY KEY,
+    board_id TEXT PRIMARY KEY,        -- 'b_' + 12 hex
     name TEXT NOT NULL,
+    created_by TEXT NOT NULL,         -- CREATED_BY
     created_at TEXT NOT NULL,
+    last_used_at TEXT,                -- bumped by pin() and by opening the board
     note TEXT
 );
 
--- `article_ids` is the story's article set AT PIN TIME, so the pin re-attaches to
--- whichever story later holds those articles (Q8a).
+-- `payload` is the whole pinned thing as JSON (the double's shape); `article_ids` is the
+-- indexed path to the same hashes. They CAN disagree in principle, so they have one
+-- writer: `pin()` derives `article_ids` from `payload` in the same function, and nothing
+-- else writes either column (brief B2-1).
 CREATE TABLE IF NOT EXISTS pins (
-    pin_id TEXT PRIMARY KEY,
+    pin_id TEXT PRIMARY KEY,          -- 'p_' + 12 hex
     board_id TEXT,
-    article_ids TEXT NOT NULL,        -- JSON: [text_hash, ...] at pin time
-    story_id_at_pin TEXT,             -- the story id then, for the record only
-    pinned_at TEXT NOT NULL,
+    item_type TEXT NOT NULL,          -- ITEM_TYPES
+    payload TEXT NOT NULL,            -- JSON: the pinned thing (text or ids)
+    source TEXT,                      -- JSON: where it was pinned from (paper, date, page, ids)
+    article_ids TEXT NOT NULL,        -- JSON: [text_hash, ...], derived from payload
+    created_by TEXT NOT NULL,         -- CREATED_BY
+    created_at TEXT NOT NULL,
+    position INTEGER,                 -- order within the board
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS pins_board ON pins (board_id);
 
+-- `vote` is TEXT and checked by the database, because the app sends 'up' / 'down'
+-- (p3_app.py:362) and schema 1 stored +1 / -1: one side had to convert, and a mapping
+-- that exists in code can be got wrong in one direction only. Now there is no mapping.
 CREATE TABLE IF NOT EXISTS feedback (
-    feedback_id TEXT PRIMARY KEY,
-    target_type TEXT NOT NULL,        -- what was judged: 'story' | 'writeup' | 'headline' |
-                                      -- 'one_liner' | 'story_so_far' | 'answer' | 'digest'
+    feedback_id TEXT PRIMARY KEY,     -- 'f_' + 12 hex
+    target_kind TEXT NOT NULL,        -- TARGET_KINDS
+    target_id TEXT NOT NULL,          -- the id within that kind; list_feedback keys '<kind>:<id>'
     article_ids TEXT NOT NULL,        -- JSON: [text_hash, ...] at the time
-    vote INTEGER NOT NULL,            -- +1 or -1
-    why TEXT,
+    vote TEXT NOT NULL CHECK (vote IN ('up','down')),
+    note TEXT,                        -- schema 1 called this `why`
     at TEXT NOT NULL,
     visit_id TEXT                     -- which visit it came from, when known
 );
@@ -176,7 +288,8 @@ CREATE INDEX IF NOT EXISTS feedback_at ON feedback (at);
 -- Every paid call writes one row, before the daily cap is checked again.
 CREATE TABLE IF NOT EXISTS cost_log (
     at TEXT NOT NULL,
-    purpose TEXT NOT NULL,            -- 'writeup' | 'story_so_far' | 'answer' | ...
+    purpose TEXT NOT NULL,            -- 'writeup' | 'story_so_far' | 'ask' | 'think_harder' |
+                                      -- 'ask_background' | 'suggest'
     model TEXT NOT NULL,
     in_tokens INTEGER, out_tokens INTEGER,
     usd REAL,
@@ -185,10 +298,58 @@ CREATE TABLE IF NOT EXISTS cost_log (
 );
 CREATE INDEX IF NOT EXISTS cost_log_at ON cost_log (at);
 
+-- `value` is a JSON-encoded TEXT, always: get_pref/set_pref round-trip any JSON type,
+-- so the reader layer encodes on write and decodes on read (facts D7a). A plain string
+-- is stored as '"x"', not x -- otherwise a stored `false` comes back as the string
+-- "false", which is true. Today's cap override lives here under a dated key, with its
+-- presses (time and amount) as the log the contract asks for (v2.1 D2).
 CREATE TABLE IF NOT EXISTS viewer_prefs (
     key TEXT PRIMARY KEY,
-    value TEXT,
+    value TEXT,                       -- JSON-encoded
     set_at TEXT
+);
+
+-- Kunaal's OWN thread links (contract R13). Stored against text_hashes on BOTH ends,
+-- like pins, so a re-clustering run cannot orphan them. Never written into K2's `links`:
+-- K2's links are the judge's output, these are Kunaal's, and mixing them would make the
+-- judge's own evaluation unreadable.
+CREATE TABLE IF NOT EXISTS user_links (
+    link_id TEXT PRIMARY KEY,         -- 'ul_' + 12 hex
+    story_id TEXT,                    -- the open story then, for the record only
+    story_text_hashes TEXT NOT NULL,  -- JSON: [text_hash, ...] -- the "from" end
+    target_story_id TEXT,             -- the suggested story then, for the record only
+    target_text_hashes TEXT NOT NULL, -- JSON: [text_hash, ...] -- the "to" end
+    at TEXT NOT NULL
+);
+
+-- The ask pane's conversation, kept across app restarts until new_conversation().
+-- `summary` is the Haiku summary of the exchanges older than the last three (Q13).
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY, -- 'c_' + 12 hex
+    started_at TEXT NOT NULL,
+    summary TEXT,                     -- Haiku summary of older exchanges, or NULL
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS turns (
+    turn_id TEXT PRIMARY KEY,         -- 't_' + 12 hex
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL,               -- 'answer' | 'divider' | 'background'
+    payload TEXT NOT NULL,            -- JSON: the answer object, or the divider fields
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, at);
+
+-- The exact passages one answer's writer was allowed to read. Kept, not cached: a
+-- stored answer's citation chips are drawn by reading this set back after a restart
+-- (contract v2.3), and a cite that cannot be resolved is drawn as nothing, which makes
+-- a cited sentence look uncited. Think harder reuses its parent's set, so two answers
+-- can share one row.
+CREATE TABLE IF NOT EXISTS passage_sets (
+    passage_set_id TEXT PRIMARY KEY,  -- 'ps_' + 12 hex
+    text_hashes TEXT NOT NULL,        -- JSON: [text_hash, ...], one entry per article
+    passages TEXT NOT NULL,           -- JSON: the passages as fed to the writer
+    created_at TEXT NOT NULL
 );
 """
 
@@ -209,8 +370,56 @@ def fingerprint(items):
 
 # ------------------------------------------------------------------ connections
 
-def open_intel(path=INTEL_DB):
-    """Open intel.db, create any missing K3 table, and return the connection.
+def k3_version(con):
+    """The file's K3 schema number, or None when it has none yet.
+
+    Read BEFORE any DDL runs, because `CREATE TABLE IF NOT EXISTS` is silent about
+    whether it created anything: once the schema-2 statements have run, a schema-1 file
+    is indistinguishable from a new one by its table list alone. The version row is the
+    only thing that still knows.
+    """
+    if "meta" not in tables(con):
+        return None
+    row = con.execute("SELECT value FROM meta WHERE key=?", (K3_SCHEMA_KEY,)).fetchone()
+    return None if row is None else int(row[0])
+
+
+def migrate_1_to_2(con, quiet=False):
+    """The one non-additive step: drop and rebuild the four empty reader tables.
+
+    THE GUARD IS THE POINT. The reshape is free only while the tables are empty, so this
+    counts the rows first and REFUSES if any are there, naming the table. A migration
+    that silently drops a row it did not expect is worse than one that stops: Kunaal's
+    read state, boards, pins and votes cannot be recomputed from anything.
+
+    Nothing else is touched. `visit_records`, `writeup_cache`, `story_so_far_cache`,
+    `cost_log` (real spend) and `viewer_prefs` (already the right shape) are left exactly
+    as they are, and K2's six tables and K2's own schema row are never named here at all.
+    """
+    present = tables(con)
+    held = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in RESHAPED_AT_2 if t in present}
+    nonempty = {t: n for t, n in held.items() if n}
+    if nonempty:
+        rows = " · ".join(f"{t} {n} rows" for t, n in sorted(nonempty.items()))
+        sys.exit(f"REFUSED: K3 schema 1 → 2 reshapes {', '.join(RESHAPED_AT_2)}, and "
+                 f"{rows}. The free window closed the day the first real row was "
+                 f"written. Stop and ask Kunaal: the rows have to be migrated by hand, "
+                 f"or the reshape dropped.")
+    for t in RESHAPED_AT_2:
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    con.executescript(SCHEMA)
+    con.execute("UPDATE meta SET value=? WHERE key=?", (str(K3_SCHEMA_VERSION), K3_SCHEMA_KEY))
+    con.commit()
+    if not quiet:
+        print(f"intel.db: K3 schema 1 → {K3_SCHEMA_VERSION} · reshaped "
+              f"{', '.join(RESHAPED_AT_2)} (all empty) · added the schema-2 tables · "
+              f"K2 tables and K2's schema row untouched")
+    return [t for t in K3_TABLES if t not in present]
+
+
+def open_intel(path=INTEL_DB, quiet=False):
+    """Open intel.db, bring the K3 tables up to date, and return the connection.
 
     Idempotent: a second call creates nothing and changes nothing. K2's schema row is
     read for the report but never written, and a K2 version this code does not know is
@@ -219,21 +428,17 @@ def open_intel(path=INTEL_DB):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
-    con.executescript(SCHEMA)
-    row = con.execute("SELECT value FROM meta WHERE key=?", (K3_SCHEMA_KEY,)).fetchone()
-    if row is None:
-        con.execute("INSERT INTO meta VALUES (?, ?)", (K3_SCHEMA_KEY, str(K3_SCHEMA_VERSION)))
-        con.commit()
-    elif int(row[0]) > K3_SCHEMA_VERSION:
-        sys.exit(f"intel.db K3 schema {row[0]} is newer than this code "
+    found = k3_version(con)        # read before any DDL; see k3_version()
+    if found is not None and found > K3_SCHEMA_VERSION:
+        sys.exit(f"intel.db K3 schema {found} is newer than this code "
                  f"({K3_SCHEMA_VERSION}); update the code, do not downgrade the file")
-    elif int(row[0]) < K3_SCHEMA_VERSION:
-        # Additive only (§8c): the executescript above already added what was missing.
-        con.execute("UPDATE meta SET value=? WHERE key=?",
-                    (str(K3_SCHEMA_VERSION), K3_SCHEMA_KEY))
-        con.commit()
-        print(f"intel.db: K3 schema {row[0]} → {K3_SCHEMA_VERSION} (tables added; "
-              f"K2 tables and K2's schema row untouched)")
+    if found == 1:
+        migrate_1_to_2(con, quiet=quiet)
+        return con
+    con.executescript(SCHEMA)       # additive from schema 2 on (§8c)
+    if found is None:
+        con.execute("INSERT INTO meta VALUES (?, ?)", (K3_SCHEMA_KEY, str(K3_SCHEMA_VERSION)))
+    con.commit()
     return con
 
 
