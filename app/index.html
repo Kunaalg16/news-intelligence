@@ -47,15 +47,11 @@
   <section class="reading" id="reading" tabindex="-1" aria-label="Reading"></section>
 
   <!--
-    The assistant is v0.1. The brief says to show the rail collapsed and disabled rather
-    than hide it, so the pane it will live in is already part of the layout.
+    The assistant pane (v0.1). app.js fills it: the pane itself when the `assistant`
+    flag is on, and v0's collapsed, disabled rail when it is off -- so the layout has
+    no hole where the pane was.
   -->
-  <aside class="assistant-rail">
-    <button class="reset rail-button" type="button" disabled
-            aria-label="Assistant, version 0.1, not available yet">
-      <span class="rail-label">Assistant · v0.1</span>
-    </button>
-  </aside>
+  <aside class="assistant" id="assistant" aria-label="Assistant"></aside>
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

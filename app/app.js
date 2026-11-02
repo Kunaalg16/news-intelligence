@@ -19,6 +19,17 @@
 const S = {
   flags: {},
   knobs: {},
+  /* --- v0.1, the ask pane --- */
+  pane: 'open',                  /* open | collapsed | wide, remembered as a pref */
+  conversation: null,            /* {conversation_id, started_at, turns} */
+  scope: { story_id: null, text_hashes: [], filters: {} },
+  scopeLabel: null,              /* what a filters-only scope chip says */
+  results: {},                   /* answer_id -> its results event, this session only */
+  live: null,                    /* the answer being streamed right now */
+  sorts: {},                     /* answer_id -> 'relevance' | 'newest' */
+  folded: {},                    /* answer_id -> true once Think harder answered */
+  estimates: {},                 /* kind -> cost_usd, read once at boot */
+  reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
   screen: 'today',
   ref: 'latest',
   digest: null,
@@ -114,6 +125,31 @@ const api = {
     postJSON('/api/pref/' + encodeURIComponent(key), { value: value }),
   visit: (ref, window_, opened) =>
     postJSON('/api/visit', { digest_ref: ref, window: window_, opened_story: opened }),
+
+  /* --- v0.1 (brief 2 §5) --- */
+  search: (query) => getJSON('/api/search?' + query),
+  facets: () => getJSON('/api/facets'),
+  estimate: (kind, answerId) =>
+    getJSON('/api/estimate?kind=' + encodeURIComponent(kind)
+            + (answerId ? '&answer_id=' + encodeURIComponent(answerId) : '')),
+  conversation: () => getJSON('/api/conversation'),
+  newConversation: () => postJSON('/api/conversation/new', {}),
+  divider: (conversationId, storyId, headline) =>
+    postJSON('/api/conversation/divider', { conversation_id: conversationId,
+                                            story_id: storyId, headline: headline }),
+  background: (answerId) => postJSON('/api/background', { answer_id: answerId }),
+  suggest: (storyId, hashes) =>
+    postJSON('/api/suggest', { story_id: storyId, text_hashes: hashes }),
+  raiseCap: () => postJSON('/api/cap/raise', {}),
+  addUserLink: (storyId, hashes, targetId, targetHashes) =>
+    postJSON('/api/user_link', { story_id: storyId, text_hashes: hashes,
+                                 target_story_id: targetId,
+                                 target_text_hashes: targetHashes }),
+  removeUserLink: (linkId) =>
+    postJSON('/api/user_link/' + encodeURIComponent(linkId), undefined, 'DELETE'),
+  userLinks: (hashes) =>
+    getJSON('/api/user_links?' + (hashes || []).map(
+      (h) => 'hashes=' + encodeURIComponent(h)).join('&')),
 };
 
 /* ------------------------------------------------------------------- building DOM */
@@ -202,9 +238,15 @@ function paperCode(paper) {
 
 /* "1 article from 1 paper", never "1 articles from 1 papers". The wording rule of §7 is
    that a paper is a newspaper and an article is one piece, so both are counted out loud
-   wherever both matter -- which makes getting the singular right unavoidable. */
+   wherever both matter -- which makes getting the singular right unavoidable.
+
+   v0 added a bare "s", which was right for every word it counted (article, paper, day).
+   The pane counts STORIES, and "9 storys" was on the screen until a check caught it, so
+   the consonant-then-y rule is here now: story -> stories, while day -> days. */
 function count(n, word) {
-  return n + ' ' + word + (n === 1 ? '' : 's');
+  if (n === 1) return n + ' ' + word;
+  const plural = /[^aeiou]y$/.test(word) ? word.slice(0, -1) + 'ies' : word + 's';
+  return n + ' ' + plural;
 }
 
 function money(usd) {
@@ -1411,6 +1453,7 @@ function render() {
   renderHeader();
   renderDrawer();
   renderReading();
+  renderAssistant();
 }
 
 /* Opening a story: the read-on-leave rule and the rest of the reader's actions arrive
@@ -1445,6 +1488,9 @@ async function openStory(storyId) {
     const pref = await api.pref(ssfKey);
     S.prefs[ssfKey] = pref ? pref.value : null;
   }
+  /* The pane's scope follows the open story, and puts a divider in when the story
+     changes under a conversation that already has turns (§8.3 state 7). */
+  if (story && S.flags.assistant) await paneStoryOpened(story);
 
   render();
   document.getElementById('reading').scrollTop = 0;
@@ -1468,11 +1514,701 @@ const FLAG_ELEMENTS = {
   theme_line: '.theme-line',
   theme_bar_strip: '.theme-bars',
   see_also_line: '.see-also',
+  assistant: '.pane',
+  think_harder: '.think-harder',
+  background_line: '.answer-background',
+  background_on_request: '.background-button',
+  cap_override: '.cap-allow',
   /* the cost header lives in the shell, so it is hidden rather than rebuilt; `hidden`
      takes it out of the layout, which is what "no empty gap" asks for */
   cost_display: '#cost-header:not([hidden])',
   agency_copy: '.agency-copy',
 };
+
+
+/* ======================================================= the ask pane (brief 2 §8.2)
+
+   Nine states (§8.3), and the thing that decides most of them is the answer itself:
+   its verdict, whether it has a background line, whether something else claims it as a
+   parent. So the pane is built from the conversation's turns rather than from a state
+   variable -- there is no "which state am I in" to get out of step with what is on
+   screen.
+
+   The streaming is the one piece of real machinery here. `/api/ask` sends one JSON
+   event per line and the page reads it with a stream reader, so a line can arrive
+   split across two chunks. ndjsonSplit is the whole of that: it is pure, and tested,
+   because a parser that assumes a chunk is a line works on a fast machine and loses
+   the last sentence of every answer on a slow one.
+*/
+
+const PANE_WIDTHS = { open: '360px', wide: '520px', collapsed: 'var(--rail-width)' };
+const PANE_RESULTS_SHOWN = 5;          /* §8.3 state 1 */
+
+/* §7's money format, which is NOT v0's: the pane's costs are fractions of a cent, and
+   v0's money() says "<1¢" for all of them, so every answer would cost the same at a
+   glance. v0's wording is untouched (it is read in the header, where the numbers are
+   bigger) and this is the fine one. Decision D3. */
+function moneyFine(usd) {
+  if (usd === null || usd === undefined) return '';
+  if (!usd) return '0¢';
+  const cents = usd * 100;
+  if (cents < 1) return cents.toFixed(2) + '¢';
+  if (usd < 1) return cents.toFixed(1) + '¢';
+  return '$' + usd.toFixed(2);
+}
+
+/* A chunk is not a line. Returns the whole events in what has arrived so far and the
+   half-line to carry into the next chunk. */
+function ndjsonSplit(buffer, chunk) {
+  const text = String(buffer || '') + String(chunk || '');
+  const pieces = text.split('\n');
+  const rest = pieces.pop();
+  const events = [];
+  for (const piece of pieces) {
+    if (!piece.trim()) continue;
+    events.push(JSON.parse(piece));
+  }
+  return { events: events, rest: rest };
+}
+
+/* §8.3 state 9, word for word. The hint is the second line; `retry` says whether the
+   button is there at all, and comes from the event, not from this table -- the double
+   and K3 both send `retryable`, and a reason this page has never heard of still gets
+   the fallback wording rather than an empty box. */
+const ERROR_WORDS = {
+  model_busy: ["Couldn't get an answer · the model service is busy",
+               'Usually clears within a minute.'],
+  no_network: ["Couldn't get an answer · no internet connection",
+               'Check the connection, then retry.'],
+  key_rejected: ["Couldn't get an answer · the API key was rejected",
+                 "Check the key file; retrying won't help."],
+  timeout: ["Couldn't get an answer · the model took too long",
+            'Retry usually works.'],
+  checks_failed: ["The answer didn't pass the source checks twice",
+                  'See what was found below, or try Think harder.'],
+  other: ["Couldn't get an answer · unexpected error",
+          'Retry; if it repeats, tell Claude Code.'],
+};
+
+function errorWording(event) {
+  const e = event || {};
+  const words = ERROR_WORDS[e.reason] || ERROR_WORDS.other;
+  return { first: words[0], hint: words[1], retry: e.retryable === true };
+}
+
+/* Is there room for one more call? The answer is also the wording on a greyed Think
+   harder, which is why it comes back as a pair rather than a boolean. */
+function roomFor(kind) {
+  const cost = S.cost || {};
+  const estimate = S.estimates[kind];
+  if (cost.cap_usd === null || cost.cap_usd === undefined) return { ok: true };
+  if (estimate === null || estimate === undefined) return { ok: true };
+  if ((cost.spent_usd || 0) + estimate > cost.cap_usd) {
+    return { ok: false, why: '· not enough left today' };
+  }
+  return { ok: true };
+}
+
+function atCap() {
+  const cost = S.cost || {};
+  if (cost.cap_usd === null || cost.cap_usd === undefined) return false;
+  return !roomFor('ask').ok;
+}
+
+/* Every hash the page can turn into a chip: the open digest's own rows, plus the
+   articles of any results still in memory. After a reload the results are gone (D12)
+   and a cite whose row is not in the digest simply has no chip, rather than a chip
+   that says nothing. */
+function paneHashes() {
+  const map = new Map();
+  for (const story of stories()) {
+    for (const row of ((story.coverage && story.coverage.rows) || [])) {
+      map.set(row.text_hash, row);
+    }
+  }
+  for (const result of Object.values(S.results)) {
+    for (const row of ((result && result.stories) || [])) {
+      for (const art of (row.articles || [])) {
+        if (!map.has(art.text_hash)) map.set(art.text_hash, art);
+      }
+    }
+  }
+  return map;
+}
+
+/* --------------------------------------------------------------- the scope chips */
+
+/* What the question is being asked OF. The open story is one chip; a selection from
+   Explore is one chip saying how many; each filter is its own. Removing a chip removes
+   it from the scope, which is the only way back to the whole archive. */
+function scopeChips(scope, label) {
+  const s = scope || {};
+  const chips = [];
+  if (s.story_id && s.headline) chips.push({ key: 'story', text: s.headline });
+  const filters = s.filters || {};
+  if (filters.story_ids && filters.story_ids.length) {
+    chips.push({ key: 'story_ids',
+                 text: label || count(filters.story_ids.length, 'story') });
+  }
+  for (const [name, value] of Object.entries(filters)) {
+    if (name === 'story_ids' || name === 'text_hashes') continue;
+    const words = Array.isArray(value) ? value.join(', ') : String(value);
+    if (!words) continue;
+    chips.push({ key: name, text: FILTER_WORDS[name] ? FILTER_WORDS[name] + words
+                                                     : words });
+  }
+  return chips;
+}
+
+const FILTER_WORDS = { date_from: 'from ', date_to: 'to ', papers: '', topics: '',
+                       kinds: '' };
+
+function dropScope(key) {
+  if (key === 'story') { S.scope.story_id = null; S.scope.headline = null;
+                         S.scope.text_hashes = []; }
+  else { delete S.scope.filters[key]; if (key === 'story_ids') S.scopeLabel = null; }
+  renderAssistant();
+  focusComposer();
+}
+
+function renderScope(into) {
+  clear(into);
+  for (const chip of scopeChips(S.scope, S.scopeLabel)) {
+    into.append(el('span', { class: 'scope-chip' },
+      el('span', { text: chip.text, title: chip.text }),
+      el('button', { class: 'reset', type: 'button',
+                     'aria-label': 'Remove ' + chip.text + ' from the question',
+                     onclick: () => dropScope(chip.key) }, '×')));
+  }
+}
+
+/* ------------------------------------------------------------------- the results */
+
+function markFor(story, answer) {
+  const cited = new Set((answer && answer.cited) || []);
+  const hit = (story.articles || []).some((a) => cited.has(a.text_hash));
+  return hit ? { word: 'CITED', cls: 'mark-cited' }
+             : { word: 'FOUND', cls: 'mark-found' };
+}
+
+function resultRow(story, answer) {
+  const mark = markFor(story, answer);
+  const best = (story.articles || [])[0];
+  return el('div', { class: 'result-row' },
+    el('button', { class: 'reset result-open', type: 'button',
+                   onclick: () => openStory(story.story_id) },
+      el('h4', { text: story.headline }),
+      el('p', { class: 'result-meta',
+                text: (best ? paperCode(best.paper) + ' '
+                              + (best.page_link ? best.page_link.label : '') + ' · ' : '')
+                      + dateShort(story.dates[story.dates.length - 1])
+                      + ' · ' + count(story.papers, 'paper') })),
+    el('span', { class: 'mark ' + mark.cls, text: mark.word }));
+}
+
+function resultsList(answerId, result, answer) {
+  if (!result || !result.stories || !result.stories.length) return null;
+  const sort = S.sorts[answerId] || result.sort || 'relevance';
+  const shown = result.stories.slice(0, PANE_RESULTS_SHOWN);
+  const section = el('section', { class: 'pane-results' });
+
+  const head = el('div', { class: 'results-head' },
+    el('p', { class: 'block-label',
+              text: 'Found · ' + count(result.total_stories, 'story') }));
+  const switcher = el('span', { class: 'sort-switch' });
+  for (const name of ['relevance', 'newest']) {
+    if (name === 'newest') switcher.append(' | ');
+    switcher.append(el('button', {
+      class: 'reset', type: 'button',
+      'aria-pressed': sort === name ? 'true' : 'false',
+      disabled: name === 'relevance' && !result.query ? true : null,
+      onclick: () => resortResults(answerId, name),
+    }, name === 'relevance' ? 'Relevance' : 'Newest'));
+  }
+  head.append(switcher);
+  section.append(head);
+  for (const story of shown) section.append(resultRow(story, answer));
+
+  if (result.total_stories > shown.length) {
+    section.append(el('button', {
+      class: 'reset action', type: 'button',
+      onclick: () => openExploreFrom(result),
+    }, 'Show all ' + result.total_stories + ' in Explore'));
+  }
+  return section;
+}
+
+async function resortResults(answerId, sort) {
+  const result = S.results[answerId];
+  if (!result) return;
+  S.sorts[answerId] = sort;
+  const again = await api.search(searchQueryString(result.query, result.filters, sort));
+  S.results[answerId] = again;
+  renderAssistant();
+}
+
+function searchQueryString(query, filters, sort, limit) {
+  const bits = ['q=' + encodeURIComponent(query || '')];
+  if (sort) bits.push('sort=' + encodeURIComponent(sort));
+  if (limit) bits.push('limit=' + String(limit));
+  for (const [name, value] of Object.entries(filters || {})) {
+    const key = name === 'text_hashes' ? 'hashes' : name;
+    for (const one of (Array.isArray(value) ? value : [value])) {
+      bits.push(key + '=' + encodeURIComponent(one));
+    }
+  }
+  return bits.join('&');
+}
+
+/* ------------------------------------------------------------------ one answer */
+
+function answerPinButton(answer) {
+  return pinControl('answer', () => ({
+    payload: { answer_id: answer.answer_id, question: answer.question,
+               sentences: answer.sentences, cited: answer.cited, model: answer.model },
+    source: { conversation_id: answer.conversation_id },
+  }));
+}
+
+function sampleTag() {
+  return el('span', { class: 'fixture-tag', text: 'sample data' });
+}
+
+/* The same block, with the label the state calls for: an answer that found nothing
+   says the background is not in the archive (state 6), one that found something says
+   it is not from the papers (state 2). */
+function backgroundBlock(answer) {
+  if (!S.flags.background_line || !answer.background) return null;
+  return el('div', { class: 'answer-background' },
+    el('p', { class: 'block-label',
+              text: answer.verdict === 'empty' ? 'Not in the archive · background'
+                                               : 'Background · not from your papers' }),
+    el('p', { text: answer.background }));
+}
+
+async function askBackground(answerId) {
+  const got = await api.background(answerId);
+  const answer = answerById(answerId);
+  if (answer) answer.background = got.text;
+  S.cost = await api.cost();
+  renderAssistant();
+}
+
+function answerById(answerId) {
+  for (const turn of ((S.conversation && S.conversation.turns) || [])) {
+    if (turn.kind === 'answer' && turn.answer.answer_id === answerId) return turn.answer;
+  }
+  return null;
+}
+
+function actionsRow(answer) {
+  const none = answer.verdict === 'empty';
+  const row = el('div', { class: 'answer-actions' });
+  /* An empty answer cost nothing because no model was asked, and saying "Haiku · 0¢"
+     would imply one was (§8.3 state 5). */
+  row.append(el('span', { class: 'answer-cost',
+                          text: none ? 'no model call · 0¢'
+                                     : (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
+                                       + ' · ' + moneyFine(answer.cost_usd) }));
+  if (answer.fixture) row.append(sampleTag());
+
+  if (S.flags.think_harder && answer.model === 'haiku' && answer.verdict !== 'empty') {
+    const room = roomFor('think_harder');
+    row.append(el('button', {
+      class: 'reset think-harder', type: 'button',
+      disabled: room.ok ? null : true,
+      onclick: () => runThinkHarder(answer.answer_id),
+    }, 'Think harder · ≈ ' + moneyFine(S.estimates.think_harder)
+       + (room.ok ? '' : ' ' + room.why)));
+  }
+
+  if (S.flags.background_on_request && !answer.background) {
+    row.append(el('button', {
+      class: 'reset action background-button', type: 'button',
+      onclick: () => askBackground(answer.answer_id),
+    }, none ? 'Answer from background knowledge'
+            : 'Background · ≈ ' + moneyFine(S.estimates.background)));
+  }
+
+  row.append(answerPinButton(answer));
+  return row;
+}
+
+/* States 2, 4, 5 and 6 are all this function: what differs is the note above the
+   sentences and whether there are any. */
+function answerTurn(answer, opts) {
+  const o = opts || {};
+  const byHash = paneHashes();
+  const block = el('div', { class: 'pane-turn' });
+  if (!o.noQuestion) {
+    block.append(el('p', { class: 'pane-you', text: 'You · ' + answer.question }));
+  }
+
+  if (o.folded) {
+    block.append(el('button', {
+      class: 'reset answer-folded', type: 'button',
+      'aria-expanded': 'false',
+      onclick: () => { S.folded[answer.answer_id] = false; renderAssistant(); },
+    }, '▸ Haiku answer · ' + moneyFine(answer.cost_usd)));
+    return block;
+  }
+
+  if (answer.verdict === 'empty') {
+    block.append(el('p', { class: 'answer-none' },
+      el('strong', { text: 'Not in your papers' }),
+      ' · searched ' + count((S.results[answer.answer_id] || {}).searched_days
+                             || answer.searched_days || 0, 'day')));
+    if (answer.closest && answer.closest.length) {
+      block.append(el('p', { class: 'block-label', text: 'Closest stories' }));
+      block.append(el('ul', { class: 'closest' }, answer.closest.map((story) =>
+        el('li', {},
+          el('button', { class: 'reset', type: 'button',
+                         onclick: () => openStory(story.story_id) }, story.headline),
+          el('span', { class: 'when',
+                       text: ' · ' + dateShort(story.dates[story.dates.length - 1]) })))));
+    }
+  } else {
+    if (answer.verdict === 'thin') {
+      block.append(el('p', { class: 'answer-weak',
+                             text: 'Weak match · ' + count(answer.found_count,
+                                                           'article') + ' found' }));
+    }
+    const text = el('div', { class: 'answer-text' });
+    for (const sentence of (answer.sentences || [])) {
+      text.append(el('p', {}, sentence.text, ' ',
+                     chipsFor(sentence.cites, byHash)));
+    }
+    block.append(text);
+  }
+
+  const back = backgroundBlock(answer);
+  if (back) block.append(back);
+  block.append(actionsRow(answer));
+
+  if (!o.noResults) {
+    const list = resultsList(answer.answer_id, S.results[answer.answer_id], answer);
+    if (list) block.append(list);
+  }
+  return block;
+}
+
+/* §8.3 state 3: "SONNET · SAME 8 PASSAGES". The count is the parent's passage set --
+   how many articles the first answer was allowed to cite -- which is the whole claim
+   Think harder makes: the same passages, read better. With the results gone after a
+   reload (D12) there is no number to show, and the label says "the same passages"
+   rather than an invented one. */
+function sonnetLabel(answer) {
+  const parent = S.results[answer.parent_answer_id];
+  if (!parent) return 'Sonnet · the same passages';
+  const passages = (parent.stories || [])
+    .reduce((n, s) => n + (s.articles || []).length, 0);
+  return 'Sonnet · same ' + count(passages, 'passage');
+}
+
+/* ------------------------------------------------------------------ the streaming */
+
+async function streamAnswer(url, body, onEvent) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    onEvent({ type: 'error', code: 'model_error', reason: 'other', retryable: true });
+    return;
+  }
+  const reader = response.body.getReader();
+  const decode = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const step = await reader.read();
+    if (step.done) break;
+    const split = ndjsonSplit(buffer, decode.decode(step.value, { stream: true }));
+    buffer = split.rest;
+    for (const event of split.events) onEvent(event);
+  }
+  const last = ndjsonSplit(buffer, '\n');
+  for (const event of last.events) onEvent(event);
+}
+
+function liveTurn() {
+  const live = S.live;
+  if (!live) return null;
+  const byHash = paneHashes();
+  const block = el('div', { class: 'pane-turn' });
+  block.append(el('p', { class: 'pane-you', text: 'You · ' + live.question }));
+
+  if (live.error) {
+    const words = errorWording(live.error);
+    const box = el('div', { class: 'pane-error' },
+      el('p', { class: 'error-first', text: words.first }),
+      el('p', { class: 'error-hint', text: words.hint }));
+    if (words.retry) {
+      box.append(el('button', { class: 'reset action', type: 'button',
+                                onclick: () => askNow(live.question) }, 'Retry'));
+    }
+    block.append(box);
+  } else {
+    const text = el('div', { class: 'answer-text' });
+    for (const sentence of live.sentences) {
+      text.append(el('p', {}, sentence.text, ' ', chipsFor(sentence.cites, byHash)));
+    }
+    text.append(el('span', { class: 'answer-caret', 'aria-hidden': 'true' }));
+    block.append(text);
+  }
+
+  if (live.results) {
+    const list = resultsList('live', live.results, null);
+    if (list) block.append(list);
+  }
+  return block;
+}
+
+async function askNow(question, options) {
+  const o = options || {};
+  if (!question || !question.trim()) return;
+  const scope = { story_id: S.scope.story_id, text_hashes: S.scope.text_hashes || [],
+                  filters: S.scope.filters || {} };
+  S.live = { question: question, sentences: [], results: null, error: null };
+  renderAssistant();
+
+  await streamAnswer(o.url || '/api/ask',
+                     o.body || { question: question, scope: scope,
+                                 conversation_id: conversationId() },
+                     (event) => {
+    if (!S.live) return;
+    if (event.type === 'results') { S.live.results = event.search; }
+    else if (event.type === 'sentence') { S.live.sentences.push(event); }
+    else if (event.type === 'error') { S.live.error = event; }
+    else if (event.type === 'done') { S.live.answer = event.answer; }
+    renderAssistant();
+  });
+
+  const live = S.live;
+  S.live = null;
+  if (live && live.answer) {
+    if (live.results) S.results[live.answer.answer_id] = live.results;
+    if (live.parentOf) S.folded[live.parentOf] = true;
+  }
+  S.conversation = await api.conversation();
+  S.cost = await api.cost();
+  renderAssistant();
+}
+
+async function runThinkHarder(answerId) {
+  const parent = answerById(answerId);
+  S.live = { question: (parent ? parent.question : ''), sentences: [], results: null,
+             error: null, parentOf: answerId };
+  renderAssistant();
+  await streamAnswer('/api/think_harder', { answer_id: answerId }, (event) => {
+    if (!S.live) return;
+    if (event.type === 'sentence') S.live.sentences.push(event);
+    else if (event.type === 'error') S.live.error = event;
+    else if (event.type === 'done') S.live.answer = event.answer;
+    renderAssistant();
+  });
+  const live = S.live;
+  S.live = null;
+  if (live && live.answer) {
+    S.folded[answerId] = true;
+    S.results[live.answer.answer_id] = S.results[answerId];
+  }
+  S.conversation = await api.conversation();
+  S.cost = await api.cost();
+  renderAssistant();
+}
+
+function conversationId() {
+  return S.conversation ? S.conversation.conversation_id : null;
+}
+
+/* ------------------------------------------------------------------ the cap band */
+
+function capBand() {
+  if (!atCap()) return null;
+  const cost = S.cost || {};
+  const band = el('div', { class: 'cap-band' },
+    el('p', {}, el('strong', { text: 'Daily cap $' + (cost.cap_usd || 0).toFixed(2)
+                                     + ' reached' }),
+      ' · spent $' + (cost.spent_usd || 0).toFixed(2) + ' today'));
+  if (!S.flags.cap_override) return band;
+
+  const actions = el('div', { class: 'cap-actions' });
+  actions.append(el('button', {
+    class: 'reset cap-allow', type: 'button',
+    onclick: () => showCapConfirm(actions),
+  }, 'Allow $1 more today'));
+  actions.append(el('span', { class: 'cap-ends', text: 'Ends at midnight · logged' }));
+  band.append(actions);
+  return band;
+}
+
+/* In the page, never a browser dialog: confirm() cannot be styled, cannot be checked
+   for contrast, and freezes everything behind it. */
+function showCapConfirm(actions) {
+  const cost = S.cost || {};
+  clear(actions);
+  actions.append(el('span', { text: "Raise today's cap to $"
+                                    + ((cost.cap_usd || 0) + 1).toFixed(2) + '?' }));
+  actions.append(el('button', {
+    class: 'reset cap-allow', type: 'button',
+    onclick: async () => {
+      S.cost = await api.raiseCap();
+      renderAssistant();
+      focusComposer();
+    },
+  }, 'Yes, allow'));
+  actions.append(el('button', { class: 'reset action', type: 'button',
+                                onclick: () => renderAssistant() }, 'Cancel'));
+}
+
+/* ------------------------------------------------------------------ the whole pane */
+
+function paneWidth() {
+  return PANE_WIDTHS[S.pane] || PANE_WIDTHS.open;
+}
+
+async function setPane(which) {
+  S.pane = which;
+  document.documentElement.style.setProperty('--pane-width', paneWidth());
+  renderAssistant();
+  await api.setPref('pane', which);
+}
+
+function focusComposer() {
+  const input = document.getElementById('pane-input');
+  if (input && !input.disabled) input.focus();
+}
+
+function collapsedRail(label, onclick) {
+  return el('div', { class: 'pane-collapsed' },
+    el('button', {
+      class: 'reset rail-button', type: 'button',
+      disabled: onclick ? null : true,
+      'aria-label': onclick ? 'Open the assistant'
+                            : 'Assistant, version 0.1, not available yet',
+      onclick: onclick || null,
+    }, el('span', { class: 'rail-label', text: label })));
+}
+
+function renderAssistant() {
+  const pane = document.getElementById('assistant');
+  if (!pane) return;
+  clear(pane);
+  document.documentElement.style.setProperty('--pane-width', paneWidth());
+
+  if (!S.flags.assistant) {
+    pane.append(collapsedRail('Assistant · v0.1', null));
+    return;
+  }
+  if (S.pane === 'collapsed') {
+    pane.append(collapsedRail('Assistant', () => setPane('open')));
+    return;
+  }
+
+  const shell = el('div', { class: 'pane' });
+
+  const header = el('div', { class: 'pane-header' },
+    el('p', { class: 'pane-title', text: 'Assistant' }),
+    el('button', { class: 'reset', type: 'button',
+                   onclick: () => startNewConversation() }, 'New conversation'),
+    el('button', { class: 'reset', type: 'button',
+                   onclick: () => setPane(S.pane === 'wide' ? 'open' : 'wide') },
+      S.pane === 'wide' ? 'Narrow' : 'Widen'),
+    el('button', { class: 'reset', type: 'button',
+                   onclick: () => setPane('collapsed') }, 'Collapse'));
+  shell.append(header);
+
+  const chips = el('div', { class: 'pane-scope' });
+  renderScope(chips);
+  shell.append(chips);
+
+  const body = el('div', { class: 'pane-body' });
+  if (S.reloadDivider) {
+    body.append(el('p', { class: 'pane-divider',
+                          text: 'Conversation from ' + S.reloadDivider }));
+  }
+  for (const turn of ((S.conversation && S.conversation.turns) || [])) {
+    if (turn.kind === 'divider') {
+      body.append(el('p', { class: 'pane-divider',
+                            text: 'Now reading · ' + turn.headline }));
+    } else if (turn.kind === 'answer') {
+      const answer = turn.answer;
+      if (answer.parent_answer_id) {
+        body.append(el('p', { class: 'block-label sonnet-label',
+                              text: sonnetLabel(answer) }));
+        body.append(answerTurn(answer, { noQuestion: true, noResults: true }));
+      } else {
+        body.append(answerTurn(answer, { folded: Boolean(S.folded[answer.answer_id]) }));
+      }
+    }
+  }
+  const live = liveTurn();
+  if (live) body.append(live);
+  shell.append(body);
+
+  const band = capBand();
+  const foot = el('div', {});
+  if (band) foot.append(band);
+
+  const capped = atCap();
+  const composer = el('form', {
+    class: 'pane-composer',
+    onsubmit: (e) => {
+      e.preventDefault();
+      const input = document.getElementById('pane-input');
+      const question = input.value;
+      input.value = '';
+      askNow(question);
+    },
+  });
+  composer.append(el('input', {
+    id: 'pane-input', type: 'text', name: 'question', autocomplete: 'off',
+    'aria-label': 'Ask the assistant',
+    disabled: capped ? true : null,
+    placeholder: capped
+      ? 'Daily cap $' + ((S.cost || {}).cap_usd || 0).toFixed(2)
+        + ' reached · resumes tomorrow'
+      : (S.scope.story_id ? 'Ask about this story… ( / )'
+                          : 'Ask about your papers…'),
+  }));
+  composer.append(el('button', { class: 'reset ask-button', type: 'submit',
+                                 disabled: capped ? true : null }, 'Ask'));
+  foot.append(composer);
+  shell.append(foot);
+
+  pane.append(shell);
+}
+
+async function startNewConversation() {
+  await api.newConversation();
+  S.conversation = await api.conversation();
+  S.results = {};
+  S.folded = {};
+  S.reloadDivider = null;
+  renderAssistant();
+  focusComposer();
+}
+
+/* State 7 — opening a different story while the conversation has something in it puts
+   a divider in, so an answer is never read against the wrong story. */
+async function paneStoryOpened(story) {
+  const had = ((S.conversation && S.conversation.turns) || []).length;
+  const changing = S.scope.story_id && S.scope.story_id !== story.story_id;
+  S.scope.story_id = story.story_id;
+  S.scope.headline = story.headline.text;
+  S.scope.text_hashes = storyHashes(story);
+  if (had && changing) {
+    await api.divider(conversationId(), story.story_id, story.headline.text);
+    S.conversation = await api.conversation();
+  }
+}
+
+/* Placeholder until B7: the pane's "Show all N in Explore" needs the Explore screen. */
+function openExploreFrom(result) {
+  S.exploreFrom = { query: result.query, filters: result.filters };
+  if (typeof openExplore === 'function') openExplore(S.exploreFrom);
+}
 
 /* ================================================================= the keyboard
 
@@ -1493,7 +2229,7 @@ const KEYS = {
   p: 'pin',
   t: 'thread_view',
   '?': 'help',
-  /* "/" is deliberately unbound: it will focus the assistant, which is v0.1. */
+  '/': 'ask',          /* v0.1: focuses the pane's composer (§8.7) */
 };
 
 /* ⌘Z (⌃Z elsewhere) is the tenth key, and the only one that needs a modifier -- asked
@@ -1554,6 +2290,7 @@ function runKeyAction(action) {
     case 'keep_unread': clickAction('unread'); return;
     case 'follow': if (!clickAction('Follow')) clickAction('Following'); return;
     case 'pin': clickAction('Pin to board'); return;
+    case 'ask': focusComposer(); return;
     case 'thread_view': {
       if (!S.flags.graph_view) return;
       /* Seven stories of ten have no thread, and on the rest it is usually below the
@@ -1582,7 +2319,8 @@ const CHEAT_SHEET = [
   ['j', 'next story'], ['k', 'previous story'], ['o', 'open it'],
   ['Esc', 'back'], ['u', 'keep unread'], ['f', 'follow'],
   ['p', 'pin to a board'], ['t', 'timeline or graph'],
-  ['\u2318Z', 'undo the last pin, follow or keep unread'], ['?', 'this list'],
+  ['\u2318Z', 'undo the last pin, follow or keep unread'],
+  ['/', 'ask the assistant'], ['?', 'this list'],
 ];
 
 function toggleCheatSheet() {
@@ -1647,6 +2385,25 @@ async function boot() {
   const view = await api.pref('thread_view');
   S.prefs.thread_view = view ? view.value : null;
 
+  /* --- the ask pane (v0.1) ---------------------------------------------------
+     The conversation is read before the first render, because state 8 is what the
+     pane looks like on every reload: the kept conversation, with a divider saying
+     when it started. The estimates are read once, for the buttons that print their
+     own price; they are knobs on the double's side, not per-question numbers. */
+  if (S.flags.assistant) {
+    const panePref = await api.pref('pane');
+    if (panePref && PANE_WIDTHS[panePref.value]) S.pane = panePref.value;
+    S.conversation = await api.conversation();
+    if (S.conversation && (S.conversation.turns || []).length) {
+      S.reloadDivider = dayName(S.conversation.started_at.slice(0, 10)) + ' '
+                        + timeOfDay(S.conversation.started_at);
+    }
+    for (const kind of ['ask', 'think_harder', 'background', 'suggest']) {
+      const got = await api.estimate(kind);
+      S.estimates[kind] = got ? got.cost_usd : null;
+    }
+  }
+
   /* The visit is read BEFORE it is recorded: once this visit is stored it is itself the
      last one, so "since last visit" would always mean "since a moment ago" (D10). */
   const visit = await api.visit(S.ref, S.digest && S.digest.window, false);
@@ -1706,6 +2463,13 @@ async function boot() {
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
   paperFromPdf, seeAlsoPlan,
+  moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
+  atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
+  /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
+     the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
+     is the difference between checking that the nine states render and hoping. */
+  answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
+  backgroundBlock, resultRow, sonnetLabel, renderAssistant, collapsedRail,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
   keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render, remember, undoLast,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,

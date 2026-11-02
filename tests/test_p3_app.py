@@ -509,7 +509,9 @@ def routes():
 
         # --- flags ----------------------------------------------------------------
         f = A.flags()
-        check("all eleven feature flags are sent to the page", len(f["flags"]), 11)
+        # B1 added one flag to v0's ten; B5 adds five more (§8.6). The count is checked
+        # outright so a flag cannot be added without saying what it removes.
+        check("all sixteen feature flags are sent to the page", len(f["flags"]), 16)
         check("the theme bar strip is off, its data not being in the JSON (R9)",
               f["flags"]["theme_bar_strip"], False)
         check("the cost header is on", f["flags"]["cost_display"], True)
@@ -517,6 +519,10 @@ def routes():
         # --- B1 (brief 2 §8.1) ----------------------------------------------------
         check("[fixture] B1 · the printed see-also line is on",
               f["flags"]["see_also_line"], True)
+        check("[fixture] B5 · every v0.1 pane flag is on",
+              [f["flags"][k] for k in ("assistant", "think_harder", "background_line",
+                                       "background_on_request", "cap_override")],
+              [True] * 5)
         check("[fixture] B1 · Q3 B took the earlier-coverage knob off the page with it",
               sorted(f["knobs"]), ["paragraph_words"])
 
@@ -704,6 +710,106 @@ def routes():
               A.page().status_code, 200)
 
 
+JS_DOM = r"""
+/* A DOM small enough to fit in a test and real enough to build the pane with.
+
+   v0 left every DOM-building function to the eye, for want of a browser in the
+   sandbox. These eighty lines are the alternative: enough of `document` for
+   app.js's own `el()` to work, plus textOf / controlsOf to read back what was
+   built. It is not a browser -- no layout, no events, no CSS -- so it says
+   nothing about how the pane LOOKS. What it does say is that each of the nine
+   states builds without throwing and puts the brief's exact words on the screen,
+   which is acceptance check 3 and was a click list before. */
+function Node(tag) {
+  this.tagName = (tag || '').toUpperCase();
+  this.children = [];
+  this.attrs = {};
+  this.dataset = {};
+  this.style = { setProperty: function () {} };
+  this.className = '';
+  this.textContent = '';
+  this.hidden = false;
+  this.value = '';
+  this.disabled = false;
+}
+Node.prototype.append = function () {
+  for (var i = 0; i < arguments.length; i++) {
+    var kid = arguments[i];
+    if (kid === null || kid === undefined || kid === false) continue;
+    this.children.push(kid);
+  }
+};
+Node.prototype.appendChild = Node.prototype.append;
+Node.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+Node.prototype.getAttribute = function (k) { return this.attrs[k]; };
+Node.prototype.addEventListener = function () {};
+Node.prototype.removeChild = function (kid) {
+  this.children = this.children.filter(function (c) { return c !== kid; });
+};
+Object.defineProperty(Node.prototype, 'firstChild', {
+  get: function () { return this.children.length ? this.children[0] : null; },
+});
+Node.prototype.querySelector = function () { return null; };
+Node.prototype.querySelectorAll = function () { return []; };
+Node.prototype.scrollIntoView = function () {};
+Node.prototype.focus = function () {};
+Node.prototype.remove = function () {};
+
+function textOf(node) {
+  if (node === null || node === undefined || node === false) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  var out = node.textContent || '';
+  for (var i = 0; i < (node.children || []).length; i++) out += textOf(node.children[i]);
+  return out;
+}
+
+function classesOf(node, found) {
+  found = found || [];
+  if (node && node.className) found.push(node.className);
+  for (var i = 0; i < ((node && node.children) || []).length; i++) {
+    classesOf(node.children[i], found);
+  }
+  return found;
+}
+
+function controlsOf(node, found) {
+  found = found || [];
+  if (node && (node.tagName === 'BUTTON' || node.tagName === 'A'
+               || node.tagName === 'INPUT')) {
+    var text = textOf(node).trim();
+    var aria = (node.attrs['aria-label'] || '').trim();
+    var placeholder = (node.attrs.placeholder || '').trim();
+    found.push({
+      tag: node.tagName,
+      /* What a reader or a screen reader is given, in that order of preference. A
+         control with none of the three is the thing acceptance check 7 is looking for. */
+      label: text || aria || placeholder,
+      text: text, aria: aria, placeholder: placeholder,
+      type: node.attrs.type || null,
+      href: node.attrs.href || null,
+      disabled: Boolean(node.attrs.disabled !== undefined || node.disabled),
+    });
+  }
+  for (var i = 0; i < ((node && node.children) || []).length; i++) {
+    controlsOf(node.children[i], found);
+  }
+  return found;
+}
+
+var document = {
+  byId: {},
+  createElement: function (tag) { return new Node(tag); },
+  createTextNode: function (t) { var n = new Node('#text'); n.textContent = t; return n; },
+  getElementById: function (id) { return document.byId[id] || null; },
+  querySelector: function () { return null; },
+  querySelectorAll: function () { return []; },
+  addEventListener: function () {},
+  body: new Node('body'),
+  documentElement: new Node('html'),
+};
+"""
+
+
 JS_TEST = r"""
 load(ROOT + "/app/app.js");
 var fails = [], ran = 0;
@@ -841,8 +947,10 @@ Object.keys(NINE).forEach(function (key) {
   eq("and " + key + " does nothing while typing",
      APP.keyAction(key, {inField: true}), null);
 });
-eq("exactly nine plain keys are bound", Object.keys(APP.KEYS).length, 9);
-eq("the cheat sheet lists all ten, the nine plus undo", APP.CHEAT_SHEET.length, 10);
+// v0 bound nine plain keys and left "/" free for the assistant. §8.7 binds it now, so
+// there are ten, and the cheat sheet lists eleven (the ten plus undo).
+eq("exactly ten plain keys are bound", Object.keys(APP.KEYS).length, 10);
+eq("the cheat sheet lists all eleven, the ten plus undo", APP.CHEAT_SHEET.length, 11);
 
 // the tenth key: undo, the only one with a modifier
 eq("cmd-Z undoes", APP.keyAction("z", {meta: true}), "undo");
@@ -854,7 +962,12 @@ eq("and inside a text field cmd-Z stays the browser's own undo",
 eq("a modifier does not turn another key into a shortcut",
    APP.keyAction("f", {meta: true}), null);
 eq("nor does alt", APP.keyAction("j", {alt: true}), null);
-eq("slash is left unbound for the assistant", APP.keyAction("/", {}), null);
+eq("[fixture] slash now focuses the pane's composer (§8.7)",
+   APP.keyAction("/", {}), "ask");
+eq("[fixture] and does nothing while the reader is typing, composer included",
+   APP.keyAction("/", {inField: true}), null);
+eq("[fixture] a modifier does not turn slash into the shortcut",
+   APP.keyAction("/", {meta: true}), null);
 eq("an ordinary letter does nothing", APP.keyAction("z", {}), null);
 eq("and neither does a key that only looks like one",
    APP.keyAction("constructor", {}), null);
@@ -910,6 +1023,359 @@ eq("[fixture] two pages are two pointers and 'pages'",
 eq("[fixture] Q3 B · the page has no earlierCoverage function left",
    typeof APP.earlierCoverage, "undefined");
 
+
+// === B5 · the ask pane, nine states (brief 2 §8.3) ================================
+// Pass lines: every state below builds without throwing and carries the brief's own
+// words; the money format of §7; the stream parser of acceptance check 4; the six
+// error wordings of acceptance check 11; and "/" focuses the composer (check 5).
+
+// §7's money: "0.05¢" under a cent, "1.1¢" from a cent, "$1.02" from a dollar.
+// the plural rule, which the pane is the first thing to need
+eq("[fixture] a consonant then y pluralises to -ies", APP.count(9, "story"),
+   "9 stories");
+eq("[fixture] one of them stays singular", APP.count(1, "story"), "1 story");
+eq("[fixture] a vowel then y just takes an s", APP.count(3, "day"), "3 days");
+
+eq("[fixture] half a twentieth of a cent", APP.moneyFine(0.0005), "0.05¢");
+eq("[fixture] a background's three hundredths", APP.moneyFine(0.0003), "0.03¢");
+eq("[fixture] Think harder's 1.1 cents", APP.moneyFine(0.011), "1.1¢");
+eq("[fixture] a dollar and two cents", APP.moneyFine(1.02), "$1.02");
+eq("[fixture] nothing spent is a flat 0¢", APP.moneyFine(0), "0¢");
+eq("[fixture] and v0's own money() is untouched, still saying <1¢",
+   APP.money(0.0004), "<1¢");
+
+// Acceptance check 4 · a line split across two chunks is still one event
+var first = APP.ndjsonSplit("", '{"type":"results"}\n{"type":"sen');
+eq("[behaviour] the whole line is an event", first.events, [{type: "results"}]);
+eq("[behaviour] and the half line is carried", first.rest, '{"type":"sen');
+var second = APP.ndjsonSplit(first.rest, 'tence","text":"x"}\n');
+eq("[behaviour] which the next chunk completes",
+   second.events, [{type: "sentence", text: "x"}]);
+eq("[behaviour] leaving nothing behind", second.rest, "");
+eq("[fixture] a chunk with no newline at all yields nothing yet",
+   APP.ndjsonSplit("", '{"a":1}').events, []);
+eq("[fixture] blank lines are not events",
+   APP.ndjsonSplit("", '\n\n{"a":1}\n').events, [{a: 1}]);
+eq("[fixture] three events in one chunk all arrive",
+   APP.ndjsonSplit("", '{"a":1}\n{"a":2}\n{"a":3}\n').events.length, 3);
+
+// Acceptance check 11 · the six reasons, word for word
+var REASONS = {
+  model_busy: ["Couldn't get an answer · the model service is busy",
+               "Usually clears within a minute.", true],
+  no_network: ["Couldn't get an answer · no internet connection",
+               "Check the connection, then retry.", true],
+  key_rejected: ["Couldn't get an answer · the API key was rejected",
+                 "Check the key file; retrying won't help.", false],
+  timeout: ["Couldn't get an answer · the model took too long",
+            "Retry usually works.", true],
+  checks_failed: ["The answer didn't pass the source checks twice",
+                  "See what was found below, or try Think harder.", false],
+  other: ["Couldn't get an answer · unexpected error",
+          "Retry; if it repeats, tell Claude Code.", true],
+};
+Object.keys(REASONS).forEach(function (reason) {
+  var want = REASONS[reason];
+  var got = APP.errorWording({reason: reason, retryable: want[2]});
+  eq("[fixture] " + reason + " says its first line", got.first, want[0]);
+  eq("[fixture] " + reason + " says its hint", got.hint, want[1]);
+  eq("[fixture] " + reason + " offers Retry only when it is worth it",
+     got.retry, want[2]);
+});
+eq("[fixture] a reason the page has never heard of still gets words, not a blank",
+   APP.errorWording({reason: "sulking", retryable: true}).first,
+   REASONS.other[0]);
+eq("[fixture] and retryable, not the table, decides the button",
+   APP.errorWording({reason: "timeout", retryable: false}).retry, false);
+
+// --- the nine states, built ------------------------------------------------------
+var PS = APP.S;
+PS.flags = {assistant: true, think_harder: true, background_line: true,
+            background_on_request: true, cap_override: true, see_also_line: true};
+PS.cost = {spent_usd: 0.01, cap_usd: 0.5, override_usd: 0};
+PS.estimates = {ask: 0.0005, think_harder: 0.011, background: 0.0003, suggest: 0.0005};
+PS.digest = {stories: []};
+PS.results = {};
+PS.folded = {};
+PS.sorts = {};
+PS.scope = {story_id: null, text_hashes: [], filters: {}};
+
+function answerFixture(over) {
+  var base = {answer_id: "a1", conversation_id: "c1", parent_answer_id: null,
+    question: "what happened in Delhi?", model: "haiku",
+    model_id: "claude-haiku-5-5", verdict: "enough", found_count: 17,
+    sentences: [{text: "Sample answer · one.", cites: ["h1"]},
+                {text: "Sample answer, continued · two.", cites: ["h2"]}],
+    background: null, cited: ["h1", "h2"], found: ["s1"], closest: [],
+    passage_set_id: "ps_1", cost_usd: 0.0005, attempts: 1, drops: 0, fixture: true};
+  Object.keys(over || {}).forEach(function (k) { base[k] = over[k]; });
+  return base;
+}
+
+var resultsFixture = {query: "Delhi", filters: {}, sort: "relevance", verdict: "enough",
+  searched_days: 7, total_stories: 9, total_articles: 23,
+  stories: [1, 2, 3, 4, 5, 6].map(function (i) {
+    return {story_id: "s" + i, headline: "Story number " + i,
+            dates: ["2026-10-1" + (i % 5)], papers: 2, score: 2.0,
+            articles: [{text_hash: i === 1 ? "h1" : "x" + i, headline: "An article",
+                        paper: "Mint", date: "2026-10-1" + (i % 5), kind: "news",
+                        page_link: {pdf: "archive/x/y.pdf", pdf_page: 3,
+                                    label: "PDF p3", paper: "Mint"},
+                        snippet: "An article"}]};
+  })};
+
+// State 2 · answer done
+var state2 = APP.answerTurn(answerFixture(), {});
+eq("[fixture] state 2 · the question is yours, in ochre",
+   textOf(state2).indexOf("You · what happened in Delhi?"), 0);
+eq("[fixture] state 2 · both sentences are there",
+   textOf(state2).indexOf("Sample answer, continued · two.") > 0, true);
+eq("[fixture] state 2 · the cost line names the model and the money",
+   textOf(state2).indexOf("Haiku · 0.05¢") > 0, true);
+eq("[fixture] state 2 · Think harder prints its own estimate",
+   textOf(state2).indexOf("Think harder · ≈ 1.1¢") > 0, true);
+eq("[fixture] state 2 · and every fixture answer says it is sample data",
+   textOf(state2).indexOf("sample data") > 0, true);
+eq("[fixture] state 2 · every control in it is a real button with a label",
+   controlsOf(state2).filter(function (c) {
+     return c.tag !== "BUTTON" || !c.label; }), []);
+
+// State 1 · answering: the results list is there before the answer is
+PS.results.a1 = resultsFixture;
+var state1 = APP.answerTurn(answerFixture(), {});
+eq("[fixture] state 1 · the heading counts the stories found",
+   textOf(state1).indexOf("Found · 9 stories") > 0, true);
+eq("[fixture] state 1 · five story rows, no more",
+   classesOf(state1).filter(function (c) { return c === "result-row"; }).length, 5);
+eq("[fixture] state 1 · and an offer to see the rest in Explore",
+   textOf(state1).indexOf("Show all 9 in Explore") > 0, true);
+eq("[fixture] state 1 · the cited story is marked CITED, the rest FOUND",
+   [textOf(APP.resultRow(resultsFixture.stories[0], answerFixture())).indexOf("CITED") > 0,
+    textOf(APP.resultRow(resultsFixture.stories[1], answerFixture())).indexOf("FOUND") > 0],
+   [true, true]);
+eq("[fixture] the mark is decided by the answer's own cites",
+   [APP.markFor(resultsFixture.stories[0], answerFixture()).word,
+    APP.markFor(resultsFixture.stories[1], answerFixture()).word],
+   ["CITED", "FOUND"]);
+eq("[fixture] a browse cannot be sorted by relevance, so that switch is off",
+   controlsOf(APP.resultsList("a1", {query: "", filters: {}, sort: "newest",
+                                     total_stories: 2, stories: resultsFixture.stories},
+                              null))
+     .filter(function (c) { return c.label === "Relevance"; }).length, 1);
+var live = APP.liveTurn.call(null);
+
+// State 3 · Think harder: the Haiku answer folds to one line
+var folded = APP.answerTurn(answerFixture(), {folded: true});
+eq("[fixture] state 3 · the Haiku answer folds to one line with its cost",
+   textOf(folded).indexOf("▸ Haiku answer · 0.05¢") > 0, true);
+eq("[fixture] state 3 · and its sentences are gone while folded",
+   textOf(folded).indexOf("Sample answer · one.") > 0, false);
+eq("[fixture] state 3 · the Sonnet label names the passage count",
+   APP.sonnetLabel({parent_answer_id: "a1"}), "Sonnet · same 6 passages");
+eq("[fixture] state 3 · with the results gone, it claims no number",
+   APP.sonnetLabel({parent_answer_id: "nothing"}), "Sonnet · the same passages");
+
+// State 4 · weak match
+var weak = APP.answerTurn(answerFixture({verdict: "thin", found_count: 5}), {});
+eq("[fixture] state 4 · a thin answer says so above itself",
+   textOf(weak).indexOf("Weak match · 5 articles found") > 0, true);
+
+// State 5 · not in your papers
+var none = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 0,
+  searched_days: 7,
+  closest: [{story_id: "s9", headline: "The closest story", dates: ["2026-10-15"]},
+            {story_id: "s8", headline: "Another one", dates: ["2026-10-14"]},
+            {story_id: "s7", headline: "A third", dates: ["2026-10-13"]}]});
+delete PS.results.a1;
+var state5 = APP.answerTurn(none, {});
+eq("[fixture] state 5 · it says what it did not find, and how far it looked",
+   textOf(state5).indexOf("Not in your papers · searched 7 days") > 0, true);
+eq("[fixture] state 5 · the three closest stories are offered",
+   textOf(state5).indexOf("The closest story") > 0
+   && textOf(state5).indexOf("A third") > 0, true);
+eq("[fixture] state 5 · no model was asked, and the cost line says exactly that",
+   textOf(state5).indexOf("no model call · 0¢") > 0, true);
+eq("[fixture] state 5 · and the offer is background knowledge, not a cheap answer",
+   textOf(state5).indexOf("Answer from background knowledge") > 0, true);
+eq("[fixture] state 5 · Think harder is not offered on nothing",
+   textOf(state5).indexOf("Think harder") > 0, false);
+
+// State 6 · background on request
+var withBack = APP.backgroundBlock(answerFixture({verdict: "empty",
+  background: "Sample background paragraph."}));
+eq("[fixture] state 6 · an empty answer's background says it is not in the archive",
+   textOf(withBack).indexOf("Not in the archive · background"), 0);
+var matched = APP.backgroundBlock(answerFixture({background: "Sample background."}));
+eq("[fixture] state 2 · a matched answer's says it is not from your papers",
+   textOf(matched).indexOf("Background · not from your papers"), 0);
+eq("[fixture] background carries no chips, because it cites nothing",
+   classesOf(matched).filter(function (c) { return c === "chips"; }), []);
+eq("[fixture] check 13 · the Background button is on an answer with no line",
+   controlsOf(APP.actionsRow(answerFixture()))
+     .filter(function (c) { return c.label.indexOf("Background") === 0; }).length, 1);
+eq("[fixture] check 13 · and not on one that already has one",
+   controlsOf(APP.actionsRow(answerFixture({background: "x"})))
+     .filter(function (c) { return c.label.indexOf("Background") === 0; }).length, 0);
+
+// State 9 · the error, and the cap
+PS.live = {question: "q", sentences: [], results: null,
+           error: {reason: "key_rejected", retryable: false}};
+var errored = APP.liveTurn();
+eq("[fixture] state 9 · the reason is the first line",
+   textOf(errored).indexOf("the API key was rejected") > 0, true);
+eq("[fixture] state 9 · with no Retry, because retrying will not help",
+   controlsOf(errored).filter(function (c) { return c.label === "Retry"; }), []);
+PS.live.error = {reason: "timeout", retryable: true};
+eq("[fixture] state 9 · a retryable one offers Retry",
+   controlsOf(APP.liveTurn()).filter(function (c) { return c.label === "Retry"; })
+     .length, 1);
+PS.live = null;
+
+eq("[fixture] under the cap there is room to ask", APP.atCap(), false);
+eq("[fixture] and the cap band is not drawn", APP.capBand(), null);
+PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};
+eq("[fixture] check 10 · spent to the cap, there is no room", APP.atCap(), true);
+var band = APP.capBand();
+eq("[fixture] check 10 · the band says the cap and what was spent",
+   textOf(band).indexOf("Daily cap $0.50 reached · spent $0.50 today"), 0);
+eq("[fixture] check 10 · it offers a day's override, and says it ends at midnight",
+   [textOf(band).indexOf("Allow $1 more today") > 0,
+    textOf(band).indexOf("Ends at midnight · logged") > 0], [true, true]);
+eq("[fixture] at the cap Think harder greys with its reason",
+   APP.roomFor("think_harder").why, "· not enough left today");
+PS.cost = {spent_usd: 0.5, cap_usd: 1.5, override_usd: 1.0};
+eq("[fixture] check 10 · after the override there is room again",
+   [APP.atCap(), APP.capBand()], [false, null]);
+PS.cost = {spent_usd: 0.01, cap_usd: null, override_usd: 0};
+eq("[fixture] a digest with no cap knob has no cap to hit (v0 D1)",
+   APP.atCap(), false);
+PS.cost = {spent_usd: 0.01, cap_usd: 0.5, override_usd: 0};
+
+// The scope chips, and the widths
+eq("[fixture] the open story is one chip, each filter another",
+   APP.scopeChips({story_id: "s1", headline: "A headline",
+                   filters: {papers: ["Mint"], date_from: "2026-10-09"}})
+     .map(function (c) { return c.key + "=" + c.text; }),
+   ["story=A headline", "papers=Mint", "date_from=from 2026-10-09"]);
+eq("[fixture] a selection from Explore is one chip saying how many",
+   APP.scopeChips({filters: {story_ids: ["a", "b", "c"]}})[0].text, "3 stories");
+eq("[fixture] and a label given for it wins",
+   APP.scopeChips({filters: {story_ids: ["a"]}}, "these 4")[0].text, "these 4");
+eq("[fixture] the hashes of a scope are not a chip of their own",
+   APP.scopeChips({filters: {text_hashes: ["h1"]}}), []);
+eq("[fixture] no scope, no chips", APP.scopeChips({}), []);
+eq("[fixture] the three pane widths",
+   [APP.PANE_WIDTHS.open, APP.PANE_WIDTHS.wide, APP.PANE_WIDTHS.collapsed],
+   ["360px", "520px", "var(--rail-width)"]);
+eq("[fixture] five results shown in the pane, the rest in Explore",
+   APP.PANE_RESULTS_SHOWN, 5);
+eq("[fixture] a query string carries every filter, repeated for a list",
+   APP.searchQueryString("police", {papers: ["Mint", "The Hindu"],
+                                    date_from: "2026-10-09"}, "newest"),
+   "q=police&sort=newest&papers=Mint&papers=The%20Hindu&date_from=2026-10-09");
+eq("[fixture] and the hashes filter travels as 'hashes'",
+   APP.searchQueryString("", {text_hashes: ["h1"]}), "q=&hashes=h1");
+
+// --- the whole pane, and acceptance check 8 (a flag off removes its element) ------
+// The pane is rendered into a node the shim hands back from getElementById, exactly as
+// the browser would, so this is the pane itself and not a piece of it.
+
+document.byId.assistant = document.createElement("aside");
+PS.conversation = {conversation_id: "c1", started_at: "2026-11-02T09:30:00",
+  turns: [{kind: "answer", answer: answerFixture()},
+          {kind: "divider", story_id: "s2", headline: "ANOTHER STORY",
+           at: "2026-11-02T09:40:00"},
+          {kind: "answer", answer: answerFixture({answer_id: "a2",
+            question: "and then?", verdict: "thin", found_count: 4})}]};
+PS.reloadDivider = "Mon 9.30am";
+PS.pane = "open";
+
+function paneText() {
+  document.byId.assistant.children = [];
+  APP.renderAssistant();
+  return textOf(document.byId.assistant);
+}
+function paneClasses() {
+  document.byId.assistant.children = [];
+  APP.renderAssistant();
+  return classesOf(document.byId.assistant);
+}
+
+var whole = paneText();
+eq("[fixture] the pane names itself", whole.indexOf("Assistant"), 0);
+eq("[fixture] it offers a new conversation, widening and collapsing",
+   ["New conversation", "Widen", "Collapse"].filter(function (w) {
+     return whole.indexOf(w) < 0; }), []);
+eq("[fixture] state 8 · a reloaded conversation says when it started",
+   whole.indexOf("Conversation from Mon 9.30am") > 0, true);
+eq("[fixture] state 7 · the divider names the story now being read",
+   whole.indexOf("Now reading · ANOTHER STORY") > 0, true);
+eq("[fixture] both answers are in it",
+   whole.indexOf("what happened in Delhi?") > 0 && whole.indexOf("and then?") > 0, true);
+eq("[fixture] the composer invites a question about your papers",
+   controlsOf(document.byId.assistant).filter(function (c) {
+     return c.placeholder === "Ask about your papers…"; }).length, 1);
+PS.scope = {story_id: "s1", headline: "A headline", text_hashes: [], filters: {}};
+paneText();
+eq("[fixture] and about this story, with the key that focuses it, when one is open",
+   controlsOf(document.byId.assistant).filter(function (c) {
+     return c.placeholder === "Ask about this story… ( / )"; }).length, 1);
+eq("[fixture] the open story is a scope chip you can take off",
+   controlsOf(document.byId.assistant).filter(function (c) {
+     return c.aria === "Remove A headline from the question"; }).length, 1);
+
+eq("[fixture] check 7 · every control in the whole pane is a real labelled control",
+   controlsOf(document.byId.assistant).filter(function (c) {
+     return ["BUTTON", "INPUT", "A"].indexOf(c.tag) < 0 || !c.label; }), []);
+eq("[fixture] check 7 · and every button says it is a button",
+   controlsOf(document.byId.assistant).filter(function (c) {
+     return c.tag === "BUTTON" && !c.type; }), []);
+
+// collapsed and wide
+PS.pane = "collapsed";
+eq("[fixture] collapsed, the pane is a rail that opens it again",
+   [paneText(), controlsOf(document.byId.assistant).length], ["Assistant", 1]);
+eq("[fixture] and the collapsed rail is as wide as v0's", APP.paneWidth(),
+   "var(--rail-width)");
+PS.pane = "wide";
+eq("[fixture] widened, it offers to narrow instead",
+   [paneText().indexOf("Narrow") > 0, APP.paneWidth()], [true, "520px"]);
+PS.pane = "open";
+
+// Acceptance check 8 · each flag off removes its element, and the page still renders
+var PANE_FLAG_ELEMENTS = {think_harder: "think-harder",
+  background_line: "answer-background", background_on_request: "background-button",
+  cap_override: "cap-allow"};
+PS.results.a1 = resultsFixture;
+PS.conversation.turns[0].answer.background = "Sample background.";
+PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};
+Object.keys(PANE_FLAG_ELEMENTS).forEach(function (flag) {
+  var cls = PANE_FLAG_ELEMENTS[flag];
+  var on = paneClasses().filter(function (c) { return (c || "").indexOf(cls) >= 0; });
+  eq("[fixture] check 8 · " + flag + " on draws " + cls, on.length > 0, true);
+  PS.flags[flag] = false;
+  var off = paneClasses().filter(function (c) { return (c || "").indexOf(cls) >= 0; });
+  eq("[fixture] check 8 · " + flag + " off removes it completely", off, []);
+  eq("[fixture] check 8 · and the pane still renders without it",
+     paneText().indexOf("Assistant"), 0);
+  PS.flags[flag] = true;
+});
+PS.flags.assistant = false;
+eq("[fixture] check 8 · assistant off puts v0's disabled rail back, with no gap",
+   [paneClasses().filter(function (c) { return c === "pane"; }),
+    paneClasses().filter(function (c) { return c === "pane-collapsed"; }).length],
+   [[], 1]);
+eq("[fixture] check 8 · and that rail is disabled, as it was in v0",
+   [controlsOf(document.byId.assistant)[0].aria,
+    controlsOf(document.byId.assistant)[0].disabled],
+   ["Assistant, version 0.1, not available yet", true]);
+PS.flags.assistant = true;
+PS.cost = {spent_usd: 0.01, cap_usd: 0.5, override_usd: 0};
+PS.conversation = null;
+PS.reloadDivider = null;
+PS.scope = {story_id: null, text_hashes: [], filters: {}};
+PS.results = {};
+
 // every feature flag has to say what it takes off the page, or a flag can be added
 // that silently hides nothing (acceptance check 7)
 eq("every flag names the element it removes",
@@ -939,8 +1405,8 @@ def js_logic():
         script = Path(tmp) / "run.js"
         import p3_app as A
         flags = json.dumps(sorted(A.FLAGS))
-        script.write_text('var ROOT = "%s";\nvar FLAGS_FROM_SERVER = %s;\n%s'
-                          % (ROOT, flags, JS_TEST))
+        script.write_text('var ROOT = "%s";\nvar FLAGS_FROM_SERVER = %s;\n%s%s'
+                          % (ROOT, flags, JS_DOM, JS_TEST))
         done = subprocess.run([JSC, str(script)], capture_output=True, text=True,
                               timeout=60)
         out = (done.stdout or "").strip().splitlines()
@@ -1058,6 +1524,11 @@ MARK_PAIRS = [
     ("--red", "--page", "the today node and the follow-up line"),
     ("--olive", "--page", "the READ stamp's ground"),
     ("--ochre", "--page", "a pressed action's border"),
+    # v0.1, acceptance check 6: the pane's own marks and the borders in it
+    ("--mark", "--assistant-ground", "the pane's control borders and disabled text"),
+    ("--mark", "--chip-ground", "a disabled control inside the cap band"),
+    ("--ochre", "--assistant-ground", "the CITED mark's ground and Think harder"),
+    ("--page", "--ochre", "the CITED mark's own text on its ochre fill"),
 ]
 
 

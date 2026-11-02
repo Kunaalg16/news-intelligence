@@ -101,9 +101,15 @@ FLAGS = {
     "cost_display": True,          # the cost header; review after one week of real use
     "agency_copy": False,          # OFF until the v0.1 assistant exists
 
-    # v0.1, brief 2 §8.6. Q1 B's printed "see also" line is the only one this step adds;
-    # the rest arrive with the pane, Explore and the suggestions.
+    # --- v0.1, brief 2 §8.6 -------------------------------------------------
+    # Each one off removes its element completely; `assistant` off puts v0's disabled
+    # rail back, so the layout never has a hole where the pane was.
     "see_also_line": True,         # the "The paper also points to:" line above Coverage
+    "assistant": True,             # the whole ask pane
+    "think_harder": True,          # the Sonnet re-read button in an answer's actions
+    "background_line": True,       # the dashed "NOT FROM YOUR PAPERS" block
+    "background_on_request": True, # the Background button on an answer that has none
+    "cap_override": True,          # "Allow $1 more today" in the cap band
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,
