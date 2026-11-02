@@ -31,6 +31,7 @@ const S = {
   estimates: {},                 /* kind -> cost_usd, read once at boot */
   reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
   suggestions: {},               /* story_id -> its suggestion set, once asked for */
+  seeAlsoOpen: {},               /* story_id -> true while D1's fold is open; not a pref */
   userLinks: {},                 /* story_id -> the links the reader made out of it */
   pinnedStories: new Set(),      /* so a dark pin is dark again after a reload */
   pinIds: {},                    /* story_id -> pin_id, for unpinning from a dark pin */
@@ -961,6 +962,34 @@ function seeAlsoPlan(story) {
                    + ' on the same ' + (pages.length === 1 ? 'page' : 'pages') };
 }
 
+/* Decision D1 (2 Nov). "8 stories on the same page" was a tooltip on the PDF link: a
+   `title=` attribute, which no touch device shows, no screen reader reads reliably, and
+   nothing in the suite could check. It is now a fold -- a real <button> with
+   aria-expanded -- and the tooltip is gone.
+
+   The eight headlines open as plain muted text, one per line, and NOT as links: every
+   one of them is below the digest's top N and cannot be opened yet. A link that does
+   nothing is worse than a line of text that was never offered as one.
+
+   The fold is not remembered. It is a glance at what else was on that page, not a view
+   the reader sets up and comes back to, so it closes with the story. */
+function seeAlsoFold(plan, storyId) {
+  const open = Boolean(S.seeAlsoOpen[storyId]);
+  const fold = el('span', { class: 'see-also-fold' });
+  fold.append(el('button', {
+    class: 'reset see-also-toggle', type: 'button',
+    'aria-expanded': open ? 'true' : 'false',
+    onclick: () => { S.seeAlsoOpen[storyId] = !open; render(); },
+  }, plan.tail));
+  if (open) {
+    const all = [];
+    for (const page of plan.pages) for (const head of page.headlines) all.push(head);
+    fold.append(el('span', { class: 'see-also-heads' },
+      all.map((head) => el('span', { class: 'see-also-head', text: head }))));
+  }
+  return fold;
+}
+
 function seeAlso(story) {
   if (!S.flags.see_also_line) return null;
   const plan = seeAlsoPlan(story);
@@ -968,10 +997,13 @@ function seeAlso(story) {
   const bits = [];
   plan.pages.forEach((page, i) => {
     if (i) bits.push(' · ');
-    bits.push(el('a', { href: pdfHref(page.link), target: '_blank', rel: 'noopener',
-                        title: page.headlines.join('\n') || null }, page.text));
+    bits.push(el('a', { href: pdfHref(page.link), target: '_blank', rel: 'noopener' },
+                 page.text));
   });
-  if (plan.tail) bits.push(' · ' + plan.tail);
+  if (plan.tail) {
+    bits.push(' · ');
+    bits.push(seeAlsoFold(plan, story.story_id));
+  }
   return el('p', { class: 'see-also' }, 'The paper also points to: ', bits);
 }
 
@@ -1690,6 +1722,60 @@ function paneHashes() {
   return map;
 }
 
+/* --------------------------------------------------- what a question was asked OF
+
+   Q3 (b) and (c), decided 2 Nov. The pane used to say "Not in your papers" whatever the
+   question had been asked of, so a question about ONE open story, answered from that
+   one story, reported on the whole archive. Seen on screen at C2: with the GST story
+   open, "police" said "Not in your papers · searched 1 day" while the archive held four
+   police stories.
+
+   These two read the ANSWER's own stored scope, not `S.scope`, which has moved on by
+   the time a reloaded conversation is drawn. `ask()` stores `{story_id, text_hashes,
+   filters}` and `_scope_filters` copies an open story's id into `filters.story_ids`, so
+   a story scope can arrive either way and both are counted. */
+function scopeStoryCount(scope) {
+  const s = scope || {};
+  const ids = ((s.filters || {}).story_ids) || [];
+  if (ids.length) return ids.length;
+  return s.story_id ? 1 : 0;
+}
+
+/* Any filter that is not the story scope itself. `text_hashes` is not one: it travels
+   with a story scope and is never a narrowing the reader chose on its own. */
+function scopeHasFilters(scope) {
+  const filters = (scope || {}).filters || {};
+  return Object.keys(filters).some((name) => {
+    if (name === 'story_ids' || name === 'text_hashes') return false;
+    const value = filters[name];
+    return Array.isArray(value) ? value.length > 0
+                                : value !== null && value !== undefined && value !== '';
+  });
+}
+
+/* Q3 (c): was this question narrowed at all? The way out is offered only when there is
+   something to get out of. */
+function scopeIsNarrowed(scope) {
+  return scopeStoryCount(scope) > 0 || scopeHasFilters(scope);
+}
+
+/* Q3 (b): the two wordings, by scope. "Not in your papers" is the only one that claims
+   anything about the archive, and it is now said only when the archive is what was
+   searched. */
+function scopeWords(scope) {
+  const n = scopeStoryCount(scope);
+  if (n === 1) return { none: 'Not in this story', weak: 'Weak match in this story' };
+  if (n > 1) {
+    return { none: 'Not in these ' + n + ' stories',
+             weak: 'Weak match in these ' + n + ' stories' };
+  }
+  if (scopeHasFilters(scope)) {
+    return { none: 'Not in your papers for these filters',
+             weak: 'Weak match in your papers for these filters' };
+  }
+  return { none: 'Not in your papers', weak: 'Weak match' };
+}
+
 /* --------------------------------------------------------------- the scope chips */
 
 /* What the question is being asked OF. The open story is one chip; a selection from
@@ -1879,9 +1965,32 @@ function answerById(answerId) {
   return null;
 }
 
+/* Q3 (c) · the way out. Take every chip off the scope and ask the same question again
+   as a new turn -- a new turn, not a rewrite of this one, because the two answers are
+   about different things and the narrow one is still the answer to what was asked.
+   `askNow` builds its scope from `S.scope`, so clearing that first is the whole job. */
+async function askAllPapers(question) {
+  S.scope.story_id = null;
+  S.scope.headline = null;
+  S.scope.text_hashes = [];
+  S.scope.filters = {};
+  S.scopeLabel = null;
+  renderAssistant();
+  await askNow(question);
+}
+
 function actionsRow(answer) {
   const none = answer.verdict === 'empty';
   const row = el('div', { class: 'answer-actions' });
+  /* First in the row, and only when there is a scope to drop: on an answer that found
+     nothing or almost nothing, widening the question is the likeliest next move, and on
+     an unscoped answer there is nothing to widen to. */
+  if ((none || answer.verdict === 'thin') && scopeIsNarrowed(answer.scope)) {
+    row.append(el('button', {
+      class: 'reset action ask-all-papers', type: 'button', 'data-you': 'true',
+      onclick: () => askAllPapers(answer.question),
+    }, 'Ask all papers instead'));
+  }
   /* An empty answer cost nothing because no model was asked, and saying "Haiku · 0¢"
      would imply one was (§8.3 state 5). */
   row.append(el('span', { class: 'answer-cost',
@@ -1940,7 +2049,7 @@ function answerTurn(answer, opts) {
                  || (S.results[answer.answer_id] || {}).searched_days
                  || null;
     block.append(el('p', { class: 'answer-none' },
-      el('strong', { text: 'Not in your papers' }),
+      el('strong', { text: scopeWords(answer.scope).none }),
       days ? ' · searched ' + count(days, 'day') : ''));
     if (answer.closest && answer.closest.length) {
       block.append(el('p', { class: 'block-label', text: 'Closest stories' }));
@@ -1954,8 +2063,8 @@ function answerTurn(answer, opts) {
   } else {
     if (answer.verdict === 'thin') {
       block.append(el('p', { class: 'answer-weak',
-                             text: 'Weak match · ' + count(answer.found_count,
-                                                           'article') + ' found' }));
+                             text: scopeWords(answer.scope).weak + ' · '
+                                   + count(answer.found_count, 'article') + ' found' }));
     }
     const text = el('div', { class: 'answer-text' });
     for (const sentence of (answer.sentences || [])) {
@@ -3145,6 +3254,8 @@ const EXPORTS = {
   moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
+  scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
+  actionsRow, askAllPapers,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */

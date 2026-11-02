@@ -710,6 +710,24 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .see-also { margin: 0 0 10px; font-size: var(--s125); color: var(--text-muted); }
 .see-also a { color: var(--text-secondary); }
 
+/* D1 · the fold that replaced the tooltip. The toggle looks like the rest of the line
+   -- it is a continuation of a sentence, not a control the eye should be drawn to --
+   and only the underline on hover says it does something. The headlines below it are
+   serif, one per line, and plainly not links: those stories are below the digest's top
+   N and cannot be opened yet. */
+.see-also-fold { display: inline; }
+.see-also-toggle { color: var(--text-secondary); text-align: left; }
+.see-also-toggle:hover { text-decoration: underline; }
+.see-also-toggle[aria-expanded="true"] { color: var(--ink); }
+.see-also-heads { display: block; margin: 4px 0 0; }
+.see-also-head {
+  display: block;
+  font-family: var(--serif);
+  font-size: var(--s14);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
 /* A fixture headline is longer than the mockup's invented ones, so a box ends on a
    clean line rather than mid-word at its edge. */
 .graph-node .graph-title {
@@ -965,6 +983,19 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 }
 .answer-cost { font-size: var(--s11); color: var(--text-muted); }
 .answer-actions .action { font-size: var(--s11); }
+
+/* Q3 (c) · the way out of a narrowed question. Ochre outline, like Think harder and the
+   cap's override: the three buttons in the pane that spend money or change what was
+   asked, as against the quiet grey of Pin and Background. It is first in the row because
+   `actionsRow` puts it there, which is what the suite checks; there is no `order` rule
+   here, because a rule no check can see is one that can rot without saying so. */
+.ask-all-papers {
+  padding: 2px 7px;
+  border: 1px solid var(--ochre);
+  border-radius: 2px;
+  color: var(--ochre);
+}
+.ask-all-papers:hover { background: var(--chip-ground); }
 .think-harder {
   padding: 2px 7px;
   border: 1px solid var(--ochre);

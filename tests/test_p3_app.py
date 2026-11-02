@@ -752,7 +752,13 @@ Node.prototype.append = function () {
 Node.prototype.appendChild = Node.prototype.append;
 Node.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
 Node.prototype.getAttribute = function (k) { return this.attrs[k]; };
-Node.prototype.addEventListener = function () {};
+/* v0.1's shim threw every handler away, so `controlsOf` could say a button existed and
+   was labelled but nothing could press it. C3 needs the press: D1's fold is a piece of
+   state the click owns. */
+Node.prototype.addEventListener = function (kind, fn) {
+  this.handlers = this.handlers || {};
+  (this.handlers[kind] = this.handlers[kind] || []).push(fn);
+};
 Node.prototype.removeChild = function (kid) {
   this.children = this.children.filter(function (c) { return c !== kid; });
 };
@@ -764,6 +770,17 @@ Node.prototype.querySelectorAll = function () { return []; };
 Node.prototype.scrollIntoView = function () {};
 Node.prototype.focus = function () {};
 Node.prototype.remove = function () {};
+
+/* Every descendant of this tag, as nodes rather than as the summaries `controlsOf`
+   returns -- so a handler can be fired on one. */
+function nodesOf(node, tag, found) {
+  found = found || [];
+  if (node && node.tagName === tag.toUpperCase()) found.push(node);
+  for (var i = 0; i < ((node && node.children) || []).length; i++) {
+    nodesOf(node.children[i], tag, found);
+  }
+  return found;
+}
 
 function textOf(node) {
   if (node === null || node === undefined || node === false) return '';
@@ -778,6 +795,18 @@ function classesOf(node, found) {
   if (node && node.className) found.push(node.className);
   for (var i = 0; i < ((node && node.children) || []).length; i++) {
     classesOf(node.children[i], found);
+  }
+  return found;
+}
+
+function attrsOf(node, name, found) {
+  found = found || [];
+  if (node && node.attrs && node.attrs[name] !== undefined
+      && node.attrs[name] !== "null") {
+    found.push(node.attrs[name]);
+  }
+  for (var i = 0; i < ((node && node.children) || []).length; i++) {
+    attrsOf(node.children[i], name, found);
   }
   return found;
 }
@@ -1010,9 +1039,77 @@ eq("[fixture] pointers to the same page are one pointer, not three",
    ["TH PDF p1"]);
 eq("[fixture] the line says how many stories that pointer is worth",
    APP.seeAlsoPlan(manyOnOnePage).tail, "3 stories on the same page");
-eq("[fixture] the headlines ride along as the pointer's tooltip",
+eq("[page] the headlines ride along, for D1's fold to open",
    APP.seeAlsoPlan(manyOnOnePage).pages[0].headlines,
    ["Headline 1", "Headline 2", "Headline 3"]);
+
+// --- C3 · D1, the tail is a fold and no longer a tooltip (brief 2b §1) ------------
+// The tooltip was a `title=` attribute: no touch device shows one, no screen reader
+// reads one reliably, and nothing here could check what it said. The fold is a real
+// button, so all three change at once.
+manyOnOnePage.story_id = "sMany";
+APP.S.flags.see_also_line = true;
+APP.S.seeAlsoOpen = {};
+
+function seeAlsoNode() { return APP.seeAlso(manyOnOnePage); }
+function seeAlsoControls() { return controlsOf(seeAlsoNode()); }
+
+eq("[page] D1 · the line still names the printed page it points at, as a real link",
+   seeAlsoControls().filter(function (c) { return c.tag === "A"; })
+     .map(function (c) { return c.label; }), ["TH PDF p1"]);
+eq("[page] D1 · and the count is a button, not a tooltip",
+   seeAlsoControls().filter(function (c) { return c.tag === "BUTTON"; })
+     .map(function (c) { return c.label; }), ["3 stories on the same page"]);
+eq("[page] D1 · which says it is a button, as every control in the page must",
+   seeAlsoControls().filter(function (c) { return c.tag === "BUTTON"; })[0].type,
+   "button");
+eq("[page] D1 · closed, it says so and shows none of the headlines",
+   [seeAlsoControls().filter(function (c) { return c.tag === "BUTTON"; })[0].aria,
+    textOf(seeAlsoNode()).indexOf("Headline 1") >= 0], ["", false]);
+eq("[page] D1 · and its aria-expanded is false, which is what says closed",
+   attrsOf(seeAlsoNode(), "aria-expanded"), ["false"]);
+APP.S.seeAlsoOpen.sMany = true;
+eq("[page] D1 · open, all three headlines are there, one per line",
+   [1, 2, 3].filter(function (i) {
+     return textOf(seeAlsoNode()).indexOf("Headline " + i) < 0; }), []);
+eq("[page] D1 · each as plain text, so no new link is offered for a story that "
+   + "cannot be opened yet",
+   seeAlsoControls().filter(function (c) { return c.tag === "A"; }).length, 1);
+eq("[page] D1 · and aria-expanded is now true",
+   attrsOf(seeAlsoNode(), "aria-expanded"), ["true"]);
+eq("[page] D1 · the headlines are a block of their own, under the line",
+   classesOf(seeAlsoNode()).filter(function (c) {
+     return c === "see-also-heads"; }).length, 1);
+APP.S.seeAlsoOpen = {};
+eq("[page] D1 · the tooltip is gone from the whole line, open or closed",
+   attrsOf(seeAlsoNode(), "title"), []);
+eq("[page] D1 · and the fold is not remembered, so it closes with the story",
+   Object.keys(APP.S.seeAlsoOpen).length, 0);
+/* The handler flips the state and then redraws. `render()` wants the whole shell, which
+   this shim has no business pretending to be, so the redraw throws -- after the flip,
+   which is the part under test. */
+function clickFold(node) {
+  var fns = ((node || {}).handlers || {}).click || [];
+  for (var i = 0; i < fns.length; i++) {
+    try { fns[i](); } catch (err) { /* the redraw, not the flip */ }
+  }
+}
+APP.S.seeAlsoOpen = {};
+clickFold(nodesOf(seeAlsoNode(), "button")[0]);
+eq("[page] D1 · pressing it opens this story's fold and no other",
+   APP.S.seeAlsoOpen, {sMany: true});
+clickFold(nodesOf(seeAlsoNode(), "button")[0]);
+eq("[page] D1 · and pressing it again closes it",
+   APP.S.seeAlsoOpen, {sMany: false});
+eq("[page] D1 · the fold lives in its own state, not in the prefs that are saved",
+   [Object.keys(APP.S.prefs).indexOf("seeAlsoOpen"),
+    Object.keys(APP.S.prefs).indexOf("see_also_open")], [-1, -1]);
+APP.S.seeAlsoOpen = {};
+
+eq("[page] D1 · a story with one pointer and no headline has nothing to fold",
+   controlsOf(APP.seeAlso({story_id: "sOne", links: [{from:
+     {pdf: "archive/2026-10-11/2026-10-11_Mint.pdf", pdf_page: 4}}]}))
+     .filter(function (c) { return c.tag === "BUTTON"; }), []);
 
 eq("[fixture] one pointer to one story reads in the singular",
    APP.seeAlsoPlan({links: [{to_headline: "One",
@@ -1572,6 +1669,118 @@ eq("[page] D12 · and with neither the field nor the parent in memory it says wh
    + "knows rather than inventing a number",
    APP.sonnetLabel(answerFixture({parent_answer_id: "zz_nothing", passage_count: 0})),
    "Sonnet · the same passages");
+
+
+// === C3 · Q3 (b) and (c), what the question was asked OF (brief 2b §1) ============
+// The bug these fix was seen on screen at C2: with the GST story open, "police"
+// answered "Not in your papers · searched 1 day" while the archive held four police
+// stories. The claim was about the archive; the search was about one story.
+
+var SCOPES = {
+  none: {story_id: null, text_hashes: [], filters: {}},
+  oneOpen: {story_id: "s1", text_hashes: ["h1"], filters: {}},
+  oneById: {story_id: null, text_hashes: [], filters: {story_ids: ["s1"]}},
+  four: {story_id: null, text_hashes: [], filters: {story_ids: ["a", "b", "c", "d"]}},
+  filters: {story_id: null, text_hashes: [], filters: {papers: ["Mint"]}},
+  both: {story_id: "s1", text_hashes: [], filters: {papers: ["Mint"]}},
+};
+
+eq("[page] Q3 · one open story is one story, however the scope carried it",
+   [APP.scopeStoryCount(SCOPES.oneOpen), APP.scopeStoryCount(SCOPES.oneById)], [1, 1]);
+eq("[page] Q3 · a selection from Explore is however many it chose",
+   APP.scopeStoryCount(SCOPES.four), 4);
+eq("[page] Q3 · and no scope is none of them",
+   [APP.scopeStoryCount(SCOPES.none), APP.scopeStoryCount(SCOPES.filters)], [0, 0]);
+eq("[page] Q3 · text_hashes is not a narrowing the reader chose, so it is not one here",
+   APP.scopeHasFilters({filters: {text_hashes: ["h1"], story_ids: ["s1"]}}), false);
+eq("[page] Q3 · an empty filter list is not a filter",
+   APP.scopeHasFilters({filters: {papers: []}}), false);
+
+eq("[page] Q3 b · one story: not in THIS story",
+   APP.scopeWords(SCOPES.oneOpen).none, "Not in this story");
+eq("[page] Q3 b · four stories: not in THESE FOUR",
+   APP.scopeWords(SCOPES.four).none, "Not in these 4 stories");
+eq("[page] Q3 b · filters only: not in your papers FOR THESE FILTERS",
+   APP.scopeWords(SCOPES.filters).none, "Not in your papers for these filters");
+eq("[page] Q3 b · no scope at all: the old wording, which is the only one that may "
+   + "speak for the archive",
+   APP.scopeWords(SCOPES.none).none, "Not in your papers");
+eq("[page] Q3 b · a story AND a filter is still about the story",
+   APP.scopeWords(SCOPES.both).none, "Not in this story");
+eq("[page] Q3 b · the thin note follows the same rule",
+   [APP.scopeWords(SCOPES.oneOpen).weak, APP.scopeWords(SCOPES.four).weak,
+    APP.scopeWords(SCOPES.filters).weak, APP.scopeWords(SCOPES.none).weak],
+   ["Weak match in this story", "Weak match in these 4 stories",
+    "Weak match in your papers for these filters", "Weak match"]);
+
+// drawn, not just computed: the words have to reach the screen
+function emptyText(scope) {
+  return textOf(APP.answerTurn(answerFixture({verdict: "empty", sentences: [],
+    cited: [], scope: scope, searched_days: 3,
+    closest: [{story_id: "s9", headline: "A close one", dates: ["2026-10-11"]}]}), {}));
+}
+function thinText(scope) {
+  return textOf(APP.answerTurn(answerFixture({verdict: "thin", found_count: 4,
+    scope: scope}), {}));
+}
+eq("[page] Q3 b · the scoped empty answer says it on screen, with the day count",
+   emptyText(SCOPES.oneOpen).indexOf("Not in this story · searched 3 days") > 0, true);
+eq("[page] Q3 b · and never the archive's wording when it was asked of one story",
+   emptyText(SCOPES.oneOpen).indexOf("Not in your papers") >= 0, false);
+eq("[page] Q3 b · four stories on screen", 
+   emptyText(SCOPES.four).indexOf("Not in these 4 stories · searched 3 days") > 0, true);
+eq("[page] Q3 b · filters on screen",
+   emptyText(SCOPES.filters)
+     .indexOf("Not in your papers for these filters · searched 3 days") > 0, true);
+eq("[page] Q3 b · and an unscoped one is unchanged from build 2",
+   emptyText(SCOPES.none).indexOf("Not in your papers · searched 3 days") > 0, true);
+eq("[page] Q3 b · the thin note on screen, with its article count",
+   thinText(SCOPES.oneOpen).indexOf("Weak match in this story · 4 articles found") > 0,
+   true);
+eq("[page] Q3 b · and unscoped it is the build-2 wording",
+   thinText(SCOPES.none).indexOf("Weak match · 4 articles found") > 0, true);
+
+// Q3 (c) · the way out
+eq("[page] Q3 c · a narrowed question is one with a story, a selection or a filter",
+   [APP.scopeIsNarrowed(SCOPES.oneOpen), APP.scopeIsNarrowed(SCOPES.four),
+    APP.scopeIsNarrowed(SCOPES.filters), APP.scopeIsNarrowed(SCOPES.none)],
+   [true, true, true, false]);
+function actionLabels(scope, verdict) {
+  return controlsOf(APP.actionsRow(answerFixture({verdict: verdict, scope: scope})))
+    .map(function (c) { return c.label; });
+}
+eq("[page] Q3 c · the way out is offered on a scoped empty answer",
+   actionLabels(SCOPES.oneOpen, "empty").indexOf("Ask all papers instead"), 0);
+eq("[page] Q3 c · and on a scoped thin one",
+   actionLabels(SCOPES.four, "thin").indexOf("Ask all papers instead"), 0);
+eq("[page] Q3 c · first in the row, before anything else the answer offers",
+   actionLabels(SCOPES.oneOpen, "thin")[0], "Ask all papers instead");
+eq("[page] Q3 c · never when there was no scope to get out of",
+   [actionLabels(SCOPES.none, "empty").indexOf("Ask all papers instead"),
+    actionLabels(SCOPES.none, "thin").indexOf("Ask all papers instead")], [-1, -1]);
+eq("[page] Q3 c · nor on an answer that found plenty, which needs no way out",
+   actionLabels(SCOPES.oneOpen, "enough").indexOf("Ask all papers instead"), -1);
+eq("[page] Q3 c · it is ochre, like the other things in the pane that spend or widen",
+   classesOf(APP.actionsRow(answerFixture({verdict: "empty", scope: SCOPES.oneOpen})))
+     .filter(function (c) { return (c || "").indexOf("ask-all-papers") >= 0; }).length,
+   1);
+
+// Its click takes every chip off and asks again. The scope is cleared SYNCHRONOUSLY,
+// before the ask, so the new turn is unscoped: that is the half worth checking here,
+// since `askNow` needs a server for the rest.
+APP.S.scope = {story_id: "s1", headline: "A headline", text_hashes: ["h1"],
+               filters: {papers: ["Mint"], story_ids: ["s1"]}};
+APP.S.scopeLabel = "these 4";
+APP.askAllPapers("what happened in Delhi?");
+eq("[page] Q3 c · its click clears the story, the hashes, every filter and the label",
+   [APP.S.scope.story_id, APP.S.scope.headline, APP.S.scope.text_hashes,
+    APP.S.scope.filters, APP.S.scopeLabel], [null, null, [], {}, null]);
+eq("[page] Q3 c · so the scope has no chips left to draw",
+   APP.scopeChips(APP.S.scope, APP.S.scopeLabel), []);
+eq("[page] Q3 c · and the next question would be asked of the whole archive",
+   APP.scopeIsNarrowed(APP.S.scope), false);
+APP.S.scope = {story_id: null, text_hashes: [], filters: {}};
+APP.S.scopeLabel = null;
 
 
 // === B6 · Suggest connections and the reader's own links (brief 2 §8.4) ===========
