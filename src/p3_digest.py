@@ -38,20 +38,22 @@ HOW THE RANKING WORKS (Q3)
 THE JSON (the K3 <-> K1 data contract — K3 note Q16)
   build() returns, and `build` prints, one object:
     {"built_at", "window": {"kind", "from", "to", "days"},
-     "versions": {"label", "grouping", "tracking", "tag_prompt", "digest"},
+     "versions": {"label", "grouping", "tracking", "tag_prompt", "digest", "knobs_hash"},
      "knobs": {...},                         what produced this digest
      "stories": [ {
         "story_id", "score", "rank", "dates", "developing",
         "headline": {"text", "source_text_hash", "fallbacks"},
         "one_liner": {"text", "source_text_hash", "fallback"},
-        "theme": {"topic", "stories_21d", "trend"} | null,
+        "theme": {"topic", "stories_21d", "trend", "series": [21 counts]} | null,
         "coverage": {"articles", "papers", "rows": [ {paper, page, page_link,
-                      words, kind, byline, headline, text_hash, points} ]},
-        "views": [ {paper, page, kind, headline, page_link} ],
+                      page_links_more, words, kind, byline, headline, text_hash,
+                      points} ]},
+        "views": [ {paper, page, kind, headline, text_hash, page_link} ],
         "caveats": {paid_content, paid_only, single_source, partial_text},
         "links": [ {"kind": "see_also_page"|"related_id", "from", "to_story_id"} ],
         "writeup": null                      filled by part 2 (B1-4)
      } ],
+     "long_tail": [ {topic, count, stories: [{story_id, headline, papers, articles}]} ],
      "dropped": {"zero_point": n, "below_top_n": n},
      "report": {...}                         the M3 numbers for the build report
     }
@@ -59,6 +61,15 @@ THE JSON (the K3 <-> K1 data contract — K3 note Q16)
   page number: the printed->PDF offset is NOT stored anywhere in this database (checked
   1 Nov: no meta key, no placements.extra key, no imports column), so claiming a printed
   page would be a guess. K1 owns how the link looks; this is what it has to work with.
+  `page_links_more` (R5) is the 0-2 OTHER pages the same printed piece runs on, each a
+  page link plus a `reason` ("joined_from" / "continues_to"); see `jump_links`.
+  `theme.series` (R9) is one entry per calendar day of the 21-day window, oldest first,
+  `null` on a day with no papers so a gap in the archive is not drawn as a quiet day.
+  `long_tail` (R8) is every story below the top N grouped by topic, counts descending;
+  the bucket with `topic: null` holds stories whose articles carry no topic.
+
+  d0.2 (B2-3, 3 Nov) added: `knobs_hash`, `page_links_more`, `theme.series`,
+  `views[].text_hash`, `long_tail`, and `daily_cost_cap_usd` 0.50 -> 1.00 (K1's number).
 
 HOW TO RUN (from ~/news-intel, pipeline environment)
   .venv/bin/python src/p3_digest.py build --date 2026-10-24 --no-llm
@@ -94,6 +105,7 @@ import argparse
 import array
 import collections
 import datetime as dt
+import hashlib
 import json
 import re
 import sqlite3
@@ -110,7 +122,7 @@ NEWS_DB = ROOT / "data" / "news.db"
 VECTORS_DB = ROOT / "data" / "vectors.db"
 INTEL_DB = ROOT / "data" / "intel.db"
 
-DIGEST_VERSION = "d0.1"
+DIGEST_VERSION = "d0.2"
 
 COVERAGE_KINDS_TUPLE = L.COVERAGE_KINDS
 
@@ -136,8 +148,10 @@ KNOBS = {
     "catchup_cap_days": 7,             # longest "since last visit" window (S7)
     "window_week_days": 7,
 
-    # OPEN DECISION (Kunaal, 1 Nov): what counts as the front page.
-    #   "lowest_with_articles" (default) — the first page of that paper-day that has any
+    # DECIDED 1 Nov (Kunaal, by measurement): what counts as the front page. Left as
+    # built; no longer open. The alternative and the numbers are kept because a knob
+    # without its reason is a number nobody dares move.
+    #   "lowest_with_articles" (chosen) — the first page of that paper-day that has any
     #       article. Chosen because only 21 of 62 paper-days have an article on PDF page 1
     #       (lowest page is 3 on 16 days, 5 on 11, once 13): screen v0.2 drops pages with
     #       no text layer or mostly drawing, and some PDFs start late. Treating page 1 as
@@ -146,7 +160,9 @@ KNOBS = {
     #       own frame for "early", which is already "pages with articles".
     #   "pdf_page_1" — only PDF page 1 is the front page; paper-days without one have no
     #       front-page article. Honest about what we know, systematically unfair.
-    #   Changes which stories reach the top 10, so it is Kunaal's call, not a mechanic.
+    #   It changes which stories reach the top 10, which is why it was Kunaal's call and
+    #   not a mechanic. What would move it: a stored printed->PDF page offset, which
+    #   would make "page 1" mean the same thing on every paper-day.
     "front_page_rule": "lowest_with_articles",
 
     # --- headline (Q4) ------------------------------------------------------
@@ -201,9 +217,15 @@ KNOBS = {
     "story_so_far_day_words": 150,        # per-day input (Q5x)
     "story_so_far_sentences": [3, 4],
     "story_so_far_key_dates": [2, 3],
-    # Checked before any paid call. K1 owns the real number (the digest is built on open
-    # under K1's daily cap); this is a safe placeholder until K1 sets it.
-    "daily_cost_cap_usd": 0.50,
+    # Checked before any paid call. SET BY K1, 2 Nov (contract R7, register X3): $1.00,
+    # no longer a placeholder. It is the whole day's paid spend, not the digest's: every
+    # write-up, story-so-far, answer, Think harder, background line and suggestion of
+    # that local day counts against it (`cost_today`). The app reads it out of the
+    # digest's own knob block and never hard-codes it; a one-day press of "raise the cap"
+    # adds to it without changing it here. What would move it: the first paid week in the
+    # cost log — the back-of-envelope picture is $12-20 a month with Batch tagging, of
+    # which the reading features are about 5%.
+    "daily_cost_cap_usd": 1.00,
     "page_label": "pdf_page",          # the printed->PDF offset is not stored (Q5+ z)
 }
 
@@ -652,6 +674,48 @@ def page_link(seat):
             "label": f"PDF p{seat['page']}" if seat["page"] is not None else None}
 
 
+JOINED_FROM_PAGE = re.compile(r"^p(\d+)-a\d+$")
+
+
+def jump_links(seat):
+    """R5. The other page(s) a printed piece runs on, as page links.
+
+    A story in print is not always on one page. Two keys in `placements.extra` say so,
+    and they are different statements:
+        continues_to   an integer page: this piece is continued ON that page
+        joined_from    an article id ("p11-a02"): this seat's text was joined FROM the
+                       piece that started on that page
+    Measured on run exam-v1 (3 Nov, read-only): 44 seats carry `continues_to`, 147 carry
+    `joined_from`, and 36 carry BOTH -- 155 seats in all. Every `joined_from` value
+    matches `p<page>-a<n>` and names a page that really has seats in that paper-day; none
+    names the seat's own page. The art id itself does NOT resolve to a seat (0 of 147):
+    the piece it names was merged away by extraction, which is why it is a `joined_from`
+    in the first place. So the PAGE is read out of the id and the id is kept beside it.
+
+    Returns a LIST, 0-2 long, in reading order of the jump: where the text came from
+    first, then where it continues -- not sorted by page number. A list rather than one
+    "second link" because 36 seats genuinely jump twice, and a single field would have to
+    throw one of the two pages away.
+
+    NOTE for the brief: §3 B2-3 says "78 rows in the archive" and facts §4 calls
+    `joined_from` an integer. Both describe `placements` as a whole, over both run_ids.
+    The digest reads only run exam-v1, where the counts are 44 and 147, and `joined_from`
+    is a string in both runs. Reported, not worked around.
+    """
+    extra = seat.get("extra") or {}
+    out = []
+    joined = extra.get("joined_from")
+    if joined is not None:
+        m = JOINED_FROM_PAGE.match(str(joined))
+        if m:
+            out.append(dict(page_link({**seat, "page": int(m.group(1))}),
+                            reason="joined_from", from_art_id=str(joined)))
+    goes = extra.get("continues_to")
+    if isinstance(goes, int):
+        out.append(dict(page_link({**seat, "page": goes}), reason="continues_to"))
+    return out
+
+
 def coverage_block(story):
     """7b. One row per covering slot; articles and papers counted separately (K1 B3)."""
     rows = []
@@ -660,7 +724,8 @@ def coverage_block(story):
         if not s["counts_as_coverage"]:
             continue
         rows.append({"paper": s["publisher"], "date": s["date"], "page": s["page"],
-                     "page_link": page_link(s), "words": s["words"], "kind": s["kind"],
+                     "page_link": page_link(s), "page_links_more": jump_links(s),
+                     "words": s["words"], "kind": s["kind"],
                      "byline": s["byline"] or None, "headline": s["headline"],
                      "text_hash": s["text_hash"], "points": s["points"]})
     return {"articles": len({r["text_hash"] for r in rows}),
@@ -668,14 +733,19 @@ def coverage_block(story):
 
 
 def views_block(story):
-    """7c. Opinion, analysis and interview pieces. Empty list = the line is hidden."""
+    """7c. Opinion, analysis and interview pieces. Empty list = the line is hidden.
+
+    R10: each row carries its `text_hash`, so tapping a view opens that article through
+    `article(text_hash)`. Without it the views line is the one place in the item that
+    names a piece the reader cannot then open.
+    """
     kinds = set(KNOBS["views_kinds"])
     out = []
     for s in sorted(story["seats"], key=lambda s: (s["date"], s["publisher"], s["page"] or 0)):
         if s["kind"] in kinds and s["counts_as_coverage"]:
             out.append({"paper": s["publisher"], "date": s["date"], "page": s["page"],
                         "kind": s["kind"], "headline": s["headline"],
-                        "page_link": page_link(s)})
+                        "text_hash": s["text_hash"], "page_link": page_link(s)})
     return out
 
 
@@ -717,10 +787,28 @@ def theme_block(story, topic_counts):
     else:
         trend = "steady"
     return {"topic": topic, "stories_21d": counts["total"], "trend": trend,
+            "series": theme_series(counts, topic_counts["__days__"]),
             "no_trend_because": no_trend, "recent_7d": counts["recent"],
             "recent_per_week": round(recent_rate, 2),
             "earlier_per_week": round(earlier_rate, 2),
             "publication_days": {"recent": recent_days, "earlier": earlier_days}}
+
+
+def theme_series(counts, window_days):
+    """R9. One entry per calendar day of the theme window, oldest first.
+
+    `null` on a day with no papers, a number on a day with papers. The distinction is
+    the whole point: the archive has gaps, and a gap drawn as a zero reads as "nothing
+    happened on this theme that day" when what happened is that no paper was filed. A
+    bar strip with 12 zeros and a bar strip with 12 holes say opposite things.
+
+    Counts sum to `stories_21d` exactly, because both count a story once on its latest
+    covering day.
+    """
+    by_day = counts["by_day"]
+    papers_on = window_days["papers_on"]
+    return [by_day.get(d, 0) if d in papers_on else None
+            for d in window_days["calendar"]]
 
 
 def topic_counts_over(news, intel, end_date):
@@ -734,22 +822,34 @@ def topic_counts_over(news, intel, end_date):
     days = [d for d in stored_dates(news) if start <= d <= end_date]
     seats = load_seats(news, days)
     stories = load_stories(intel, seats)
-    counts = collections.defaultdict(lambda: {"total": 0, "recent": 0, "earlier": 0})
+    counts = collections.defaultdict(
+        lambda: {"total": 0, "recent": 0, "earlier": 0, "by_day": collections.Counter()})
     for st in stories:
         cover = [s for s in st["seats"] if s["counts_as_coverage"] and s["topic"]]
         # A lone brief is not a theme: a story needs this many covering articles to count.
         if len({s["text_hash"] for s in cover}) < KNOBS["theme_min_articles_per_story"]:
             continue
         topic = collections.Counter(s["topic"] for s in cover).most_common(1)[0][0]
+        latest = max(s["date"] for s in cover)
         counts[topic]["total"] += 1
-        if max(s["date"] for s in cover) >= recent_start:
+        # R9: a story is counted ONCE, on its latest covering day -- the same rule the
+        # totals use, so the series sums to the total and the bar strip cannot tell a
+        # different story from the number printed beside it.
+        counts[topic]["by_day"][latest] += 1
+        if latest >= recent_start:
             counts[topic]["recent"] += 1
         else:
             counts[topic]["earlier"] += 1
     # How many days actually carried papers on each side, so the trend compares rates
     # per publication week rather than per calendar week (the archive has gaps).
+    # `calendar` is all 21 dates of the window, oldest first, and `papers_on` says which
+    # of them had papers at all: R9's series needs both, because a day with no paper is
+    # a hole in the strip (null), not a quiet day (zero).
     counts["__days__"] = {"recent": sum(1 for d in days if d >= recent_start),
-                          "earlier": sum(1 for d in days if d < recent_start)}
+                          "earlier": sum(1 for d in days if d < recent_start),
+                          "calendar": [_back(end_date, n) for n in
+                                       range(KNOBS["theme_window_days"] - 1, -1, -1)],
+                          "papers_on": set(days)}
     return counts
 
 
@@ -779,6 +879,57 @@ def links_block(story, seat_index, story_of_hash):
                 out.append({"kind": kind, "from": page_link(s), "to_story_id": other,
                             "to_headline": target["headline"]})
     return out
+
+
+def long_tail_block(tail, vectors):
+    """R8. Everything below the top N, grouped by topic: "the rest of the day".
+
+    The top 10 are written up; these are the 22 to 454 other stories (median 195 a day,
+    in a median 55 topics -- facts §5a). ALL of them are returned and the app folds them,
+    because the only alternative is this code deciding which of the rest Kunaal may not
+    see, which is exactly what the ranking already did once.
+
+    Topics are ordered by count descending, ties by name, so the list is stable between
+    builds. A story whose covering articles carry no topic at all goes in a bucket with
+    `topic: null`, sorted last: 0 to 2 stories a day on the dates measured. It exists so
+    that the counts sum to the number of stories below the top N -- a bucket dropped for
+    being untidy is a story that silently disappears.
+
+    The headline comes from `pick_headline`, the same function and the same checks as the
+    top 10, so there is one headline rule in this file and not two. With `vectors` holding
+    only the top N's texts (they do -- loading three weeks of vectors for a folded list
+    would cost more than the list is worth), the medoid step falls back to the
+    highest-points covering seat, which is `pick_headline`'s own documented behaviour
+    with nothing embedded.
+    """
+    buckets = collections.defaultdict(list)
+    for st in tail:
+        topics = collections.Counter(s["topic"] for s in st["seats"]
+                                     if s["counts_as_coverage"] and s["topic"])
+        topic = topics.most_common(1)[0][0] if topics else None
+        cover = [s for s in st["seats"] if s["counts_as_coverage"]]
+        buckets[topic].append({
+            "story_id": st["story_id"],
+            "headline": pick_headline(st, vectors)["text"],
+            "papers": len({s["publisher"] for s in cover}),
+            "articles": len({s["text_hash"] for s in cover}),
+        })
+    ordered = sorted(buckets.items(),
+                     key=lambda kv: (-len(kv[1]), kv[0] is None, kv[0] or ""))
+    return [{"topic": topic, "count": len(stories), "stories": stories}
+            for topic, stories in ordered]
+
+
+def knobs_hash():
+    """A short hash of the knob block, so two builds with different knobs differ (§4).
+
+    `json.dumps(..., sort_keys=True)` over the whole mapping: the KEYS and their VALUES
+    together, which is what has to be pinned. `p3_store.fingerprint` is not used here on
+    purpose -- it hashes a SET of ids, sorted and de-duplicated, so it would see only the
+    knob names and give the same answer after every value change in this file.
+    """
+    return hashlib.sha256(
+        json.dumps(KNOBS, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def build_seat_index(seats):
@@ -893,9 +1044,10 @@ def build(date, window="day", last_visit=None, news=None, intel=None, vecs=None,
                    "to": days[-1] if days else None, "days": days},
         "versions": {"label": L.LABEL_VERSION, "grouping": GROUPING_VERSION,
                      "tracking": TRACKING_VERSION, "tag_prompt": L.TAG_PROMPT,
-                     "digest": DIGEST_VERSION},
+                     "digest": DIGEST_VERSION, "knobs_hash": knobs_hash()},
         "knobs": KNOBS,
         "stories": out_stories,
+        "long_tail": long_tail_block(scored[top_n:], vectors),
         "dropped": {"zero_point": len(zero), "below_top_n": max(len(scored) - top_n, 0)},
         "report": report,
     }

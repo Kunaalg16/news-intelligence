@@ -41,6 +41,7 @@ USAGE (from ~/news-intel)
 """
 
 import array
+import collections
 import json
 import sqlite3
 import sys
@@ -74,6 +75,25 @@ def seat(**kw):
                                        "deck", "byline", "extra", "source_file",
                                        "headline", "words")})
     return label
+
+
+def tcounts(topics, recent_days=7, earlier_days=14, end="2026-10-24", by_day=None):
+    """A `topic_counts_over` return value, made by hand.
+
+    Its shape lives here once, so a change to what `topic_counts_over` returns breaks one
+    helper and not nine fixtures. `papers_on` is the last `recent_days` of the recent week
+    plus the first `earlier_days` of the earlier fortnight, which is what the counts say.
+    """
+    window = D.KNOBS["theme_window_days"]
+    calendar = [D._back(end, n) for n in range(window - 1, -1, -1)]
+    recent, earlier = calendar[-7:], calendar[:-7]
+    out = {t: {**c, "by_day": collections.Counter((by_day or {}).get(t, {}))}
+           for t, c in topics.items()}
+    out["__days__"] = {"recent": recent_days, "earlier": earlier_days,
+                       "calendar": calendar,
+                       "papers_on": set(recent[-recent_days:] if recent_days else [])
+                       | set(earlier[:earlier_days])}
+    return out
 
 
 def story(seats, story_id="s1"):
@@ -262,11 +282,12 @@ def rules():
     # --- theme line --------------------------------------------------------------------
     # A full three weeks of papers: the rates are then this week's count and the earlier
     # weekly average, which is 7a exactly.
-    counts = {"Banking": {"total": 5, "recent": 4, "earlier": 2},
-              "Energy": {"total": 2, "recent": 2, "earlier": 0},
-              "Health": {"total": 6, "recent": 1, "earlier": 5},
-              "Sport": {"total": 4, "recent": 2, "earlier": 4},
-              "__days__": {"recent": 7, "earlier": 14}}
+    counts = tcounts({"Banking": {"total": 5, "recent": 4, "earlier": 2},
+                      "Energy": {"total": 2, "recent": 2, "earlier": 0},
+                      "Health": {"total": 6, "recent": 1, "earlier": 5},
+                      "Sport": {"total": 4, "recent": 2, "earlier": 4}},
+                     by_day={"Banking": {"2026-10-24": 2, "2026-10-22": 2,
+                                         "2026-10-10": 1}})
     th = lambda topic: D.theme_block(story([seat(topic=topic)]), counts)
     check("4 this week vs 1 a week before -> rising", th("Banking")["trend"], "rising")
     check("and the 21-day count is shown", th("Banking")["stories_21d"], 5)
@@ -275,14 +296,13 @@ def rules():
     check("2 this week vs 2 before -> steady", th("Sport")["trend"], "steady")
     check("papers ran but carried nothing on it before -> rising",
           D.theme_block(story([seat(topic="New")]),
-                        {"New": {"total": 3, "recent": 3, "earlier": 0},
-                         "__days__": {"recent": 7, "earlier": 14}})["trend"], "rising")
+                        tcounts({"New": {"total": 3, "recent": 3, "earlier": 0}}))["trend"],
+          "rising")
     check("no topic at all -> no theme line",
           D.theme_block(story([seat(topic=None)]), counts), None)
 
     # the guard: no papers at all in the earlier two weeks -> no trend word, count kept
-    gapped = {"Banking": {"total": 4, "recent": 4, "earlier": 0},
-              "__days__": {"recent": 7, "earlier": 0}}
+    gapped = tcounts({"Banking": {"total": 4, "recent": 4, "earlier": 0}}, earlier_days=0)
     g = D.theme_block(story([seat(topic="Banking")]), gapped)
     check("no papers in the earlier weeks -> no trend is claimed", g["trend"], None)
     check("and the reason is given", g["no_trend_because"], "no papers in the earlier weeks")
@@ -293,25 +313,99 @@ def rules():
     D.KNOBS["theme_trend_needs_earlier_days"] = True
 
     # two earlier publication days is not "the earlier weeks" either
-    thin = {"Banking": {"total": 4, "recent": 4, "earlier": 0},
-            "__days__": {"recent": 7, "earlier": 2}}
+    thin = tcounts({"Banking": {"total": 4, "recent": 4, "earlier": 0}}, earlier_days=2)
     th2 = D.theme_block(story([seat(topic="Banking")]), thin)
     check("two earlier publication days -> still no trend claimed", th2["trend"], None)
     check("and the reason says how thin it was",
           th2["no_trend_because"], "only 2 publication days in the earlier weeks")
-    enough = {"Banking": {"total": 6, "recent": 4, "earlier": 2},
-              "__days__": {"recent": 7, "earlier": 4}}
+    enough = tcounts({"Banking": {"total": 6, "recent": 4, "earlier": 2}}, earlier_days=4)
     check("four earlier publication days is enough to state a trend",
           D.theme_block(story([seat(topic="Banking")]), enough)["trend"], "steady")
 
     # rates are per PUBLICATION week, so a half-covered earlier fortnight is not a dip
-    half = {"Banking": {"total": 8, "recent": 4, "earlier": 4},
-            "__days__": {"recent": 7, "earlier": 7}}
+    half = tcounts({"Banking": {"total": 8, "recent": 4, "earlier": 4}}, earlier_days=7)
     check("4 this week vs 4 in the one earlier week with papers -> steady, not rising",
           D.theme_block(story([seat(topic="Banking")]), half)["trend"], "steady")
     check("the publication days behind the trend are reported",
           D.theme_block(story([seat(topic="Banking")]), half)["publication_days"],
           {"recent": 7, "earlier": 7})
+
+    # --- R5: the other pages a printed piece runs on ------------------------------------
+    # Measured on run exam-v1: 44 seats carry continues_to, 147 carry joined_from (as the
+    # art id "p<page>-a<n>", NOT an integer), 36 carry both.
+    check("a piece on one page has no other pages", D.jump_links(seat()), [])
+    goes = D.jump_links(seat(extra={"paper": "2026-10-01_Mint", "continues_to": 9}))
+    check("continues_to gives one link", len(goes), 1)
+    check("at the page it names", goes[0]["pdf_page"], 9)
+    check("labelled as a PDF page like every other link", goes[0]["label"], "PDF p9")
+    check("in the same PDF as the seat", goes[0]["pdf"], "archive/2026-10-01/2026-10-01_Mint.pdf")
+    check("and says which kind of jump it is", goes[0]["reason"], "continues_to")
+    came = D.jump_links(seat(extra={"paper": "2026-10-01_Mint", "joined_from": "p11-a02"}))
+    check("joined_from gives one link", len(came), 1)
+    check("at the page read out of the art id", came[0]["pdf_page"], 11)
+    check("keeping the art id it was read from", came[0]["from_art_id"], "p11-a02")
+    check("and saying which kind of jump it is", came[0]["reason"], "joined_from")
+    both = D.jump_links(seat(extra={"paper": "2026-10-01_Mint", "joined_from": "p11-a02",
+                                    "continues_to": 9}))
+    check("a piece that jumps twice keeps both pages", [l["pdf_page"] for l in both], [11, 9])
+    check("in reading order: where it came from, then where it goes",
+          [l["reason"] for l in both], ["joined_from", "continues_to"])
+    # the two shapes that must not produce a link rather than a wrong one
+    check("an unparseable joined_from is dropped, not guessed",
+          D.jump_links(seat(extra={"paper": "p", "joined_from": "unknown"})), [])
+    check("a continues_to that is not a page number is dropped",
+          D.jump_links(seat(extra={"paper": "p", "continues_to": "overleaf"})), [])
+
+    # --- R8: the rest of the day, grouped by topic --------------------------------------
+    def scored_seat(**kw):
+        """A seat as the ranking leaves it: `points` is set by score_story, not load_seats."""
+        s = seat(**kw)
+        s["points"] = 1
+        return s
+
+    tail = [story([scored_seat(topic="Energy", text_hash="t1")], "s1"),
+            story([scored_seat(topic="Energy", text_hash="t2")], "s2"),
+            story([scored_seat(topic="Banking", text_hash="t3")], "s3"),
+            story([scored_seat(topic="Arts", text_hash="t4")], "s4"),
+            story([scored_seat(topic=None, text_hash="t5")], "s5")]
+    lt = D.long_tail_block(tail, {})
+    check("every story below the top N is in a bucket",
+          sum(b["count"] for b in lt), len(tail))
+    check("topics are ordered by count, then by name",
+          [b["topic"] for b in lt], ["Energy", "Arts", "Banking", None])
+    check("a story whose articles carry no topic is not dropped",
+          lt[-1]["count"], 1)
+    check("each story carries what the folded list shows",
+          sorted(lt[0]["stories"][0]), ["articles", "headline", "papers", "story_id"])
+    check("with the printed headline, through the same checks as the top 10",
+          lt[0]["stories"][0]["headline"], "A clear printed headline here")
+    check("one paper and one article counted on a one-seat story",
+          (lt[0]["stories"][0]["papers"], lt[0]["stories"][0]["articles"]), (1, 1))
+
+    # --- R9: 21 daily counts, with holes where no paper was filed -----------------------
+    ser = tcounts({"Banking": {"total": 5, "recent": 4, "earlier": 1}},
+                  recent_days=7, earlier_days=2,
+                  by_day={"Banking": {"2026-10-24": 2, "2026-10-23": 2, "2026-10-04": 1}})
+    block = D.theme_block(story([seat(topic="Banking")]), ser)
+    check("the series has one entry per day of the theme window",
+          len(block["series"]), D.KNOBS["theme_window_days"])
+    check("a day with no papers is null, not zero",
+          block["series"].count(None), 21 - 9)
+    check("the counts sum to the 21-day total",
+          sum(v for v in block["series"] if v is not None), block["stories_21d"])
+    check("it ends on the digest's own day, newest last", block["series"][-1], 2)
+    check("a day with papers and nothing on the theme is zero, not null",
+          block["series"][-3], 0)
+
+    # --- the knob hash: two builds with different knobs are distinguishable -------------
+    before = D.knobs_hash()
+    check("the same knobs give the same hash", D.knobs_hash(), before)
+    D.KNOBS["top_n"] = 11
+    check("a changed knob VALUE changes the hash", D.knobs_hash() == before, False)
+    D.KNOBS["top_n"] = 10
+    check("and putting it back restores it", D.knobs_hash(), before)
+    check("the daily cap is K1's number, not the placeholder",
+          D.KNOBS["daily_cost_cap_usd"], 1.00)
 
     # --- coverage, views, page links ----------------------------------------------------
     mixed = [seat(text_hash="c1", page=1, words=900),
@@ -393,10 +487,12 @@ TEXTS = [
 ]
 # run date, paper, art_id, page, text_hash, extra
 SEATS = [
-    ("2026-10-01", "Mint", "p01-a01", 1, "A1", {"see_also_page": 9}),
+    ("2026-10-01", "Mint", "p01-a01", 1, "A1",
+     {"see_also_page": 9, "continues_to": 11}),
     ("2026-10-01", "Mint", "p09-a01", 9, "B1", {}),
     ("2026-10-01", "Mint", "p05-a01", 5, "F1", {}),
-    ("2026-10-01", "The Hindu", "p01-a01", 1, "A2", {"related_id": "p04-a01"}),
+    ("2026-10-01", "The Hindu", "p01-a01", 1, "A2",
+     {"related_id": "p04-a01", "joined_from": "p10-a03", "continues_to": 4}),
     ("2026-10-01", "The Hindu", "p04-a01", 4, "C1", {}),
     ("2026-10-01", "The Hindu", "p12-a01", 12, "E1", {}),
     ("2026-10-01", "Business Line", "p03-a01", 3, "A3", {}),
@@ -510,7 +606,9 @@ def pipeline(tmp):
     # the contract itself
     check("the window is recorded", result["window"]["days"], ["2026-10-01"])
     check("every version that shaped it is recorded",
-          sorted(result["versions"]), ["digest", "grouping", "label", "tag_prompt", "tracking"])
+          sorted(result["versions"]),
+          ["digest", "grouping", "knobs_hash", "label", "tag_prompt", "tracking"])
+    check("the digest version is d0.2", result["versions"]["digest"], "d0.2")
     check("the knob values are recorded with it", result["knobs"]["top_n"], 10)
     check("the build says the page offset is not stored",
           result["report"]["page_offset_stored"], False)
@@ -519,6 +617,52 @@ def pipeline(tmp):
     check("the write-up slot is present and empty for part 1",
           [s["writeup"] for s in result["stories"]], [None] * len(result["stories"]))
     check("the whole contract is JSON-serialisable", bool(json.dumps(result)), True)
+
+    # the d0.2 additions, through the whole build and not only their own functions
+    mint_row = next(r for r in top["coverage"]["rows"]
+                    if r["paper"] == "Mint" and r["page"] == 1)
+    check("a coverage row whose piece continues carries the other page",
+          [l["pdf_page"] for l in mint_row["page_links_more"]], [11])
+    hindu_row = next(r for r in top["coverage"]["rows"]
+                     if r["paper"] == "The Hindu" and r["page"] == 1)
+    check("a row that jumps twice carries both, in reading order",
+          [(l["reason"], l["pdf_page"]) for l in hindu_row["page_links_more"]],
+          [("joined_from", 10), ("continues_to", 4)])
+    check("a row whose piece does not jump carries an empty list",
+          next(r for r in top["coverage"]["rows"]
+               if r["paper"] == "Business Line")["page_links_more"], [])
+    check("R5's other pages are not invented for the see-also link it sits beside",
+          [l["kind"] for l in top["links"]], ["see_also_page", "related_id"])
+
+    check("every view carries the text_hash that opens its article",
+          [v["text_hash"] for v in top["views"]], ["A3"])
+
+    # R8: with top_n = 1 everything else is the long tail
+    folded = D.build("2026-10-01", "day", news=con[0], intel=con[1], vecs=con[2], top_n=1)
+    scored_count = len(folded["stories"]) + folded["dropped"]["below_top_n"]
+    check("the long tail holds every story below the top N",
+          sum(b["count"] for b in folded["long_tail"]), folded["dropped"]["below_top_n"])
+    check("which is every scored story but the one shown in full",
+          scored_count - 1, folded["dropped"]["below_top_n"])
+    check("the folded list is ordered by how many stories each topic has",
+          [b["count"] for b in folded["long_tail"]],
+          sorted((b["count"] for b in folded["long_tail"]), reverse=True))
+    check("a story in the long tail is not also in the top N",
+          set(s["story_id"] for b in folded["long_tail"] for s in b["stories"])
+          & {s["story_id"] for s in folded["stories"]}, set())
+    check("the long tail is JSON-serialisable with the rest",
+          bool(json.dumps(folded["long_tail"])), True)
+
+    # R9 through the real theme path. `loose_banking` above is the one themed story the
+    # mock can produce (three Banking stories in the window, counting lone briefs); the
+    # window ending 2026-10-01 has papers on that one day only.
+    series = loose_banking["theme"]["series"]
+    check("a real build fills the 21-day series", len(series), 21)
+    check("with papers on one day of the window, the other 20 are holes",
+          series.count(None), 20)
+    check("the day with papers carries the count", series[-1], 3)
+    check("and the series sums to the 21-day count",
+          sum(v for v in series if v is not None), loose_banking["theme"]["stories_21d"])
 
     # a week window joins the thread across two days
     week = D.build("2026-10-02", "week", news=con[0], intel=con[1], vecs=con[2])

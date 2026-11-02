@@ -579,9 +579,11 @@ def caches(tmp, five, day):
     r = D.write_up(st, one_liner, f12, cache=None)
     check("with no cache the write-up is simply written", f12.calls, 1)
     check("and is not marked cached", r["cached"], False)
+    # Counted off CACHE_TABLES rather than written out, so adding a cache (schema 2 added
+    # `suggest_cache`) extends the check instead of breaking it on its own length.
     check("caches are rebuildable: emptying them loses nothing but money",
           [con.execute(f"DELETE FROM {t}").rowcount >= 0 for t in ST.CACHE_TABLES],
-          [True, True])
+          [True] * len(ST.CACHE_TABLES))
     con.commit()
     con.close()
 
