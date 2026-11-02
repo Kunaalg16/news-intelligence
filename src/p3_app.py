@@ -467,26 +467,31 @@ def pdf(date: str, name: str):
 def port_is_free():
     """Is the port actually ours to take?
 
-    Asked BEFORE anything is printed. uvicorn's own failure arrives after the banner,
-    so a copy started while an older one is still running printed a confident
+    Asked BEFORE anything is printed. uvicorn's own failure arrives after the banner, so
+    a copy started while an older one is still running printed a confident
     "http://127.0.0.1:8765" and then failed underneath it -- which read as a successful
-    restart, three times in a row, while the browser went on talking to the old process
-    and showing old behaviour. An hour went into that.
+    restart three times over, while the browser went on talking to the old process and
+    showing old behaviour.
 
-    EADDRINUSE is the only refusal that means "taken". Any other (the sandbox this was
-    built in refuses to bind at all, with EPERM) is not this function's business: it
-    says yes and lets uvicorn report whatever the real problem is."""
-    import errno
+    This CONNECTS rather than binds. The first version of this check bound a probe
+    socket with SO_REUSEADDR, to agree with uvicorn about a port merely in TIME_WAIT --
+    and that probe reported a port free while another server was listening on it, so the
+    banner lied again with the check in place. A successful connection is not open to
+    interpretation: something is listening, and it is not us.
+
+    A refused connection means nothing is there, which is the answer we want. Any other
+    error (this build's sandbox refuses outbound connections to localhost altogether)
+    also reads as "nothing is in the way": it is not this function's job to second-guess
+    the network, only to catch the one case that has actually bitten.
+    """
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        # uvicorn sets this too, so the probe and the real bind agree about a socket
-        # that is merely in TIME_WAIT rather than held by a live listener.
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.settimeout(0.3)
         try:
-            probe.bind((KNOBS["host"], KNOBS["port"]))
-        except OSError as exc:
-            return exc.errno != errno.EADDRINUSE
-    return True
+            probe.connect((KNOBS["host"], KNOBS["port"]))
+        except OSError:
+            return True
+    return False
 
 
 def main():
