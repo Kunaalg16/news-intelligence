@@ -1184,10 +1184,197 @@ def ownership():
           sorted(set(re.findall(r"_work/[\w.]+", src))), ["_work/k1_app_state.json"])
 
 
+def v01_search():
+    """B2 · the double's search() and facets() (brief 2 §4.1), on the real digests.
+
+    Pass lines, written before the run:
+    - [behaviour] `search("")` is a browse: `verdict` None, `sort` "newest", and the
+      stories really are in newest-first order by their latest date.
+    - [behaviour] Every `cited`-able hash a result offers belongs to a story in that
+      result (the half of §4.5 rule 10 that search alone can answer: every article in a
+      story row is one of that story's own coverage rows).
+    - [fixture] Browse returns every story in the corpus once -- 19, not 20: one
+      story_id is in both digest files and must not come back twice -- and counts all
+      81 distinct coverage rows.
+    - [fixture] The three verdicts come from real queries: "police" -> enough (4
+      stories), "GST" -> thin (1), "Norway" -> empty (0).
+    - [fixture] The verdict line is the knob, not a hard-coded 3: raising
+      `verdict_enough_min` to 5 turns "police" from enough into thin, and putting it
+      back restores it.
+    - [fixture] `score` is the count of query words found, so a two-word query that
+      matches both scores 2.0 and one that matches one scores 1.0.
+    - [fixture] A query of only short words still searches: "AI" is a real topic here,
+      so it must not fall through to a browse; and a short word matches whole words
+      only, so "ai" does not score on "said".
+    - [fixture] A story shows at most `search_articles_shown` (3) articles while
+      `total_articles` counts every matching row, so "showing 3 of 7" is possible.
+    - [fixture] Every article carries the contract's seven keys, with a `page_link`
+      that has a `paper` in it (K3's rows do not).
+    - [fixture] Each filter narrows: `papers`, `kinds`, `topics`, `date_from`/`date_to`,
+      and `exclude_story_ids` removes exactly the excluded story.
+    - [fixture] `searched_days` follows the date filters (7 days unfiltered, 1 for a
+      single-day filter) and is not changed by `exclude_story_ids`.
+    - [fixture] Relevance order puts the higher score first; "newest" order ignores
+      score entirely.
+    - [fixture] `limit` caps the stories returned and leaves the totals alone.
+    - [fixture] `facets()` comes from the corpus: 5 papers, 5 kinds, 14 topics, the
+      archive's own 9-15 Oct range -- and every value it offers really has stories
+      behind it, so no filter can be chosen that returns nothing.
+    """
+    import p3_app_double as D
+
+    # --- browse ----------------------------------------------------------------
+    browse = D.search("")
+    check("[behaviour] a browse has no verdict to give", browse["verdict"], None)
+    check("[behaviour] a browse is sorted newest", browse["sort"], "newest")
+    latest = [max(s["dates"]) for s in browse["stories"]]
+    check("[behaviour] and really is in newest-first order",
+          latest, sorted(latest, reverse=True))
+    check("[behaviour] every article in a story row is one of that story's own rows",
+          sorted({a["text_hash"] for s in browse["stories"] for a in s["articles"]}
+                 - {h for s in D._search_corpus() for h in D._story_hashes(s)}), [])
+
+    check("[fixture] the corpus is 19 stories, the one in both files counted once",
+          browse["total_stories"], 19)
+    check("[fixture] and 81 distinct coverage rows", browse["total_articles"], 81)
+    check("[fixture] no story_id comes back twice",
+          len({s["story_id"] for s in browse["stories"]}), len(browse["stories"]))
+    check("[fixture] the story that is in both digests is in the corpus once",
+          [s["story_id"] for s in browse["stories"]].count("2026-10-11:56eaf7aa4d5b"), 1)
+
+    # --- the three verdicts, from real queries ---------------------------------
+    enough, thin, empty = D.search("police"), D.search("GST"), D.search("Norway")
+    check("[fixture] 'police' is enough", [enough["verdict"], enough["total_stories"]],
+          ["enough", 4])
+    check("[fixture] 'GST' is thin", [thin["verdict"], thin["total_stories"]],
+          ["thin", 1])
+    check("[fixture] 'Norway' is empty", [empty["verdict"], empty["total_stories"]],
+          ["empty", 0])
+    check("[fixture] an empty verdict brings back no stories", empty["stories"], [])
+
+    D.KNOBS["verdict_enough_min"] = 5
+    check("[fixture] the verdict line is the knob, not a 3 in the code",
+          D.search("police")["verdict"], "thin")
+    D.KNOBS["verdict_enough_min"] = 3
+    check("[fixture] and putting the knob back restores it",
+          D.search("police")["verdict"], "enough")
+
+    # --- scoring ---------------------------------------------------------------
+    two = D.search("Delhi police")
+    check("[fixture] a story matching both query words scores 2",
+          max(s["score"] for s in two["stories"]), 2.0)
+    check("[fixture] and every score is a count of words, never above the word count",
+          [s for s in two["stories"] if s["score"] > 2.0], [])
+    check("[fixture] a story that matches nothing is not in the result",
+          [s for s in two["stories"] if s["score"] == 0.0], [])
+
+    short = D.search("AI")
+    check("[fixture] a query of only short words still searches, not browses",
+          [short["verdict"], short["total_stories"]], ["thin", 2])
+    check("[fixture] a short word matches whole words only",
+          D._word_hits(["ai"], "She said again it was an aid"), 0)
+    check("[fixture] a long word matches inside a longer one, so plurals are found",
+          D._word_hits(["protest"], "Protesters gathered"), 1)
+    check("[fixture] short words are dropped when a longer one is there",
+          D._query_words("of the police"), ["the", "police"])
+
+    # --- the article rows ------------------------------------------------------
+    gst = thin["stories"][0]
+    check("[fixture] a story shows at most three articles", len(gst["articles"]), 3)
+    check("[fixture] while the total counts every matching row",
+          thin["total_articles"], 5)
+    art = gst["articles"][0]
+    check("[fixture] an article carries the contract's keys", sorted(art),
+          ["date", "headline", "kind", "page_link", "paper", "snippet", "text_hash"])
+    check("[fixture] its page_link carries the paper, which K3's rows do not",
+          sorted(art["page_link"]), ["label", "paper", "pdf", "pdf_page"])
+    check("[fixture] and the paper in it is the article's own paper",
+          art["page_link"]["paper"], art["paper"])
+    check("[fixture] the snippet is the row headline (fixture, recorded as such)",
+          art["snippet"], art["headline"])
+    check("[fixture] a story row counts its papers, not lists them",
+          isinstance(gst["papers"], int), True)
+
+    # --- filters ---------------------------------------------------------------
+    one_paper = D.search("", filters={"papers": ["Mint"]})
+    check("[fixture] a paper filter leaves only that paper",
+          sorted({a["paper"] for s in one_paper["stories"] for a in s["articles"]}),
+          ["Mint"])
+    one_kind = D.search("", filters={"kinds": ["opinion"]})
+    check("[fixture] a kind filter leaves only that kind",
+          sorted({a["kind"] for s in one_kind["stories"] for a in s["articles"]}),
+          ["opinion"])
+    one_topic = D.search("", filters={"topics": ["AI"]})
+    check("[fixture] a topic filter narrows to that theme's stories",
+          0 < one_topic["total_stories"] < browse["total_stories"], True)
+    one_day = D.search("", filters={"date_from": "2026-10-11", "date_to": "2026-10-11"})
+    check("[fixture] a one-day filter leaves only that day's rows",
+          sorted({a["date"] for s in one_day["stories"] for a in s["articles"]}),
+          ["2026-10-11"])
+    check("[fixture] and searched_days says one day was searched",
+          one_day["searched_days"], 1)
+    check("[fixture] where the unfiltered search says seven",
+          browse["searched_days"], 7)
+
+    drop = enough["stories"][0]["story_id"]
+    minus = D.search("police", filters={"exclude_story_ids": [drop]})
+    check("[fixture] exclude_story_ids removes exactly that story",
+          [minus["total_stories"], drop in [s["story_id"] for s in minus["stories"]]],
+          [enough["total_stories"] - 1, False])
+    check("[fixture] excluding a story does not change the days searched",
+          minus["searched_days"], enough["searched_days"])
+
+    # --- order and limit -------------------------------------------------------
+    scores = [s["score"] for s in two["stories"]]
+    check("[fixture] relevance order puts the best score first",
+          scores, sorted(scores, reverse=True))
+    newest = D.search("Delhi police", sort="newest")
+    check("[fixture] newest order ignores the score",
+          [max(s["dates"]) for s in newest["stories"]],
+          sorted([max(s["dates"]) for s in newest["stories"]], reverse=True))
+    check("[fixture] and keeps the same stories",
+          sorted(s["story_id"] for s in newest["stories"]),
+          sorted(s["story_id"] for s in two["stories"]))
+    small = D.search("", limit=4)
+    check("[fixture] limit caps what comes back", len(small["stories"]), 4)
+    check("[fixture] and leaves the totals alone",
+          [small["total_stories"], small["total_articles"]],
+          [browse["total_stories"], browse["total_articles"]])
+    check("[fixture] limit 0 brings back nothing but still counts",
+          [len(D.search("", limit=0)["stories"]), D.search("", limit=0)["total_stories"]],
+          [0, 19])
+
+    # --- facets ----------------------------------------------------------------
+    f = D.facets()
+    check("[fixture] facets name the five papers in the archive",
+          f["papers"], ["Business Line", "Business Standard", "Mint", "The Hindu",
+                        "Times of India"])
+    check("[fixture] and the five kinds, 'brief' among them (v0 D3)",
+          f["kinds"], ["analysis", "brief", "data", "news", "opinion"])
+    check("[fixture] and fourteen theme topics", len(f["topics"]), 14)
+    check("[fixture] and the archive's own date range",
+          [f["date_min"], f["date_max"]], ["2026-10-09", "2026-10-15"])
+    empty_facets = []
+    for paper in f["papers"]:
+        if not D.search("", filters={"papers": [paper]})["total_stories"]:
+            empty_facets.append(paper)
+    for kind in f["kinds"]:
+        if not D.search("", filters={"kinds": [kind]})["total_stories"]:
+            empty_facets.append(kind)
+    for topic in f["topics"]:
+        if not D.search("", filters={"topics": [topic]})["total_stories"]:
+            empty_facets.append(topic)
+    check("[fixture] every value a filter offers has stories behind it",
+          empty_facets, [])
+    check("[fixture] every search result says it is a fixture",
+          [browse["fixture"], thin["fixture"], empty["fixture"]], [True, True, True])
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
     real()
+    v01_search()
     routes()
     pdf_guard()
     js_logic()

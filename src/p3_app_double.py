@@ -103,6 +103,19 @@ KNOBS = {
     "body_words_min": 240,
     "body_words_max": 700,
 
+    # --- v0.1 search (§4.1) -------------------------------------------------
+    # A query word shorter than this matches inside too many headlines to tell stories
+    # apart ("to", "of"); three letters is the brief's own rule. What would change it is
+    # a real query whose only useful word is two letters.
+    "search_word_min_letters": 3,
+    # How many articles a story shows in a result list. The brief says 1-3 (§4.1); the
+    # pane and Explore both show the best few, not the whole story.
+    "search_articles_shown": 3,
+    # The fixture verdict line: this many matching stories or more is "enough", 1-2 is
+    # "thin", none is "empty". K3 sets the real thresholds from its Q17 question set
+    # (register A3); this is the number the brief fixes for the double.
+    "verdict_enough_min": 3,
+
     # --- visits -------------------------------------------------------------
     # Re-opening the same digest within this many minutes is the same sitting, not a new
     # visit, so a reload does not reset "since last visit". Half an hour is a guess;
@@ -695,3 +708,204 @@ def cost_today():
         spent = cap                                  # H5: the cap is spent
     return {"spent_usd": round(spent, 6), "cap_usd": cap,
             "fixture": bool(FIXTURES["cap_reached"])}
+
+
+# =========================================================== v0.1 · SEARCH (§4.1)
+#
+# K3 implements this (contract v2 §6) over `data/search.db`, 10,912 passages. Here the
+# corpus is every story and coverage row of the two digests -- 19 stories, 87 rows --
+# which is small on purpose: it is enough to produce every verdict and every screen
+# state, and far too small to be mistaken for the real index.
+
+def _search_corpus():
+    """Every story of every digest, newest digest first, one entry per story_id.
+
+    One story_id really is in both files (`2026-10-11:56eaf7aa4d5b`, the 11 Oct day
+    digest and the 9-15 Oct week overlap), so without the de-duplication it would be
+    two results that open the same story. The newest digest's copy wins, because that
+    is the one `get_digest("latest")` would hand the page."""
+    seen = set()
+    out = []
+    for _stem, _path, obj in _digest_files():
+        for story in obj.get("stories", []):
+            sid = story.get("story_id")
+            if sid in seen:
+                continue
+            seen.add(sid)
+            out.append(story)
+    return out
+
+
+def _story_text(story):
+    """The words a query is matched against: headline + one-liner + its rows' headlines.
+    Fixture rule (§4.1). The real search matches passage text, which is not in the JSON."""
+    bits = [(story.get("headline") or {}).get("text") or "",
+            (story.get("one_liner") or {}).get("text") or ""]
+    bits += [r.get("headline") or "" for r in story.get("coverage", {}).get("rows", [])]
+    return " ".join(bits)
+
+
+def _query_words(query):
+    """Lower-cased words of at least the knob's length -- unless NONE of them reaches it.
+
+    The brief's rule is words of three letters or more, and the reason is that "to" and
+    "of" match inside every headline. But "AI" is a real topic in this archive (it is in
+    `facets()["topics"]`), so dropping every short word would turn the query "AI" into
+    an empty one, and the page would quietly show a browse instead of an answer. So the
+    short words are dropped only when there is a longer one to search with."""
+    words = re.findall(r"[a-z0-9]+", str(query or "").lower())
+    long_enough = [w for w in words if len(w) >= KNOBS["search_word_min_letters"]]
+    return long_enough or words
+
+
+def _word_hits(words, text):
+    """How many of the query's words appear in the text. Counted once per word, not per
+    occurrence: a headline that says "poll" three times is not three times the answer.
+
+    A word of the knob's length or more matches inside a longer one, so "protest" finds
+    "protests" and "protesters" -- worth having, and the real search stems anyway. A
+    shorter word has to be a whole word, or "ai" would match "said", "again" and "aid"
+    and the score would mean nothing."""
+    low = text.lower()
+    hits = 0
+    for w in words:
+        if len(w) >= KNOBS["search_word_min_letters"]:
+            hits += 1 if w in low else 0
+        else:
+            hits += 1 if re.search(r"\b" + re.escape(w) + r"\b", low) else 0
+    return hits
+
+
+def _desc(text):
+    """Sort a string descending inside an otherwise ascending key. Dates are ISO, so
+    inverting each character's code point is enough and keeps the key a plain tuple."""
+    return tuple(-ord(c) for c in text)
+
+
+def _row_ok(row, story, filters):
+    """Does one coverage row pass the filters? Dates, papers and kinds are the row's own;
+    `topics` is the story's theme topic, which every row of that story shares."""
+    if filters.get("date_from") and (row.get("date") or "") < filters["date_from"]:
+        return False
+    if filters.get("date_to") and (row.get("date") or "") > filters["date_to"]:
+        return False
+    if filters.get("papers") and row.get("paper") not in filters["papers"]:
+        return False
+    if filters.get("kinds") and row.get("kind") not in filters["kinds"]:
+        return False
+    if filters.get("topics"):
+        if (story.get("theme") or {}).get("topic") not in filters["topics"]:
+            return False
+    return True
+
+
+def _article_row(row):
+    """One article in a search result, in the contract's shape. `snippet` is the row's
+    headline: the real one is the matching passage, which this corpus does not hold, so
+    it is marked as the fixture it is in the hand-off rather than invented prose."""
+    link = row.get("page_link") or {}
+    return {"text_hash": row.get("text_hash"),
+            "headline": row.get("headline"),
+            "paper": row.get("paper"),
+            "date": row.get("date"),
+            "kind": row.get("kind"),
+            # K3's rows carry no `paper` inside page_link; §4.1 asks for one, and the
+            # page needs it to print "<code> PDF p<N>" (same addition as _page_link).
+            "page_link": _page_link(link.get("pdf"), link.get("pdf_page"),
+                                    row.get("paper")),
+            "snippet": row.get("headline")}
+
+
+def search(query, filters=None, sort="relevance", limit=20):
+    """Search the archive. K3 implements this (contract v2 §6).
+
+    Empty query is BROWSE: everything the filters allow, newest first, no score, and
+    `verdict` None -- a browse has nothing to be thin about. With a query, the fixture
+    score is how many of its words are in a story's headline, one-liner and row
+    headlines, and the verdict comes from how many stories matched at all."""
+    filters = dict(filters or {})
+    sort = "newest" if sort == "newest" else "relevance"
+    words = _query_words(query)
+    browse = not words
+    exclude = set(filters.get("exclude_story_ids") or [])
+
+    searched_dates = set()
+    hits = []
+    for story in _search_corpus():
+        rows = [r for r in story.get("coverage", {}).get("rows", [])
+                if _row_ok(r, story, filters)]
+        # Every day with something in it to search counts as searched, even if this
+        # story is excluded or does not match: "searched N days" is about the window
+        # the question was asked of, not about what came back.
+        searched_dates.update(r.get("date") for r in rows if r.get("date"))
+        if not rows or story.get("story_id") in exclude:
+            continue
+        score = None if browse else float(_word_hits(words, _story_text(story)))
+        if not browse and not score:
+            continue
+        # Articles are ranked by the same word count on their own headline, then by
+        # date (newest first) so the order is stable when nothing matches -- which is
+        # the browse case, where every row scores zero.
+        ranked = sorted(rows, key=lambda r: (-_word_hits(words, r.get("headline") or ""),
+                                             _desc(r.get("date") or ""),
+                                             r.get("paper") or ""))
+        shown = [_article_row(r) for r in ranked[:KNOBS["search_articles_shown"]]]
+        dates = sorted({r.get("date") for r in rows if r.get("date")})
+        hits.append({"story_id": story.get("story_id"),
+                     "headline": (story.get("headline") or {}).get("text") or "",
+                     "dates": dates,
+                     "papers": len({r.get("paper") for r in rows}),
+                     "score": score,
+                     "articles": shown,
+                     "_articles_total": len(rows),
+                     "_latest": dates[-1] if dates else ""})
+
+    if sort == "newest" or browse:
+        hits.sort(key=lambda h: (_desc(h["_latest"]), h["headline"]))
+    else:
+        hits.sort(key=lambda h: (-(h["score"] or 0.0), _desc(h["_latest"]), h["headline"]))
+
+    total_articles = sum(h["_articles_total"] for h in hits)
+    for h in hits:
+        del h["_articles_total"]
+        del h["_latest"]
+
+    if browse:
+        verdict = None
+    elif len(hits) >= KNOBS["verdict_enough_min"]:
+        verdict = "enough"
+    elif hits:
+        verdict = "thin"
+    else:
+        verdict = "empty"
+
+    return {"query": query, "filters": filters,
+            "sort": "newest" if browse else sort,
+            "verdict": verdict,
+            "searched_days": len(searched_dates),
+            "total_stories": len(hits),
+            "total_articles": total_articles,
+            "stories": hits[:max(0, int(limit))],
+            "fixture": True}
+
+
+def facets():
+    """The values the Explore filters offer. K3 implements this (contract v2 §6).
+    Taken from the corpus itself, so a filter can never offer a value with nothing
+    behind it. `topics` is the stories' theme topic -- K3's stories carry no `topics`
+    field of their own (measured 2 Nov: absent on all 20)."""
+    papers, kinds, topics, dates = set(), set(), set(), set()
+    for story in _search_corpus():
+        topic = (story.get("theme") or {}).get("topic")
+        if topic:
+            topics.add(topic)
+        for row in story.get("coverage", {}).get("rows", []):
+            if row.get("paper"):
+                papers.add(row["paper"])
+            if row.get("kind"):
+                kinds.add(row["kind"])
+            if row.get("date"):
+                dates.add(row["date"])
+    return {"papers": sorted(papers), "topics": sorted(topics), "kinds": sorted(kinds),
+            "date_min": min(dates) if dates else None,
+            "date_max": max(dates) if dates else None}
