@@ -110,6 +110,8 @@ FLAGS = {
     "background_line": True,       # the dashed "NOT FROM YOUR PAPERS" block
     "background_on_request": True, # the Background button on an answer that has none
     "cap_override": True,          # "Allow $1 more today" in the cap band
+    "suggest_connections": True,   # the Suggest connections button and its box
+    "user_links": True,            # off hides the + icon AND the user thread entries
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,

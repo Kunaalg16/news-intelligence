@@ -30,6 +30,10 @@ const S = {
   folded: {},                    /* answer_id -> true once Think harder answered */
   estimates: {},                 /* kind -> cost_usd, read once at boot */
   reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
+  suggestions: {},               /* story_id -> its suggestion set, once asked for */
+  userLinks: {},                 /* story_id -> the links the reader made out of it */
+  pinnedStories: new Set(),      /* so a dark pin is dark again after a reload */
+  pinIds: {},                    /* story_id -> pin_id, for unpinning from a dark pin */
   screen: 'today',
   ref: 'latest',
   digest: null,
@@ -627,14 +631,17 @@ function articlePinButton(article) {
   }));
 }
 
-function pinControl(itemType, what) {
+function pinControl(itemType, what, options) {
+  const o = options || {};
   const wrap = el('span', { class: 'pin-wrap' });
   const menu = el('div', { class: 'pin-menu' });
   menu.hidden = true;
 
   const button = el('button', {
-    class: 'reset action', type: 'button', dataset: { you: 'true' },
-    'aria-expanded': 'false', 'aria-haspopup': 'menu', text: 'Pin to board',
+    class: 'reset ' + (o.class || 'action'), type: 'button', dataset: { you: 'true' },
+    'aria-expanded': 'false', 'aria-haspopup': 'menu',
+    'aria-label': o.label || null,
+    text: o.icon ? null : 'Pin to board',
     onclick: async () => {
       const open = menu.hidden;
       if (open) {
@@ -642,7 +649,7 @@ function pinControl(itemType, what) {
         S.boards = (boards && boards.boards) || [];
         const shut = () => { menu.hidden = true;
                              button.setAttribute('aria-expanded', 'false'); };
-        fillPinMenu(menu, itemType, what, shut);
+        fillPinMenu(menu, itemType, what, shut, o.after);
         pinMenuKeys(menu, shut, button);
       }
       menu.hidden = !open;
@@ -654,6 +661,7 @@ function pinControl(itemType, what) {
     },
   });
 
+  if (o.icon) button.append(o.icon);
   wrap.append(button, menu);
   return wrap;
 }
@@ -692,15 +700,19 @@ function pinMenuKeys(menu, close, button) {
   });
 }
 
-function fillPinMenu(menu, itemType, what, close) {
+function fillPinMenu(menu, itemType, what, close, after) {
   clear(menu);
   const { payload, source } = what();
+  /* A suggestion's pin icon has to go dark the moment it is pinned, so the menu can be
+     told what to do afterwards. Everything else pins and leaves the page as it was. */
+  const done = after || (() => {});
 
   menu.append(el('ul', {}, S.boards.map((b) => el('li', {},
     el('button', { class: 'reset', type: 'button', onclick: async () => {
       close();
       const res = await api.pin(b.board_id, itemType, payload, source);
       pinnedToast(b.name, res && res.pin_id);
+      await done(b, res && res.pin_id, payload, source);
     } },
       b.name, ' ', el('span', { class: 'pin-count',
                                 text: '(' + b.pin_count + ')' }))))));
@@ -718,6 +730,8 @@ function fillPinMenu(menu, itemType, what, close) {
       S.boards = made.boards || S.boards;
       const res = await api.pin(made.board_id, itemType, payload, source);
       pinnedToast(name, res && res.pin_id);
+      await done({ board_id: made.board_id, name: name }, res && res.pin_id,
+                 payload, source);
     },
   });
   menu.append(el('div', { class: 'pin-new' }, input, make));
@@ -1020,6 +1034,10 @@ function renderStory(pane, story) {
 
   const thread = threadSection(story);
   if (thread) pane.append(thread);
+  /* §8.4: below the thread, or where the thread would have been when the story has
+     none -- a story with no thread is exactly the one a connection would help. */
+  const suggest = suggestSection(story);
+  if (suggest) pane.append(suggest);
 
   const also = seeAlso(story);
   if (also) pane.append(also);
@@ -1041,6 +1059,11 @@ function renderStory(pane, story) {
 /* The node's shape says what kind of link it is (§8.5). The newest entry is "today"
    whatever its link type: it is the top of the thread, not a kind of link. */
 function nodeKind(entry, index) {
+  /* R13 first, before the index rule: an entry YOU added is never "today", whatever
+     its date. If the target story is more recent than the open one it sorts to the top
+     of the thread, and drawing it as the red today node would say the pipeline found
+     it. The hollow ochre square says who put it there. */
+  if (entry.link_type === 'user') return 'user';
   if (index === 0) return 'today';
   return entry.link_type || 'untyped';
 }
@@ -1053,6 +1076,14 @@ const KIND_WORDS = {
 
 function nodeFor(entry, index) {
   return el('span', { class: 'node', dataset: { kind: nodeKind(entry, index) } });
+}
+
+function removeLinkButton(entry) {
+  return el('button', {
+    class: 'reset entry-wrong', type: 'button', text: 'Remove',
+    'aria-label': 'Remove the link you added to ' + entry.headline,
+    onclick: () => dropUserLink(entry.link_id),
+  });
 }
 
 /* "Wrong link?" on an entry: the thread is K2's guess at what continues what, and this
@@ -1098,9 +1129,16 @@ function timelineView(thread) {
                 ? ' · ' + entry.pages.map((p) => paperCode(p.paper) + ' p'
                     + p.pdf_page).join(' · ')
                 : '')),
-        el('h4', { class: 'entry-headline', text: entry.headline }),
+        el('h4', { class: 'entry-headline' },
+          entry.link_type === 'user'
+            ? el('span', { class: 'added-by-you', text: 'Added by you' }) : null,
+          entry.headline),
         el('p', { class: 'entry-line', text: entry.one_liner }),
-        wrongLinkButton(entry)));
+        /* K2 guessed the other links, so "Wrong link?" is the way to say it guessed
+           wrong. This one was not a guess -- it was the reader's -- so the only thing
+           to offer is taking it back. */
+        entry.link_type === 'user' ? removeLinkButton(entry)
+                                   : wrongLinkButton(entry)));
   }));
 
   if (!thread.related || !thread.related.length) return el('div', {}, list);
@@ -1133,9 +1171,10 @@ function graphPlan(thread) {
     const column = isFollow
       ? Math.max(0, spine.findIndex((e) => e.entry_id === entry.parent_id))
       : Math.max(0, spine.findIndex((e) => e.entry_id === entry.entry_id));
-    const kind = isFollow ? 'follow'
-      : (entry.entry_id === newestId ? 'today'
-        : (entry.link_type === 'start' ? 'start' : 'spine'));
+    const kind = entry.link_type === 'user' ? 'user'
+      : (isFollow ? 'follow'
+        : (entry.entry_id === newestId ? 'today'
+          : (entry.link_type === 'start' ? 'start' : 'spine')));
     return { entry: entry, entry_id: entry.entry_id, isFollow: isFollow,
              column: column, kind: kind };
   });
@@ -1238,7 +1277,11 @@ function threadSection(story) {
         thread.fixture ? el('span', { class: 'fixture-tag', text: 'sample data' }) : null),
       el('span', { class: 'thread-count',
         text: count(thread.days, 'day') + ' · ' + count(thread.articles, 'article')
-              + ' from ' + count(thread.papers, 'paper') }),
+              + ' from ' + count(thread.papers, 'paper')
+              /* R13: a thread you added to is a longer thread, and the day count
+                 cannot say so -- a link is not a day (decision D9). */
+              + (thread.entries_added_by_you
+                   ? ' · ' + thread.entries_added_by_you + ' added by you' : '') }),
       switcher),
     body);
 }
@@ -1491,6 +1534,11 @@ async function openStory(storyId) {
   /* The pane's scope follows the open story, and puts a divider in when the story
      changes under a conversation that already has turns (§8.3 state 7). */
   if (story && S.flags.assistant) await paneStoryOpened(story);
+  /* R13 · the reader's own links are part of the thread, so they are read before the
+     story is drawn rather than appearing a moment later. */
+  if (story && S.flags.user_links && !(storyId in S.userLinks)) {
+    await loadUserLinks(story);
+  }
 
   render();
   document.getElementById('reading').scrollTop = 0;
@@ -1519,6 +1567,8 @@ const FLAG_ELEMENTS = {
   background_line: '.answer-background',
   background_on_request: '.background-button',
   cap_override: '.cap-allow',
+  suggest_connections: '.suggest-offer, .suggest-box',
+  user_links: '.suggest-actions .icon-button[aria-label="Add to thread"]',
   /* the cost header lives in the shell, so it is hidden rather than rebuilt; `hidden`
      takes it out of the layout, which is what "no empty gap" asks for */
   cost_display: '#cost-header:not([hidden])',
@@ -2323,6 +2373,18 @@ const CHEAT_SHEET = [
   ['/', 'ask the assistant'], ['?', 'this list'],
 ];
 
+/* The thread's nodes are not keys, so they get their own short list in the same sheet
+   (§8.4 asks for the new one to be in "the timeline legend / ? sheet"; v0 has no
+   legend, and the sheet is the one place a reader already goes to ask what something
+   means). */
+const CHEAT_MARKS = [
+  ['today', 'the newest day in the thread'],
+  ['follow_up', 'a follow-up that branched off'],
+  ['start', 'where the story began'],
+  ['run_up', 'the day before it began'],
+  ['user', 'an entry you added yourself'],
+];
+
 function toggleCheatSheet() {
   const already = document.getElementById('cheat-sheet');
   if (already) { already.remove(); return; }
@@ -2331,6 +2393,12 @@ function toggleCheatSheet() {
     el('h2', { text: 'Keys' }),
     el('dl', {}, CHEAT_SHEET.map(([key, what]) =>
       el('div', {}, el('dt', { text: key }), el('dd', { text: what })))),
+    el('div', { class: 'cheat-marks' },
+      el('h2', { text: 'The thread\'s marks' }),
+      el('dl', {}, CHEAT_MARKS.map(([kind, what]) =>
+        el('div', {},
+          el('dt', {}, el('span', { class: 'node', dataset: { kind: kind } })),
+          el('dd', { text: what }))))),
     el('button', { class: 'reset action', type: 'button', text: 'Close',
                    onclick: () => toggleCheatSheet() }));
   document.body.append(sheet);
@@ -2470,8 +2538,10 @@ const EXPORTS = {
      is the difference between checking that the nine states render and hoping. */
   answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
   backgroundBlock, resultRow, sonnetLabel, renderAssistant, collapsedRail,
+  suggestSection, suggestionsBox, suggestionRow, icon, userLinkTo, suggestionPinned,
+  threadSection, timelineView, graphView, removeLinkButton,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
-  keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render, remember, undoLast,
+  keyAction, KEYS, CHEAT_SHEET, CHEAT_MARKS, FLAG_ELEMENTS, render, remember, undoLast,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 
@@ -2480,4 +2550,207 @@ if (typeof window !== 'undefined') {
   document.addEventListener('DOMContentLoaded', boot);
 } else {
   globalThis.APP = EXPORTS;
+}
+
+/* ============================================= Suggest connections (brief 2 §8.4)
+
+   On demand only (D4). The button is REPLACED by the suggestions -- no button left
+   behind -- because pressing it again would cost again, and K3 caches the set anyway.
+   The box has no Pin of its own: a box of suggestions is not a finding, and the two
+   icon buttons on each row are the only things that commit anything.
+
+   Light icon = not done, dark icon = done, and both survive a reload because they are
+   read back from the boards' pins and from list_user_links, not from a variable in
+   this page.
+*/
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/* Inline stroke SVG, 16px inside a 32px target. `currentColor` is the whole trick:
+   the dark state only has to change the button's colour and the icon follows. */
+function icon(kind) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '16');
+  svg.setAttribute('height', '16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.4');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const d of (kind === 'plus' ? ['M8 3.5v9', 'M3.5 8h9']
+                                   : ['M5 2h6', 'M8 2v6', 'M4.5 8h7l-1 2h-5z',
+                                      'M8 10v4'])) {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+function suggestionPinned(storyId) {
+  return S.pinnedStories.has(storyId);
+}
+
+function userLinkTo(storyId) {
+  return (S.userLinks[S.openStoryId] || [])
+    .find((l) => l.target_story_id === storyId) || null;
+}
+
+/* Every story the reader has pinned, whatever board it went to, so a dark pin is dark
+   again after a reload. The boards are few and this is read once, when the suggestions
+   are asked for -- the alternative is a route that answers "is this pinned", which is
+   a question the reader never asks. */
+async function loadPinnedStories() {
+  const boards = await api.boards();
+  S.boards = (boards && boards.boards) || [];
+  const pinned = new Set();
+  for (const board of S.boards) {
+    const got = await api.boardPins(board.board_id);
+    for (const pin of ((got && got.pins) || [])) {
+      if (pin.item_type === 'story' && pin.payload && pin.payload.story_id) {
+        pinned.add(pin.payload.story_id);
+        /* The board is kept with the pin id, because undoing an unpin has to put the
+           story back on the board it came off -- a toast that offers Undo and then
+           cannot do it is worse than no toast. */
+        S.pinIds[pin.payload.story_id] = { pin_id: pin.pin_id, board_id: board.board_id,
+                                           name: board.name, payload: pin.payload,
+                                           source: pin.source };
+      }
+    }
+  }
+  S.pinnedStories = pinned;
+}
+
+async function loadUserLinks(story) {
+  const got = await api.userLinks(storyHashes(story));
+  S.userLinks[story.story_id] = (got && got.user_links) || [];
+}
+
+async function askForSuggestions(story) {
+  const got = await api.suggest(story.story_id, storyHashes(story));
+  S.suggestions[story.story_id] = got;
+  await loadPinnedStories();
+  await loadUserLinks(story);
+  S.cost = await api.cost();
+  render();
+}
+
+async function addUserLink(story, suggestion) {
+  const target = findStory(suggestion.story_id);
+  const hashes = target ? storyHashes(target)
+                        : (suggestion.articles || []).map((a) => a.text_hash);
+  await api.addUserLink(story.story_id, storyHashes(story), suggestion.story_id, hashes);
+  await loadUserLinks(story);
+  /* The thread above has to be re-read, not just redrawn: the entry is new in it. */
+  const again = await api.thread(story.story_id);
+  S.threads[story.story_id] = (again && again.entries) ? again : null;
+  render();
+}
+
+async function dropUserLink(linkId) {
+  const story = findStory(S.openStoryId);
+  if (!story) return;
+  await api.removeUserLink(linkId);
+  await loadUserLinks(story);
+  const again = await api.thread(story.story_id);
+  S.threads[story.story_id] = (again && again.entries) ? again : null;
+  render();
+}
+
+async function unpinStory(storyId) {
+  const was = S.pinIds[storyId];
+  if (!was) return;
+  await api.unpin(was.pin_id);
+  delete S.pinIds[storyId];
+  S.pinnedStories.delete(storyId);
+  remember('unpin from ' + was.name, async () => {
+    const again = await api.pin(was.board_id, 'story', was.payload, was.source);
+    S.pinnedStories.add(storyId);
+    S.pinIds[storyId] = { pin_id: again ? again.pin_id : null,
+                          board_id: was.board_id, name: was.name,
+                          payload: was.payload, source: was.source };
+    render();
+  });
+  toast('Unpinned from ' + was.name, undoLast);
+  render();
+}
+
+/* One row: the story, why it is being offered, and the two things you can do with it. */
+function suggestionRow(story, suggestion) {
+  const linked = userLinkTo(suggestion.story_id);
+  const pinned = suggestionPinned(suggestion.story_id);
+  const best = (suggestion.articles || [])[0];
+  const when = suggestion.dates[suggestion.dates.length - 1];
+
+  const actions = el('div', { class: 'suggest-actions' });
+  if (pinned) {
+    actions.append(el('button', {
+      class: 'reset icon-button is-done', type: 'button', 'aria-pressed': 'true',
+      'aria-label': 'Pinned · click to unpin ' + suggestion.headline,
+      onclick: () => unpinStory(suggestion.story_id),
+    }, icon('pin')));
+  } else {
+    actions.append(pinControl('story', () => ({
+      payload: { story_id: suggestion.story_id, headline: suggestion.headline,
+                 text_hashes: (findStory(suggestion.story_id)
+                   ? storyHashes(findStory(suggestion.story_id))
+                   : (suggestion.articles || []).map((a) => a.text_hash)) },
+      source: { suggested_for: story.story_id, digest_ref: S.ref },
+    }), { class: 'icon-button', icon: icon('pin'), label: 'Pin to board',
+          after: async (board, pinId, payload, source) => {
+            S.pinnedStories.add(suggestion.story_id);
+            S.pinIds[suggestion.story_id] = { pin_id: pinId, board_id: board.board_id,
+                                              name: board.name, payload: payload,
+                                              source: source };
+            render();
+          } }));
+  }
+
+  if (S.flags.user_links) {
+    actions.append(el('button', {
+      class: 'reset icon-button' + (linked ? ' is-done' : ''), type: 'button',
+      'aria-pressed': linked ? 'true' : 'false',
+      'aria-label': linked ? 'Remove from the thread' : 'Add to thread',
+      onclick: () => (linked ? dropUserLink(linked.link_id)
+                             : addUserLink(story, suggestion)),
+    }, icon('plus')));
+  }
+
+  return el('div', { class: 'suggest-row' },
+    el('div', {},
+      el('button', { class: 'reset suggest-open', type: 'button',
+                     onclick: () => openStory(suggestion.story_id) },
+        el('h4', { text: suggestion.headline })),
+      el('p', { class: 'suggest-why' },
+        (best ? paperCode(best.paper) + ' · ' : '') + dateShort(when)
+          + ' · Why: ' + suggestion.why,
+        linked ? el('span', { class: 'added-note', text: ' · Added to the thread' })
+               : null)),
+    actions);
+}
+
+function suggestionsBox(story, got) {
+  const box = el('section', { class: 'suggest-box' });
+  box.append(el('div', { class: 'suggest-head' },
+    el('p', { class: 'block-label', text: 'Suggested by assistant' }),
+    el('p', { class: 'block-label', text: 'Not checked' })));
+  for (const suggestion of (got.suggestions || [])) {
+    box.append(suggestionRow(story, suggestion));
+  }
+  box.append(el('p', { class: 'suggest-cost' },
+    'Suggestions · ' + moneyFine(got.cost_usd),
+    got.fixture ? sampleTag() : null));
+  return box;
+}
+
+function suggestSection(story) {
+  if (!S.flags.suggest_connections) return null;
+  const got = S.suggestions[story.story_id];
+  if (got) return suggestionsBox(story, got);
+  return el('div', { class: 'suggest-offer' },
+    el('button', { class: 'reset action suggest-button', type: 'button',
+                   onclick: () => askForSuggestions(story) },
+      'Suggest connections · ≈ ' + moneyFine(S.estimates.suggest)));
 }

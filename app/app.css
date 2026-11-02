@@ -1114,3 +1114,88 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .pane-composer .ask-button:hover { background: var(--chip-ground); }
 .pane-composer .ask-button[disabled] { border-color: var(--mark);
                                        color: var(--mark); }
+
+/* ============================================= Suggest connections (brief 2 §8.4)
+
+   A dashed ochre border, because the box is the assistant's reading and not the
+   pipeline's finding: the dashes say "not checked" before the words do. Nothing in it
+   is red, and the box has no Pin of its own -- only the rows commit anything. */
+
+.suggest-offer { margin: 0 0 22px; }
+.suggest-button {
+  padding: 3px 9px;
+  border: 1px solid var(--ochre);
+  border-radius: 2px;
+  color: var(--ochre);
+}
+.suggest-button:hover { background: var(--chip-ground); }
+
+.suggest-box {
+  margin: 0 0 22px;
+  padding: 10px 12px;
+  border: 1px dashed var(--ochre);
+}
+.suggest-head { display: flex; justify-content: space-between; gap: 10px; }
+.suggest-head p { margin: 0; }
+
+.suggest-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--rule-light);
+}
+.suggest-row:first-of-type { border-top: 0; }
+.suggest-open { text-align: left; }
+.suggest-open h4 { margin: 0; font-family: var(--serif); font-size: var(--s16);
+                   font-weight: 500; }
+.suggest-open:hover h4 { text-decoration: underline; }
+.suggest-why { margin: 3px 0 0; font-size: var(--s125); color: var(--text-muted); }
+.added-note { color: var(--ochre); }
+.suggest-cost { margin: 9px 0 0; font-size: var(--s11); color: var(--text-muted); }
+
+/* The two icon buttons. 32 x 32 is the target; the icon inside is 16. */
+.suggest-actions { display: flex; gap: 6px; }
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--mark);
+  border-radius: 2px;
+  color: var(--text-secondary);
+}
+.icon-button:hover { background: var(--drawer-ground); }
+/* Done is DARK: filled ink with a page-coloured icon. Light against dark is the whole
+   difference, so it reads at a glance and does not depend on colour vision. */
+.icon-button.is-done {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--page);
+}
+.pin-wrap .icon-button { vertical-align: top; }
+
+/* R13 · an entry the reader added: a hollow ochre square, in both views. */
+.node[data-kind="user"] {
+  width: 12px; height: 12px;
+  border-radius: 0;
+  background: var(--page);
+  border: 2px solid var(--ochre);
+}
+.graph-node[data-kind="user"] { background: var(--page); border: 2px solid var(--ochre); }
+.graph-node[data-kind="user"] .graph-tag { color: var(--ochre); }
+.added-by-you {
+  margin-right: 6px;
+  font-family: var(--sans);
+  font-size: var(--s11);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ochre);
+}
+
+/* The marks the `?` sheet explains, since the thread's shapes are not keys. */
+.cheat-marks { margin: 14px 0 0; }
+.cheat-marks .node { position: static; display: inline-block; vertical-align: middle; }

@@ -511,7 +511,7 @@ def routes():
         f = A.flags()
         # B1 added one flag to v0's ten; B5 adds five more (§8.6). The count is checked
         # outright so a flag cannot be added without saying what it removes.
-        check("all sixteen feature flags are sent to the page", len(f["flags"]), 16)
+        check("all eighteen feature flags are sent to the page", len(f["flags"]), 18)
         check("the theme bar strip is off, its data not being in the JSON (R9)",
               f["flags"]["theme_bar_strip"], False)
         check("the cost header is on", f["flags"]["cost_display"], True)
@@ -519,10 +519,11 @@ def routes():
         # --- B1 (brief 2 §8.1) ----------------------------------------------------
         check("[fixture] B1 · the printed see-also line is on",
               f["flags"]["see_also_line"], True)
-        check("[fixture] B5 · every v0.1 pane flag is on",
+        check("[fixture] B5/B6 · every v0.1 flag is on",
               [f["flags"][k] for k in ("assistant", "think_harder", "background_line",
-                                       "background_on_request", "cap_override")],
-              [True] * 5)
+                                       "background_on_request", "cap_override",
+                                       "suggest_connections", "user_links")],
+              [True] * 7)
         check("[fixture] B1 · Q3 B took the earlier-coverage knob off the page with it",
               sorted(f["knobs"]), ["paragraph_words"])
 
@@ -799,6 +800,7 @@ function controlsOf(node, found) {
 var document = {
   byId: {},
   createElement: function (tag) { return new Node(tag); },
+  createElementNS: function (ns, tag) { var n = new Node(tag); n.ns = ns; return n; },
   createTextNode: function (t) { var n = new Node('#text'); n.textContent = t; return n; },
   getElementById: function (id) { return document.byId[id] || null; },
   querySelector: function () { return null; },
@@ -1375,6 +1377,163 @@ PS.conversation = null;
 PS.reloadDivider = null;
 PS.scope = {story_id: null, text_hashes: [], filters: {}};
 PS.results = {};
+
+
+// === B6 · Suggest connections and the reader's own links (brief 2 §8.4) ===========
+
+PS.ref = "digest_live";
+PS.openStoryId = "open1";
+PS.flags.suggest_connections = true;
+PS.flags.user_links = true;
+PS.suggestions = {};
+PS.userLinks = {};
+PS.pinnedStories = new Set();
+PS.pinIds = {};
+PS.estimates.suggest = 0.0005;
+
+var openStoryFixture = {story_id: "open1",
+  headline: {text: "The open story", source_text_hash: "oh1"},
+  coverage: {rows: [{text_hash: "oh1", paper: "Mint", date: "2026-10-11",
+                     page_link: {pdf: "a/b/c.pdf", pdf_page: 1, label: "PDF p1"}}]}};
+PS.digest = {stories: [openStoryFixture]};
+
+var suggestionFixture = {story_id: "sug1", headline: "A suggested story",
+  dates: ["2026-10-13"], papers: 2,
+  why: "Sample reason · shares the words 'delhi', 'jantar'",
+  articles: [{text_hash: "sh1", headline: "An article", paper: "The Hindu",
+              date: "2026-10-13", kind: "news",
+              page_link: {pdf: "a/b/d.pdf", pdf_page: 4, label: "PDF p4",
+                          paper: "The Hindu"}}]};
+var suggestSetFixture = {story_id: "open1", suggestions: [suggestionFixture],
+  verdict: "enough", model: "haiku", cost_usd: 0.0005, fixture: true};
+
+// before it is asked for: a button that prints its own price, and no box
+var offer = APP.suggestSection(openStoryFixture);
+eq("[fixture] §8.4 · on demand, the button says what it will cost",
+   textOf(offer), "Suggest connections · ≈ 0.05¢");
+eq("[fixture] D4 · and nothing has been fetched to draw a box with",
+   classesOf(offer).filter(function (c) { return c === "suggest-box"; }), []);
+
+// once asked for, the button is REPLACED by the box
+PS.suggestions.open1 = suggestSetFixture;
+var box = APP.suggestSection(openStoryFixture);
+eq("[fixture] §8.4 · the box is headed by who suggested it and that it is unchecked",
+   [textOf(box).indexOf("Suggested by assistant"), textOf(box).indexOf("Not checked") > 0],
+   [0, true]);
+eq("[fixture] §8.4 · the button is gone, not left beside the box",
+   controlsOf(box).filter(function (c) {
+     return c.label.indexOf("Suggest connections") === 0; }), []);
+eq("[fixture] §8.4 · the row says which paper, which day and why",
+   textOf(box).indexOf("TH · 13 Oct · Why: Sample reason · shares the words "
+                       + "'delhi', 'jantar'") > 0, true);
+eq("[fixture] §8.4 · a closing cost line, marked sample data",
+   [textOf(box).indexOf("Suggestions · 0.05¢") > 0,
+    textOf(box).indexOf("sample data") > 0], [true, true]);
+eq("[fixture] §8.4 · the box has no Pin of its own, only the rows' icons",
+   classesOf(box).filter(function (c) { return c === "suggest-box"; }).length, 1);
+
+// the two icon buttons: light, labelled, 32x32 targets
+var icons = controlsOf(box).filter(function (c) {
+  return c.label === "Pin to board" || c.label === "Add to thread"; });
+eq("[fixture] §8.4 · two icon buttons, each with its own label",
+   icons.map(function (c) { return c.aria; }).sort(),
+   ["Add to thread", "Pin to board"]);
+eq("[fixture] §8.4 · and both are real buttons, not clickable spans",
+   icons.filter(function (c) { return c.tag !== "BUTTON"; }), []);
+eq("[fixture] §8.4 · neither is pressed before anything is done",
+   APP.suggestionRow(openStoryFixture, suggestionFixture) &&
+   classesOf(APP.suggestionRow(openStoryFixture, suggestionFixture))
+     .filter(function (c) { return (c || "").indexOf("is-done") >= 0; }), []);
+
+// dark once done, and the row says so
+PS.userLinks.open1 = [{link_id: "ul1", target_story_id: "sug1",
+                       target_text_hashes: ["sh1"], at: "2026-11-02T10:00:00"}];
+PS.pinnedStories = new Set(["sug1"]);
+PS.pinIds.sug1 = {pin_id: "pin1", board_id: "b1", name: "Delhi",
+                  payload: {story_id: "sug1"}, source: {}};
+var doneRow = APP.suggestionRow(openStoryFixture, suggestionFixture);
+eq("[fixture] §8.4 · both icons are dark once both are done",
+   classesOf(doneRow).filter(function (c) {
+     return (c || "").indexOf("is-done") >= 0; }).length, 2);
+eq("[fixture] §8.4 · and say so to a screen reader",
+   controlsOf(doneRow).filter(function (c) {
+     return c.tag === "BUTTON"; }).length >= 2, true);
+eq("[fixture] §8.4 · the muted line gains 'Added to the thread'",
+   textOf(doneRow).indexOf("· Added to the thread") > 0, true);
+eq("[fixture] §8.4 · a dark pin offers to unpin, not to pin again",
+   controlsOf(doneRow).filter(function (c) {
+     return (c.aria || "").indexOf("click to unpin") > 0; }).length, 1);
+eq("[fixture] §8.4 · and a dark + offers to take it out of the thread",
+   controlsOf(doneRow).filter(function (c) {
+     return c.aria === "Remove from the thread"; }).length, 1);
+eq("[fixture] the link is found by the story it points at",
+   APP.userLinkTo("sug1").link_id, "ul1");
+eq("[fixture] and a story with no link has none", APP.userLinkTo("nothing"), null);
+eq("[fixture] a pinned story is known as pinned", APP.suggestionPinned("sug1"), true);
+
+// check 8 · user_links off hides the + icon
+PS.flags.user_links = false;
+eq("[fixture] check 8 · user_links off removes the + icon completely",
+   controlsOf(APP.suggestionRow(openStoryFixture, suggestionFixture))
+     .filter(function (c) { return (c.aria || "").indexOf("thread") > 0; }), []);
+PS.flags.user_links = true;
+PS.flags.suggest_connections = false;
+eq("[fixture] check 8 · suggest_connections off removes the whole thing",
+   APP.suggestSection(openStoryFixture), null);
+PS.flags.suggest_connections = true;
+
+// --- R13 · the user entry in BOTH views (acceptance check 12) --------------------
+var userEntry = {entry_id: "user:ul1", link_id: "ul1", date: "2026-10-13",
+  link_type: "user", added_by: "you", parent_id: null, story_id: "sug1",
+  headline: "A suggested story", one_liner: "Its one-liner.", articles: 3, papers: 2,
+  paper_names: ["Mint", "The Hindu"],
+  pages: [{pdf: "a/b/d.pdf", pdf_page: 4, label: "PDF p4", paper: "The Hindu"}],
+  fixture: false};
+var dayEntry = {entry_id: "2026-10-11:x", date: "2026-10-11", link_type: null,
+  parent_id: null, headline: "The open story's day", one_liner: "A one-liner.",
+  articles: 1, papers: 1, paper_names: ["Mint"],
+  pages: [{pdf: "a/b/c.pdf", pdf_page: 1, label: "PDF p1", paper: "Mint"}],
+  fixture: true};
+var threadFixture = {thread_id: "open1", days: 1, entries_added_by_you: 1,
+  articles: 4, papers: 2, entries: [userEntry, dayEntry], related: [], fixture: true};
+
+eq("[behaviour] check 12 · a user entry is a user node, not 'today', whatever its date",
+   APP.nodeKind(userEntry, 0), "user");
+eq("[behaviour] check 12 · and a day entry at the top still is today",
+   APP.nodeKind(dayEntry, 0), "today");
+eq("[behaviour] check 12 · both views draw the same entries, the user one included",
+   [APP.viewEntryIds(threadFixture, "timeline").sort(),
+    APP.viewEntryIds(threadFixture, "graph").sort()],
+   [["2026-10-11:x", "user:ul1"], ["2026-10-11:x", "user:ul1"]]);
+eq("[behaviour] check 12 · the graph gives it its own kind, so its box is ochre",
+   APP.graphPlan(threadFixture).filter(function (p) {
+     return p.entry_id === "user:ul1"; })[0].kind, "user");
+
+PS.threads = {open1: threadFixture};
+PS.prefs = {thread_view: "timeline"};
+var timeline = APP.timelineView(threadFixture);
+eq("[fixture] R13 · the entry is tagged as yours beside its headline",
+   textOf(timeline).indexOf("Added by you") > 0, true);
+eq("[fixture] R13 · 'Wrong link?' is replaced by 'Remove' on an entry you added",
+   controlsOf(timeline).filter(function (c) { return c.text === "Remove"; }).length, 1);
+eq("[fixture] R13 · and the pipeline's own entry still offers Wrong link?",
+   controlsOf(timeline).filter(function (c) {
+     return c.text === "Wrong link?"; }).length, 1);
+var head = APP.threadSection(openStoryFixture);
+eq("[fixture] R13 · the thread header counts what you added",
+   textOf(head).indexOf("1 added by you") > 0, true);
+eq("[fixture] R13 · the ? sheet explains the new node with the others",
+   APP.CHEAT_MARKS.map(function (m) { return m[0]; }),
+   ["today", "follow_up", "start", "run_up", "user"]);
+
+PS.threads = {};
+PS.prefs = {};
+PS.suggestions = {};
+PS.userLinks = {};
+PS.pinnedStories = new Set();
+PS.pinIds = {};
+PS.openStoryId = null;
+PS.digest = {stories: []};
 
 // every feature flag has to say what it takes off the page, or a flag can be added
 // that silently hides nothing (acceptance check 7)
