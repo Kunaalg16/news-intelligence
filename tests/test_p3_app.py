@@ -1238,6 +1238,66 @@ eq("[fixture] state 9 · a retryable one offers Retry",
      .length, 1);
 PS.live = null;
 
+
+// --- the error that was destroyed one frame after it was drawn -------------------
+// Every check above calls liveTurn() with S.live.error already set and reads the
+// wording. That tests the FRAME, never the sequence: nothing asked whether the error
+// is still there once the stream has ended. It was not. An errored ask never becomes a
+// conversation turn, so nulling the live turn wiped it and state 9's Retry could never
+// be clicked. The decision now has a name, so it can be checked as one.
+
+eq("[fixture] a finished answer is dropped, the conversation has it now",
+   APP.keepLiveAfterStream({question: "q", answer: {answer_id: "a1"}, sentences: []}),
+   false);
+eq("[fixture] an errored ask is KEPT, or its Retry can never be reached",
+   APP.keepLiveAfterStream({question: "q", error: {code: "model_error",
+                                                  reason: "timeout",
+                                                  retryable: true}}), true);
+eq("[fixture] every retryable reason is kept",
+   ["model_busy", "no_network", "timeout", "other"].filter(function (r) {
+     return !APP.keepLiveAfterStream({error: {code: "model_error", reason: r}}); }), []);
+eq("[fixture] and so is one that cannot be retried, so its hint can still be read",
+   ["key_rejected", "checks_failed"].filter(function (r) {
+     return !APP.keepLiveAfterStream({error: {code: "model_error", reason: r}}); }), []);
+eq("[fixture] the cap is NOT kept: its band above the composer says it",
+   APP.keepLiveAfterStream({question: "q", error: {code: "cap_reached",
+                                                   retryable: false}}), false);
+eq("[fixture] and nothing at all is kept when nothing was asked",
+   [APP.keepLiveAfterStream(null), APP.keepLiveAfterStream({question: "q",
+                                                            sentences: []})],
+   [false, false]);
+
+// the whole sequence, composed the way askNow() composes it
+function afterStream(live) {
+  PS.live = live;
+  var drawn = textOf(APP.liveTurn() || document.createElement("div"));
+  if (!APP.keepLiveAfterStream(PS.live)) PS.live = null;
+  var kept = textOf(APP.liveTurn() || document.createElement("div"));
+  return {drawn: drawn, kept: kept};
+}
+var errored = afterStream({question: "Delhi police", sentences: [], results: null,
+                           error: {type: "error", code: "model_error",
+                                   reason: "no_network", retryable: true,
+                                   message: "no internet connection"}});
+eq("[fixture] the error is drawn with its own wording",
+   errored.drawn.indexOf("no internet connection") > 0, true);
+eq("[fixture] and it is STILL THERE after the stream ends",
+   errored.kept.indexOf("no internet connection") > 0, true);
+eq("[fixture] with its Retry, which was the whole point",
+   errored.kept.indexOf("Retry") > 0, true);
+
+// the cap, which flashed the wrong wording for one frame
+var capped = afterStream({question: "police", sentences: [], results: null,
+                          error: {type: "error", code: "cap_reached",
+                                  retryable: false,
+                                  message: "Daily cap $0.50 reached"}});
+eq("[fixture] the cap never says 'unexpected error', not even for one frame",
+   capped.drawn.indexOf("unexpected error") >= 0, false);
+eq("[fixture] nor offers a Retry that would only be refused again",
+   capped.drawn.indexOf("Retry") >= 0, false);
+eq("[fixture] and the turn is gone afterwards, the band having said it", capped.kept, "");
+PS.live = null;
+
 eq("[fixture] under the cap there is room to ask", APP.atCap(), false);
 eq("[fixture] and the cap band is not drawn", APP.capBand(), null);
 PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};

@@ -1946,6 +1946,24 @@ function answerTurn(answer, opts) {
   return block;
 }
 
+/* Does the streamed turn stay on screen once the stream has ended?
+
+   This is the bug that hid behind a frame. A finished ANSWER becomes a conversation
+   turn, so dropping the live copy is right -- the redraw puts the same answer back from
+   `current_conversation()`. An ERROR never becomes a turn: the double returns straight
+   after the error event. So dropping the live copy destroys the error one frame after
+   it was drawn, and state 9's Retry button can never be reached. It is kept instead,
+   until the next question replaces it.
+
+   The cap is the exception. It has its own band above the composer and greys the
+   composer with it (§8.3 state 9), so a live error box would say the same thing twice
+   -- and say it wrongly, because a cap_reached event carries no `reason` and
+   errorWording() would call it "unexpected error". */
+function keepLiveAfterStream(live) {
+  if (!live || !live.error) return false;
+  return live.error.code !== 'cap_reached';
+}
+
 /* §8.3 state 3: "SONNET · SAME 8 PASSAGES". The count is the parent's passage set --
    how many articles the first answer was allowed to cite -- which is the whole claim
    Think harder makes: the same passages, read better. With the results gone after a
@@ -1992,7 +2010,11 @@ function liveTurn() {
   const block = el('div', { class: 'pane-turn' });
   block.append(el('p', { class: 'pane-you', text: 'You · ' + live.question }));
 
-  if (live.error) {
+  if (live.error && live.error.code === 'cap_reached') {
+    /* Nothing here: the band above the composer already says the cap is reached, with
+       the real numbers in it. Drawing a box too would repeat it in the wrong words. */
+    void 0;
+  } else if (live.error) {
     const words = errorWording(live.error);
     const box = el('div', { class: 'pane-error' },
       el('p', { class: 'error-first', text: words.first }),
@@ -2039,7 +2061,7 @@ async function askNow(question, options) {
   });
 
   const live = S.live;
-  S.live = null;
+  if (!keepLiveAfterStream(live)) S.live = null;
   if (live && live.answer) {
     if (live.results) S.results[live.answer.answer_id] = live.results;
     if (live.parentOf) S.folded[live.parentOf] = true;
@@ -2062,7 +2084,7 @@ async function runThinkHarder(answerId) {
     renderAssistant();
   });
   const live = S.live;
-  S.live = null;
+  if (!keepLiveAfterStream(live)) S.live = null;
   if (live && live.answer) {
     S.folded[answerId] = true;
     S.results[live.answer.answer_id] = S.results[answerId];
@@ -2239,6 +2261,7 @@ async function startNewConversation() {
   S.conversation = await api.conversation();
   S.results = {};
   S.folded = {};
+  S.live = null;                 /* a kept error from the old conversation goes with it */
   S.reloadDivider = null;
   renderAssistant();
   focusComposer();
@@ -3069,6 +3092,7 @@ const EXPORTS = {
      is the difference between checking that the nine states render and hoping. */
   answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
   backgroundBlock, resultRow, sonnetLabel, renderAssistant, collapsedRail,
+  keepLiveAfterStream,
   suggestSection, suggestionsBox, suggestionRow, icon, userLinkTo, suggestionPinned,
   exploreChips, exploreCounts, exploreArticleRows, exploreRow, exploreScreen,
   exploreState, EXPLORE_LIMIT, FILTER_MENUS,
