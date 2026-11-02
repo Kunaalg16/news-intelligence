@@ -865,6 +865,58 @@ function pdfHref(link) {
          + '#page=' + link.pdf_page;
 }
 
+/* Q1 B (Kunaal, 2 Nov) — the printed "see also" pointers, one muted line above Coverage.
+
+   `story.links` items are `see_also_page`: a `from` page_link, a `to_story_id` and a
+   `to_headline`. Two things in the real data shape this line (hand-off F1, D1). The
+   `from` object has no `paper`, so the code comes from the PDF's file name, which is
+   `<date>_<paper>.pdf`; and `label` is always "PDF p<N>" again, so printing it would
+   read "TH PDF p1 · PDF p1". The eight items on the one story that has any all point at
+   the SAME page, so the line groups by page -- otherwise it is one pointer eight times.
+   None of the eight `to_story_id`s is in the digest (they are among the 2,359 stories
+   below the top-N cut), so a headline here cannot be a link to anywhere; the count says
+   what the pointer is worth and the headlines ride along as the link's tooltip. */
+function paperFromPdf(pdf) {
+  const file = String(pdf || '').split('/').pop().replace(/\.pdf$/i, '');
+  const cut = file.indexOf('_');                 /* archive names are <date>_<paper>.pdf */
+  return cut === -1 ? file : file.slice(cut + 1);
+}
+
+function seeAlsoPlan(story) {
+  const links = ((story && story.links) || []).filter((l) => l && l.from && l.from.pdf);
+  const pages = [];
+  for (const link of links) {
+    const key = link.from.pdf + '#' + link.from.pdf_page;
+    let page = pages.find((p) => p.key === key);
+    if (!page) {
+      page = { key, link: link.from, headlines: [],
+               text: paperCode(paperFromPdf(link.from.pdf)) + ' PDF p' + link.from.pdf_page };
+      pages.push(page);
+    }
+    if (link.to_headline) page.headlines.push(link.to_headline);
+  }
+  if (!pages.length) return null;
+  const total = pages.reduce((n, p) => n + p.headlines.length, 0);
+  return { pages, total,
+           tail: !total ? ''
+                 : total + (total === 1 ? ' story' : ' stories')
+                   + ' on the same ' + (pages.length === 1 ? 'page' : 'pages') };
+}
+
+function seeAlso(story) {
+  if (!S.flags.see_also_line) return null;
+  const plan = seeAlsoPlan(story);
+  if (!plan) return null;
+  const bits = [];
+  plan.pages.forEach((page, i) => {
+    if (i) bits.push(' · ');
+    bits.push(el('a', { href: pdfHref(page.link), target: '_blank', rel: 'noopener',
+                        title: page.headlines.join('\n') || null }, page.text));
+  });
+  if (plan.tail) bits.push(' · ' + plan.tail);
+  return el('p', { class: 'see-also' }, 'The paper also points to: ', bits);
+}
+
 /* §8.4.12 — folded by default; a row that arrived since the last read gets a red dot. */
 function coverage(story) {
   const cov = story.coverage || {};
@@ -924,11 +976,11 @@ function renderStory(pane, story) {
   const theme = themeLine(story);
   if (theme) pane.append(theme);
 
-  const earlier = earlierCoverage(story);
-  if (earlier) pane.append(earlier);
   const thread = threadSection(story);
   if (thread) pane.append(thread);
 
+  const also = seeAlso(story);
+  if (also) pane.append(also);
   pane.append(coverage(story));
   pane.append(el('p', { class: 'page-footer',
     text: "Charts and photos aren't read. Use the page link to see them." }));
@@ -1149,34 +1201,11 @@ function threadSection(story) {
     body);
 }
 
-/* §8.5 — on Today, a short list of the days just before this one, so the reader can see
-   there IS earlier coverage without opening the thread. */
-function earlierCoverage(story) {
-  const thread = S.threads[story.story_id];
-  if (!thread || !thread.entries.length) return null;
-  const latest = thread.entries[0].date;
-  const cutoff = new Date(parts(latest).y, parts(latest).m - 1,
-                          parts(latest).d - (S.knobs.earlier_coverage_days || 3));
-  const recent = thread.entries.slice(1).filter((e) => {
-    const p = parts(e.date);
-    return new Date(p.y, p.m - 1, p.d) >= cutoff;
-  });
-  if (!recent.length) return null;
-
-  return el('section', { class: 'earlier' },
-    el('p', { class: 'earlier-title', text: 'Earlier coverage' }),
-    el('ul', {}, recent.map((entry) => {
-      const i = thread.entries.indexOf(entry);
-      const word = KIND_WORDS[entry.link_type];
-      return el('li', {},
-        el('span', { class: 'earlier-when', text: dateWithDay(entry.date) }),
-        el('span', { class: 'earlier-node' }, nodeFor(entry, i)),
-        el('button', { class: 'reset earlier-link', type: 'button',
-                       onclick: () => goToThreadEntry(entry.entry_id) },
-          word ? el('span', { class: 'entry-kind', text: word + ' · ' }) : null,
-          entry.headline));
-    })));
-}
+/* Q3 B (Kunaal, 2 Nov): "Earlier coverage" is gone from above the thread. The thread IS
+   the list of earlier days, and v0 showed the nearest three of them twice on one screen.
+   v0's `earlierCoverage` and its `.earlier` styles were deleted here rather than hidden
+   behind a flag, because the decision is which list earns the place, not whether to
+   show one. The jump into the thread is still the story-so-far chips and the `t` key. */
 
 /* --------------------------------------------------------------- the article view */
 
@@ -1438,6 +1467,7 @@ const FLAG_ELEMENTS = {
   caveat_partial_text: '.caveat',
   theme_line: '.theme-line',
   theme_bar_strip: '.theme-bars',
+  see_also_line: '.see-also',
   /* the cost header lives in the shell, so it is hidden rather than rebuilt; `hidden`
      takes it out of the layout, which is what "no empty gap" asks for */
   cost_display: '#cost-header:not([hidden])',
@@ -1675,6 +1705,7 @@ async function boot() {
 */
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
+  paperFromPdf, seeAlsoPlan,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
   keyAction, KEYS, CHEAT_SHEET, FLAG_ELEMENTS, render, remember, undoLast,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,

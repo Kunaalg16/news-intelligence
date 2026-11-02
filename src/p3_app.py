@@ -81,9 +81,6 @@ KNOBS = {
     # paragraphs too long to re-find his place in.
     "paragraph_words": 100,
 
-    # Today's "Earlier coverage" shows thread entries from this many days before the
-    # story's latest date (§7, last row).
-    "earlier_coverage_days": 3,
 }
 
 # ------------------------------------------------------- FEATURE FLAGS (brief §8.8)
@@ -100,6 +97,10 @@ FLAGS = {
     "theme_bar_strip": False,      # OFF: the daily series it needs is not in the JSON (R9)
     "cost_display": True,          # the cost header; review after one week of real use
     "agency_copy": False,          # OFF until the v0.1 assistant exists
+
+    # v0.1, brief 2 §8.6. Q1 B's printed "see also" line is the only one this step adds;
+    # the rest arrive with the pane, Explore and the suggestions.
+    "see_also_line": True,         # the "The paper also points to:" line above Coverage
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,
@@ -185,8 +186,7 @@ def flags():
     """What the page needs to know about itself: which features are shown, and the two
     knobs it also has to honour."""
     return {"flags": dict(FLAGS), "version": APP_VERSION,
-            "knobs": {"paragraph_words": KNOBS["paragraph_words"],
-                      "earlier_coverage_days": KNOBS["earlier_coverage_days"]}}
+            "knobs": {"paragraph_words": KNOBS["paragraph_words"]}}
 
 
 @app.get("/api/status")

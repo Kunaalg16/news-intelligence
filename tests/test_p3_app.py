@@ -85,7 +85,13 @@ PASS LINES (fixed before the run; brief §4 rules, §7 populations, §8.7 states
       that is not up/down and a target_kind that is not story/thread_link are 400.
     - Flipping a fixture switch through the dev route changes what /api/status says, so
       the states of §8.7 can be seen in the browser and not only in this test.
-    - `/api/flags` sends all ten flags, with `theme_bar_strip` off (R9).
+    - `/api/flags` sends all eleven flags, with `theme_bar_strip` off (R9) and B1's
+      `see_also_line` on. (v0 said ten; B1 adds one, brief 2 §8.1.)
+    - B1 pass lines, written before the run: the one 11 Oct story with a non-empty
+      `links` still has its eight `see_also_page` items after B1 (B1 changes the page,
+      never the data), all ten live-digest stories still have none, and the knobs the
+      page is sent no longer carry `earlier_coverage_days` -- Q3 B removed the only
+      thing that read it.
     - Paragraphs: every paragraph but the last reaches the knob's word count, no sentence
       is split (the paragraphs joined back together are the body again, word for word),
       and every paragraph ends on sentence punctuation.
@@ -503,10 +509,37 @@ def routes():
 
         # --- flags ----------------------------------------------------------------
         f = A.flags()
-        check("all ten feature flags are sent to the page", len(f["flags"]), 10)
+        check("all eleven feature flags are sent to the page", len(f["flags"]), 11)
         check("the theme bar strip is off, its data not being in the JSON (R9)",
               f["flags"]["theme_bar_strip"], False)
         check("the cost header is on", f["flags"]["cost_display"], True)
+
+        # --- B1 (brief 2 §8.1) ----------------------------------------------------
+        check("[fixture] B1 · the printed see-also line is on",
+              f["flags"]["see_also_line"], True)
+        check("[fixture] B1 · Q3 B took the earlier-coverage knob off the page with it",
+              sorted(f["knobs"]), ["paragraph_words"])
+
+        live = A.digest(ref="digest_live")
+        day = A.digest(ref="k3_b1_3_digest_2026-10-11")
+        with_links = [st for st in day["stories"] if st.get("links")]
+        check("[fixture] B1 · one 11 Oct story carries printed see-also pointers",
+              len(with_links), 1)
+        check("[fixture] B1 · and it carries eight of them",
+              len(with_links[0]["links"]), 8)
+        check("[fixture] B1 · every one is a see_also_page with a from page and a headline",
+              sorted({(it["kind"], bool(it["from"]["pdf"]), bool(it["to_headline"]))
+                      for it in with_links[0]["links"]}),
+              [("see_also_page", True, True)])
+        check("[fixture] B1 · all eight point at the same printed page, so the line groups",
+              len({(it["from"]["pdf"], it["from"]["pdf_page"])
+                   for it in with_links[0]["links"]}), 1)
+        check("[fixture] B1 · and none of their targets is a story in the digest, so no "
+              "headline here could be a link (hand-off F1)",
+              [it["to_headline"] for it in with_links[0]["links"]
+               if it["to_story_id"] in {st["story_id"] for st in day["stories"]}], [])
+        check("[fixture] B1 · the live digest's ten stories have no printed pointers",
+              [st["story_id"] for st in live["stories"] if st.get("links")], [])
 
         # --- the digests, both of them --------------------------------------------
         for ref in ("digest_live", "k3_b1_3_digest_2026-10-11"):
@@ -825,6 +858,57 @@ eq("slash is left unbound for the assistant", APP.keyAction("/", {}), null);
 eq("an ordinary letter does nothing", APP.keyAction("z", {}), null);
 eq("and neither does a key that only looks like one",
    APP.keyAction("constructor", {}), null);
+
+// --- B1 · Q1 B, the printed "see also" line (brief 2 §8.1) ------------------------
+// Tagged [fixture]: K1's own page logic, not a rule K3 has to pass.
+
+eq("[fixture] the paper's name comes out of the archive file name",
+   APP.paperFromPdf("archive/2026-10-11/2026-10-11_The Hindu.pdf"), "The Hindu");
+eq("[fixture] a file name with no date prefix is taken whole",
+   APP.paperFromPdf("Mint.pdf"), "Mint");
+eq("[fixture] no pdf, no paper", APP.paperFromPdf(null), "");
+
+eq("[fixture] a story with no links has no see-also line",
+   APP.seeAlsoPlan({links: []}), null);
+eq("[fixture] a story with no links field at all has none either",
+   APP.seeAlsoPlan({}), null);
+eq("[fixture] an item with no from page is dropped rather than drawn empty",
+   APP.seeAlsoPlan({links: [{kind: "see_also_page", to_headline: "x"}]}), null);
+
+var manyOnOnePage = {links: [1, 2, 3].map(function (i) {
+  return {kind: "see_also_page", to_story_id: "s" + i, to_headline: "Headline " + i,
+          from: {pdf: "archive/2026-10-11/2026-10-11_The Hindu.pdf", pdf_page: 1,
+                 label: "PDF p1"}};
+})};
+eq("[fixture] pointers to the same page are one pointer, not three",
+   APP.seeAlsoPlan(manyOnOnePage).pages.map(function (p) { return p.text; }),
+   ["TH PDF p1"]);
+eq("[fixture] the line says how many stories that pointer is worth",
+   APP.seeAlsoPlan(manyOnOnePage).tail, "3 stories on the same page");
+eq("[fixture] the headlines ride along as the pointer's tooltip",
+   APP.seeAlsoPlan(manyOnOnePage).pages[0].headlines,
+   ["Headline 1", "Headline 2", "Headline 3"]);
+
+eq("[fixture] one pointer to one story reads in the singular",
+   APP.seeAlsoPlan({links: [{to_headline: "One",
+     from: {pdf: "archive/2026-10-11/2026-10-11_Mint.pdf", pdf_page: 4}}]}).tail,
+   "1 story on the same page");
+eq("[fixture] two pages are two pointers and 'pages'",
+   APP.seeAlsoPlan({links: [
+     {to_headline: "a", from: {pdf: "archive/2026-10-11/2026-10-11_The Hindu.pdf", pdf_page: 1}},
+     {to_headline: "b", from: {pdf: "archive/2026-10-11/2026-10-11_Business Line.pdf", pdf_page: 7}}]}),
+   {pages: [{key: "archive/2026-10-11/2026-10-11_The Hindu.pdf#1",
+             link: {pdf: "archive/2026-10-11/2026-10-11_The Hindu.pdf", pdf_page: 1},
+             headlines: ["a"], text: "TH PDF p1"},
+            {key: "archive/2026-10-11/2026-10-11_Business Line.pdf#7",
+             link: {pdf: "archive/2026-10-11/2026-10-11_Business Line.pdf", pdf_page: 7},
+             headlines: ["b"], text: "BL PDF p7"}],
+    total: 2, tail: "2 stories on the same pages"});
+
+// Q3 B: "Earlier coverage" is gone, function and all. A leftover call would throw in
+// the browser and not here, so the check is that the name itself is unknown to the page.
+eq("[fixture] Q3 B · the page has no earlierCoverage function left",
+   typeof APP.earlierCoverage, "undefined");
 
 // every feature flag has to say what it takes off the page, or a flag can be added
 // that silently hides nothing (acceptance check 7)

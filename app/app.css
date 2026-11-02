@@ -696,21 +696,14 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
                      font-weight: 500; }
 .graph-selected p { margin: 0; font-size: var(--s125); color: var(--text-secondary); }
 
-/* ----------------------------------------------------- Today's earlier coverage */
+/* -------------------------------------------- the printed "see also" line (Q1 B)
 
-.earlier { margin: 0 0 22px; }
-.earlier-title {
-  margin: 0 0 8px; font-size: var(--s11); font-weight: 600; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--text-muted);
-}
-.earlier ul { margin: 0; padding: 0; list-style: none; }
-.earlier li { display: grid; grid-template-columns: 70px 20px 1fr; align-items: baseline;
-              gap: 0 6px; margin: 0 0 6px; }
-.earlier-when { font-size: var(--s125); color: var(--text-muted); }
-.earlier-node { position: relative; height: 1em; }
-.earlier-node .node { top: 0.55em; }
-.earlier-link { font-size: var(--s14); color: var(--ink); text-align: left; }
-.earlier-link:hover { text-decoration: underline; }
+   Muted, one line, sitting just above Coverage: it is a footnote about the printed
+   page, not part of the story. Q3 B's "Earlier coverage" block stood here in v0 and
+   its styles went with it. */
+
+.see-also { margin: 0 0 10px; font-size: var(--s125); color: var(--text-muted); }
+.see-also a { color: var(--text-secondary); }
 
 /* A fixture headline is longer than the mockup's invented ones, so a box ends on a
    clean line rather than mid-word at its edge. */
