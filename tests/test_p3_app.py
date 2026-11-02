@@ -1370,11 +1370,416 @@ def v01_search():
           [browse["fixture"], thin["fixture"], empty["fixture"]], [True, True, True])
 
 
+def _fresh_double(state_file):
+    """A second, independent copy of the double reading the same state file -- what a
+    restart of the app really is. Loaded under its own name so nothing is shared with
+    the module the rest of this file uses, which is the point: if the conversation came
+    back from an in-memory variable rather than the file, this would not see it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "p3_app_double_restarted", ROOT / "src" / "p3_app_double.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.ROOT, mod.ARCHIVE = ROOT, ROOT / "archive"
+    mod.WORK = state_file.parent
+    mod.STATE_FILE = state_file
+    mod.KNOBS["fixture_stream_delay_ms"] = 0
+    return mod
+
+
+def v01_ask():
+    """B3 · ask(), think_harder(), background, cost, conversation, suggestions, R13.
+
+    The fourteen behaviour rules of §4.5 are each one [behaviour] check, called through
+    the public functions only, so they run unchanged against K3's modules.
+
+    Pass lines, written before the run:
+    1  [behaviour] `ask()` yields `results` first, every time, before any sentence.
+    2  [behaviour] Every cite in an answer is a text_hash in that answer's own results.
+    3  [behaviour] An empty verdict has no sentences, costs 0, and offers exactly 3
+       closest stories.
+    4  [behaviour] `think_harder` keeps the parent's passage_set_id, sets
+       parent_answer_id, is Sonnet -- and the next `ask()` is Haiku again (one-shot).
+    5  [behaviour] A background line carries no cites and is never one of `sentences`.
+    6  [behaviour] `ask_background` works on any answer whose background is null --
+       empty, thin or enough -- and raises once there is one.
+    7  [behaviour] At the cap, `ask` ends in `cap_reached` and adds no cost at all.
+    8  [behaviour] `current_conversation()` gives the same id after a restart (a second
+       copy of the module, reading the same file) until `new_conversation()`.
+    9  [behaviour] `suggest_connections` never returns the story itself or a story its
+       thread already holds.
+    10 [behaviour] Every hash in `cited` belongs to a story in `found`.
+    11 [behaviour] `cost_today()` spent rises by exactly each call's own cost_usd.
+    12 [behaviour] Every model_error carries a reason and retryable, false for
+       key_rejected and checks_failed and true for the other four.
+    13 [behaviour] After `raise_cap_today(1.00)` the cap is the knob + 1.00 today and
+       the knob alone tomorrow (the date is simulated), and `ask` answers again.
+    14 [behaviour] `add_user_link` puts the target in `thread()` as link_type "user";
+       `remove_user_link` takes it out; `list_user_links` shows both states; and
+       nothing outside the reader's own state file is touched.
+
+    And the fixture side:
+    - [fixture] An answer carries all twenty contract keys, Haiku, attempts 1, drops 0.
+    - [fixture] An "enough" answer carries a background line on every second one, so the
+      dashed block and the Background button are both reachable without a switch.
+    - [fixture] A thin answer still gets two sentences; an enough answer up to three.
+    - [fixture] `estimate_cost` answers for the four kinds and raises on a fifth.
+    - [fixture] `think_harder` sends no `results` event.
+    - [fixture] The six error reasons each have their wording, and an unknown switch
+      value falls back to "other" rather than crashing the pane.
+    - [fixture] Cap presses add up, are refused past the knob's limit, and are logged
+      with their date.
+    - [fixture] A divider is a turn of its own; `ask` and `ask_background` add theirs.
+    - [fixture] Suggestions are 3 to 5, name their two rarest shared words, and cost.
+    - [fixture] A story with NO thread that is given a user link now has one.
+    """
+    import p3_app_double as D
+
+    with tempfile.TemporaryDirectory() as tmp:
+        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
+        D.WORK = Path(tmp)
+        D.STATE_FILE = Path(tmp) / "state.json"
+        D.KNOBS["fixture_stream_delay_ms"] = 0
+        D.FIXTURES["assistant_error"] = False
+        D.FIXTURES["cap_reached"] = False
+
+        # --- rule 1, 2, 10 and the answer's shape ------------------------------
+        events = list(D.ask("police", {"story_id": None}))
+        kinds = [e["type"] for e in events]
+        check("[behaviour] 1 · results comes first, before any sentence",
+              kinds[0], "results")
+        check("[behaviour] 1 · and done comes last", kinds[-1], "done")
+        check("[behaviour] 1 · nothing but results precedes the first sentence",
+              set(kinds[:kinds.index("sentence")]), {"results"})
+        result = events[0]["search"]
+        answer = events[-1]["answer"]
+        in_results = {a["text_hash"] for s in result["stories"] for a in s["articles"]}
+        check("[behaviour] 2 · every cite is a hash in that answer's own results",
+              sorted(set(answer["cited"]) - in_results), [])
+        check("[behaviour] 2 · and every streamed sentence's cites are too",
+              sorted({h for e in events if e["type"] == "sentence"
+                      for h in e["cites"]} - in_results), [])
+        found_hashes = {a["text_hash"] for s in result["stories"]
+                        if s["story_id"] in answer["found"] for a in s["articles"]}
+        check("[behaviour] 10 · every cited hash belongs to a story in found",
+              sorted(set(answer["cited"]) - found_hashes), [])
+
+        check("[fixture] an answer carries the contract's keys", sorted(answer),
+              ["answer_id", "at", "attempts", "background", "cited", "closest",
+               "conversation_id", "cost_usd", "drops", "fixture", "found",
+               "found_count", "model", "model_id", "parent_answer_id",
+               "passage_set_id", "question", "scope", "sentences", "verdict"])
+        check("[fixture] it is Haiku, named by its model id",
+              [answer["model"], answer["model_id"]], ["haiku", "claude-haiku-5-5"])
+        check("[fixture] one attempt, nothing dropped",
+              [answer["attempts"], answer["drops"]], [1, 0])
+        check("[fixture] found_count is the articles the search found, not the stories",
+              answer["found_count"], result["total_articles"])
+        check("[fixture] an enough answer has two or three sentences",
+              2 <= len(answer["sentences"]) <= 3, True)
+        check("[fixture] and says it is a fixture", answer["fixture"], True)
+
+        # --- rule 11 · the cost moves by exactly the call's own cost -----------
+        before = D.cost_today()["spent_usd"]
+        events2 = list(D.ask("GST", None))
+        thin = events2[-1]["answer"]
+        check("[behaviour] 11 · spend rises by exactly that answer's cost",
+              round(D.cost_today()["spent_usd"] - before, 6), thin["cost_usd"])
+        check("[fixture] a thin answer still gets two sentences",
+              [thin["verdict"], len(thin["sentences"])], ["thin", 2])
+
+        # --- rule 3 · the empty verdict ----------------------------------------
+        before = D.cost_today()["spent_usd"]
+        empty = list(D.ask("Norway", None))[-1]["answer"]
+        check("[behaviour] 3 · an empty answer has no sentences", empty["sentences"], [])
+        check("[behaviour] 3 · and costs nothing", empty["cost_usd"], 0)
+        check("[behaviour] 3 · and offers exactly three closest stories",
+              len(empty["closest"]), 3)
+        check("[behaviour] 3 · and the spend did not move",
+              D.cost_today()["spent_usd"], before)
+        check("[fixture] the closest stories are newest first",
+              [max(s["dates"]) for s in empty["closest"]],
+              sorted([max(s["dates"]) for s in empty["closest"]], reverse=True))
+
+        # --- rule 4 · think harder ---------------------------------------------
+        harder_events = list(D.think_harder(answer["answer_id"]))
+        harder = harder_events[-1]["answer"]
+        check("[fixture] think_harder sends no results event",
+              [e["type"] for e in harder_events if e["type"] == "results"], [])
+        check("[behaviour] 4 · it keeps the parent's passage set",
+              harder["passage_set_id"], answer["passage_set_id"])
+        check("[behaviour] 4 · and names its parent",
+              harder["parent_answer_id"], answer["answer_id"])
+        check("[behaviour] 4 · and is Sonnet",
+              [harder["model"], harder["model_id"]], ["sonnet", "claude-sonnet-5-5"])
+        check("[behaviour] 4 · it cites only from the parent's passages",
+              sorted(set(harder["cited"]) - in_results), [])
+        check("[behaviour] 4 · and the next ask is Haiku again, so it is one-shot",
+              list(D.ask("police", None))[-1]["answer"]["model"], "haiku")
+
+        # --- rules 5 and 6 · background ----------------------------------------
+        got = D.ask_background(empty["answer_id"])
+        check("[fixture] background on an empty answer is answered",
+              [got["model"], got["cost_usd"]], ["haiku", 0.0003])
+        reloaded = D.current_conversation()
+        stored = [t["answer"] for t in reloaded["turns"] if t.get("kind") == "answer"
+                  and t["answer"]["answer_id"] == empty["answer_id"]][0]
+        check("[behaviour] 5 · a background line is a plain string, not a cited sentence",
+              isinstance(stored["background"], str), True)
+        check("[behaviour] 5 · it names no text_hash at all",
+              [h for h in in_results if h in stored["background"]], [])
+        check("[behaviour] 5 · and is never one of the sentences",
+              [s for s in stored["sentences"] if s["text"] == stored["background"]], [])
+        check("[behaviour] 6 · and it is now on the stored answer",
+              stored["background"], got["text"])
+        try:
+            D.ask_background(empty["answer_id"])
+            twice = "no error"
+        except ValueError as exc:
+            twice = "error"
+        check("[behaviour] 6 · asking twice is an error", twice, "error")
+        try:
+            D.ask_background("ans_nope")
+            unknown = "no error"
+        except ValueError:
+            unknown = "error"
+        check("[fixture] background on an answer that does not exist is an error",
+              unknown, "error")
+
+        # the alternating background line on enough answers
+        marks = [bool(list(D.ask("police", None))[-1]["answer"]["background"])
+                 for _ in range(4)]
+        check("[fixture] an enough answer carries a background line every second time",
+              marks, [marks[0], not marks[0], marks[0], not marks[0]])
+        with_line = list(D.ask("police", None))[-1]["answer"]
+        without = list(D.ask("police", None))[-1]["answer"]
+        if with_line["background"] is None:                  # whichever way it fell
+            with_line, without = without, with_line
+        check("[behaviour] 6 · background works on an enough answer that came without one",
+              isinstance(D.ask_background(without["answer_id"])["text"], str), True)
+        try:
+            D.ask_background(with_line["answer_id"])
+            already = "no error"
+        except ValueError:
+            already = "error"
+        check("[behaviour] 6 · and is refused on the one that came with one",
+              already, "error")
+
+        # --- rule 12 · the error reasons ---------------------------------------
+        seen = {}
+        for switch in ("model_busy", "no_network", "key_rejected", "timeout",
+                       "checks_failed", "other"):
+            D.FIXTURES["assistant_error"] = switch
+            event = list(D.ask("police", None))[-1]
+            seen[switch] = (event["code"], event["reason"], event["retryable"],
+                            bool(event["message"]))
+        check("[behaviour] 12 · every reason comes back as itself, with a message",
+              sorted(k for k, v in seen.items()
+                     if v[0] == "model_error" and v[1] == k and v[3]),
+              ["checks_failed", "key_rejected", "model_busy", "no_network", "other",
+               "timeout"])
+        check("[behaviour] 12 · retryable is false for exactly these two",
+              sorted(k for k, v in seen.items() if v[2] is False),
+              ["checks_failed", "key_rejected"])
+        check("[behaviour] 12 · and true for the other four",
+              sorted(k for k, v in seen.items() if v[2] is True),
+              ["model_busy", "no_network", "other", "timeout"])
+        D.FIXTURES["assistant_error"] = True
+        check("[fixture] the switch set to True means model_busy",
+              list(D.ask("police", None))[-1]["reason"], "model_busy")
+        D.FIXTURES["assistant_error"] = "nonsense"
+        check("[fixture] an unknown reason falls back to 'other', not a crash",
+              list(D.ask("police", None))[-1]["reason"], "other")
+        D.FIXTURES["assistant_error"] = "timeout"
+        failed = list(D.ask("police", None))
+        check("[fixture] an error answer still sends its results first, so the reader "
+              "sees what was found",
+              [failed[0]["type"], failed[0]["search"]["verdict"], len(failed)],
+              ["results", "enough", 2])
+        D.FIXTURES["assistant_error"] = False
+
+        # --- rule 7 and 13 · the cap ------------------------------------------
+        D.FIXTURES["cap_reached"] = True
+        before = D.cost_today()["spent_usd"]
+        capped = list(D.ask("police", None))
+        check("[behaviour] 7 · at the cap the answer is cap_reached",
+              [capped[0]["type"], capped[-1]["type"], capped[-1]["code"]],
+              ["results", "error", "cap_reached"])
+        check("[behaviour] 7 · with no sentence in between",
+              [e for e in capped if e["type"] == "sentence"], [])
+        check("[behaviour] 7 · and it adds no cost",
+              D.cost_today()["spent_usd"], before)
+        check("[fixture] think harder is capped too",
+              list(D.think_harder(answer["answer_id"]))[-1]["code"], "cap_reached")
+
+        knob_cap = D.cost_today()["cap_usd"]
+        raised = D.raise_cap_today(1.00)
+        check("[behaviour] 13 · the cap is the knob plus the dollar",
+              raised["cap_usd"], round(knob_cap + 1.00, 6))
+        check("[behaviour] 13 · and says how much of it is an override",
+              raised["override_usd"], 1.0)
+        check("[behaviour] 13 · ask answers again while the spend is under the new cap",
+              list(D.ask("police", None))[-1]["type"], "done")
+        real_today = D._today
+        D._today = lambda: "2099-01-01"
+        try:
+            check("[behaviour] 13 · and tomorrow the cap is the knob alone",
+                  D.cost_today()["cap_usd"], knob_cap)
+            check("[behaviour] 13 · with nothing carried over",
+                  D.cost_today()["override_usd"], 0)
+        finally:
+            D._today = real_today
+        check("[fixture] presses add up",
+              D.raise_cap_today()["cap_usd"], round(knob_cap + 2.00, 6))
+        pressed = 2
+        while pressed < D.KNOBS["cap_override_max_per_day"]:
+            D.raise_cap_today()
+            pressed += 1
+        try:
+            D.raise_cap_today()
+            past = "no error"
+        except ValueError:
+            past = "error"
+        check("[fixture] and are refused past the knob's limit for one day",
+              past, "error")
+        D.FIXTURES["cap_reached"] = False
+
+        # --- rule 8 · the conversation survives a restart ----------------------
+        conv = D.current_conversation()
+        check("[fixture] the conversation holds the answers as turns",
+              len([t for t in conv["turns"] if t["kind"] == "answer"]) > 0, True)
+        bg_turns = [t for t in conv["turns"] if t["kind"] == "background"]
+        check("[fixture] and each background as a turn of its own",
+              [len(bg_turns) > 0,
+               sorted({t["answer_id"] for t in bg_turns}
+                      - set(D._load_state()["answers"]))],
+              [True, []])
+        check("[fixture] every background turn carries the text that went on its answer",
+              [t for t in bg_turns
+               if D._load_state()["answers"][t["answer_id"]]["background"] != t["text"]],
+              [])
+        D.add_divider(conv["conversation_id"], "sid_1", "A STORY'S HEADLINE")
+        divider = D.current_conversation()["turns"][-1]
+        check("[fixture] a divider is a turn with the story it points at",
+              [divider["kind"], divider["story_id"], divider["headline"]],
+              ["divider", "sid_1", "A STORY'S HEADLINE"])
+
+        restarted = _fresh_double(D.STATE_FILE)
+        check("[behaviour] 8 · after a restart the conversation is the same one",
+              restarted.current_conversation()["conversation_id"],
+              conv["conversation_id"])
+        check("[behaviour] 8 · with its turns still in it",
+              len(restarted.current_conversation()["turns"]),
+              len(D.current_conversation()["turns"]))
+        fresh_id = D.new_conversation()
+        check("[behaviour] 8 · and only new_conversation() changes it",
+              [fresh_id != conv["conversation_id"],
+               D.current_conversation()["turns"]], [True, []])
+        check("[fixture] the old conversation is still in the state file",
+              conv["conversation_id"] in
+              [c["conversation_id"] for c in D._load_state()["conversations"]], True)
+
+        # --- rule 9 · suggestions ----------------------------------------------
+        story_id = "2026-10-11:56eaf7aa4d5b"
+        story = D._find_story(lambda s: s.get("story_id") == story_id)
+        before = D.cost_today()["spent_usd"]
+        sugg = D.suggest_connections(story_id, D._story_hashes(story))
+        ids = [s["story_id"] for s in sugg["suggestions"]]
+        check("[behaviour] 9 · a suggestion is never the story itself",
+              story_id in ids, False)
+        check("[behaviour] 9 · nor anything its own thread already holds",
+              sorted(set(ids) & D._thread_story_ids(story)), [])
+        check("[fixture] three to five suggestions",
+              D.KNOBS["suggest_min"] <= len(ids) <= D.KNOBS["suggest_max"], True)
+        check("[fixture] each says why, naming shared words",
+              [s for s in sugg["suggestions"] if not s["why"].startswith("Sample reason")],
+              [])
+        check("[fixture] each carries one to three articles",
+              sorted({len(s["articles"]) for s in sugg["suggestions"]} - {1, 2, 3}), [])
+        check("[fixture] and the set costs what the estimate said",
+              [sugg["cost_usd"], round(D.cost_today()["spent_usd"] - before, 6)],
+              [D.estimate_cost("suggest")] * 2)
+        try:
+            D.suggest_connections("no_such_story")
+            missing = "no error"
+        except ValueError:
+            missing = "error"
+        check("[fixture] suggestions for a story that does not exist are an error",
+              missing, "error")
+
+        # --- rule 14 · the reader's own links ----------------------------------
+        bare = [s["story_id"] for s in D._search_corpus()
+                if D.thread(s["story_id"]) is None][0]
+        bare_story = D._find_story(lambda s: s.get("story_id") == bare)
+        target_id = ids[0]
+        target = D._find_story(lambda s: s.get("story_id") == target_id)
+        link_id = D.add_user_link(bare, D._story_hashes(bare_story), target_id,
+                                  D._story_hashes(target))
+        made = D.thread(bare)
+        user_entries = [e for e in made["entries"] if e["link_type"] == "user"]
+        check("[behaviour] 14 · a story with no thread has one once you add a link",
+              bool(made), True)
+        check("[behaviour] 14 · the target is in it as a user entry",
+              [len(user_entries), user_entries[0]["story_id"],
+               user_entries[0]["added_by"]], [1, target_id, "you"])
+        check("[behaviour] 14 · its headline and counts come from the target's own rows",
+              [user_entries[0]["headline"],
+               user_entries[0]["articles"]],
+              [(target.get("headline") or {}).get("text"),
+               len(target["coverage"]["rows"])])
+        check("[behaviour] 14 · the header counts say how many you added",
+              made["entries_added_by_you"], 1)
+        listed = D.list_user_links(D._story_hashes(bare_story))
+        check("[behaviour] 14 · list_user_links shows it",
+              [len(listed), listed[0]["link_id"], listed[0]["target_story_id"]],
+              [1, link_id, target_id])
+        state_keys_before = sorted(D._load_state())
+        check("[behaviour] 14 · remove_user_link takes it out",
+              [D.remove_user_link(link_id), D.thread(bare)], [True, None])
+        check("[behaviour] 14 · and list_user_links agrees",
+              D.list_user_links(D._story_hashes(bare_story)), [])
+        check("[behaviour] 14 · nothing outside the reader's own state was touched",
+              sorted(D._load_state()), state_keys_before)
+        check("[fixture] removing a link that is not there says so",
+              D.remove_user_link("ulink_nope"), False)
+
+        # a user link on a story that HAS a thread joins the days it already had
+        has_thread = [s["story_id"] for s in D._search_corpus()
+                      if D.thread(s["story_id"])][0]
+        ht_story = D._find_story(lambda s: s.get("story_id") == has_thread)
+        was = len(D.thread(has_thread)["entries"])
+        link2 = D.add_user_link(has_thread, D._story_hashes(ht_story), target_id,
+                                D._story_hashes(target))
+        now = D.thread(has_thread)
+        check("[fixture] a user link adds one entry to a thread that already had days",
+              len(now["entries"]), was + 1)
+        check("[fixture] and the days count still counts only the days",
+              now["days"], D.thread(has_thread)["days"])
+        check("[fixture] the entry ids are unique, user entries and days alike",
+              len({e["entry_id"] for e in now["entries"]}), len(now["entries"]))
+        D.remove_user_link(link2)
+
+        # --- estimates ----------------------------------------------------------
+        check("[fixture] every kind has an estimate",
+              [D.estimate_cost(k) for k in ("ask", "think_harder", "background",
+                                            "suggest")],
+              [0.0005, 0.011, 0.0003, 0.0005])
+        try:
+            D.estimate_cost("nonsense")
+            bad_kind = "no error"
+        except ValueError:
+            bad_kind = "error"
+        check("[fixture] and an unknown kind is an error, not a zero", bad_kind, "error")
+        check("[fixture] the state file is the only thing this wrote",
+              D.STATE_FILE.exists(), True)
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
     real()
     v01_search()
+    v01_ask()
     routes()
     pdf_guard()
     js_logic()
