@@ -2846,6 +2846,54 @@ def v01_states():
               D.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
 
 
+def script_guard():
+    """B8c · nothing may be DEFINED after `if __name__ == "__main__"`.
+
+    This is the check that was missing, and the bug it exists for shipped: B4 appended
+    fourteen routes to the end of p3_app.py, below the main guard. Imported -- which is
+    what every other check in this file does -- the guard is false, execution carries
+    on, all fourteen register, and 667 checks pass. RUN as a script, the guard is true,
+    uvicorn blocks inside main(), and those fourteen definitions never execute: the
+    live server answered 404 to every v0.1 route while /api/flags happily reported the
+    new flags. Only a browser could see it, and this is how it is seen without one.
+
+    Pass lines, written before the run:
+    - In every source file this build owns, nothing that defines anything -- `def`,
+      `class`, `@app.`, or a module-level assignment -- appears after the main guard.
+    - The guard is the last statement in the file.
+    - And the count holds: the number of routes the app declares when IMPORTED is the
+      number declared above the guard, so the two can never drift again.
+    """
+    import p3_app as A
+
+    for name in ("p3_app.py", "p3_app_double.py"):
+        src = (ROOT / "src" / name).read_text()
+        lines = src.split("\n")
+        guards = [i for i, line in enumerate(lines)
+                  if line.startswith('if __name__ == "__main__"')]
+        if not guards:
+            check(f"[fixture] {name} has no main guard, so nothing can hide below one",
+                  True, True)
+            continue
+        after = lines[guards[0] + 1:]
+        defined = [line for line in after
+                   if re.match(r"^(def |class |@app\.|[A-Za-z_]+\s*=)", line)]
+        check(f"[fixture] nothing is defined after the main guard in {name}", defined, [])
+        tail = [line for line in after if line.strip()]
+        check(f"[fixture] and the guard is the last statement in {name}",
+              [line for line in tail if not line.startswith("    ")], [])
+
+    # The same thing counted, so a route defined below the guard cannot pass unnoticed
+    # even if it is written in a shape the scan above does not recognise.
+    src = (ROOT / "src" / "p3_app.py").read_text()
+    guard_at = src.index('if __name__ == "__main__"')
+    above = len(re.findall(r"@app\.(?:get|post|delete|put|patch)\(", src[:guard_at]))
+    declared = len({r.path + getattr(r, "name", "") for r in A.app.routes
+                    if hasattr(r, "path")})
+    check("[fixture] every route the app declares is declared above the guard",
+          above, declared)
+
+
 def asgi():
     """B8 · the REAL request path, without a socket.
 
@@ -3094,6 +3142,7 @@ def main():
     js_logic()
     contrast()
     markup()
+    script_guard()
     asgi()
     page_contract()
     ownership()

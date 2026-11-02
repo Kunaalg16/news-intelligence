@@ -470,8 +470,6 @@ def main():
     uvicorn.run(app, host=KNOBS["host"], port=KNOBS["port"], log_level="warning")
 
 
-if __name__ == "__main__":
-    main()
 
 
 # ============================================ v0.1 · search, Explore, the ask pane
@@ -638,3 +636,7 @@ def user_links(hashes: list[str] = Query(None)):
     """The reader's links out of the story these hashes belong to, so the + icons are
     dark again after a reload (§8.4)."""
     return {"user_links": data.list_user_links(_as_list(hashes) or [])}
+
+
+if __name__ == "__main__":
+    main()
