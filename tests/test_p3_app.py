@@ -2476,9 +2476,24 @@ def v01_ask():
               sorted(set(ids) & D._thread_story_ids(story)), [])
         check("[fixture] three to five suggestions",
               D.KNOBS["suggest_min"] <= len(ids) <= D.KNOBS["suggest_max"], True)
-        check("[fixture] each says why, naming shared words",
+        check("[fixture] each says why",
               [s for s in sugg["suggestions"] if not s["why"].startswith("Sample reason")],
               [])
+        # A word the whole archive uses is never NAMED as the reason, however rare it
+        # ranks among the rest: "shares the words 'for', 'and'" reads as a reason and is
+        # not one. Measured on the GST story: "for" is in 14 of the 19 stories.
+        texts = {st["story_id"]: D._story_text(st) for st in D._search_corpus()}
+        everywhere = max(1, int(len(texts) * D.KNOBS["suggest_why_max_spread"]))
+        named = [w.strip("'") for s2 in sugg["suggestions"]
+                 for w in re.findall(r"'([a-z0-9]+)'", s2["why"])]
+        check("[fixture] no why names a word the whole archive uses",
+              [w for w in named
+               if sum(1 for t in texts.values() if D._word_hits([w], t)) > everywhere],
+              [])
+        check("[fixture] and one shared word reads 'word', not 'words'",
+              [s2["why"] for s2 in sugg["suggestions"]
+               if len(re.findall(r"'[a-z0-9]+'", s2["why"])) == 1
+               and "the word '" not in s2["why"]], [])
         check("[fixture] each carries one to three articles",
               sorted({len(s["articles"]) for s in sugg["suggestions"]} - {1, 2, 3}), [])
         check("[fixture] and the set costs what the estimate said",

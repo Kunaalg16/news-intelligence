@@ -140,6 +140,14 @@ KNOBS = {
     "suggest_auto": False,
     "suggest_min": 3,                  # §4.4: 3-5 suggestions
     "suggest_max": 5,
+    # A word held by more than this fraction of the corpus is not worth NAMING as the
+    # reason two stories go together, however rare it is among the rest. Measured on the
+    # GST story, 2 Nov: "for" is in 14 of the 19 stories and "and" and "the" in 16, so
+    # ranking by rarity alone still produced "shares the words 'for', 'and'" -- which
+    # reads as a reason and is not one. Words in 1-3 stories ("gst", "crore", "ending")
+    # are the ones that mean something. What would change it: a corpus big enough that
+    # the fraction wants to be smaller.
+    "suggest_why_max_spread": 0.4,
     # What one press of "Allow $1 more today" adds, and the ceiling on how often it can
     # be pressed in a day -- presses add up (D2), but not without end.
     "cap_override_usd": 1.00,
@@ -1454,22 +1462,29 @@ def suggest_connections(story_id, text_hashes=None):
 
     words = _query_words(query)
     by_id = {s.get("story_id"): s for s in _search_corpus()}
-    # The two words named in `why` are the RAREST shared ones, not the first two. A
-    # headline and a one-liner are full of "the" and "over", and "shares the words
-    # 'the', 'chief'" tells the reader nothing; "'delhi', 'police'" tells them why the
-    # story is there. Rarity = how few of the corpus's stories hold that word.
+    # The two words named in `why` are the rarest shared ones -- and a word that is in
+    # most of the archive is not named at all, however it ranks. Taking the first two
+    # gave "shares the words 'the', 'chief'"; ranking by rarity alone still gave
+    # "shares the words 'for', 'and'" on a story whose only overlap with the others IS
+    # stopwords. Both read as a reason and neither is one. A story that shares nothing
+    # worth naming now says so, which is the honest answer and the one that tells the
+    # reader to ignore the row.
     texts = {sid: _story_text(st) for sid, st in by_id.items()}
     spread = {w: sum(1 for t in texts.values() if _word_hits([w], t)) for w in words}
+    everywhere = max(1, int(len(texts) * KNOBS["suggest_why_max_spread"]))
     suggestions = []
     for row in rows[:KNOBS["suggest_max"]]:
         text = texts.get(row["story_id"], "")
-        shared = sorted((w for w in words if _word_hits([w], text)),
+        shared = sorted((w for w in words
+                         if _word_hits([w], text) and spread[w] <= everywhere),
                         key=lambda w: (spread[w], w))[:2]
         if shared:
-            why = ("Sample reason · shares the words "
+            why = ("Sample reason · shares the "
+                   + ("words " if len(shared) > 1 else "word ")
                    + ", ".join(f"'{w}'" for w in shared))
         else:
-            why = "Sample reason · nothing in common but the day; shown to fill the set"
+            why = ("Sample reason · nothing in common but words the whole archive uses; "
+                   "shown to fill the set")
         suggestions.append({"story_id": row["story_id"], "headline": row["headline"],
                             "dates": row["dates"], "papers": row["papers"],
                             "why": why, "articles": row["articles"]})
