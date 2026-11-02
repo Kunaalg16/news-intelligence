@@ -511,7 +511,7 @@ def routes():
         f = A.flags()
         # B1 added one flag to v0's ten; B5 adds five more (§8.6). The count is checked
         # outright so a flag cannot be added without saying what it removes.
-        check("all eighteen feature flags are sent to the page", len(f["flags"]), 18)
+        check("all nineteen feature flags are sent to the page", len(f["flags"]), 19)
         check("the theme bar strip is off, its data not being in the JSON (R9)",
               f["flags"]["theme_bar_strip"], False)
         check("the cost header is on", f["flags"]["cost_display"], True)
@@ -522,8 +522,9 @@ def routes():
         check("[fixture] B5/B6 · every v0.1 flag is on",
               [f["flags"][k] for k in ("assistant", "think_harder", "background_line",
                                        "background_on_request", "cap_override",
-                                       "suggest_connections", "user_links")],
-              [True] * 7)
+                                       "suggest_connections", "user_links",
+                                       "explore")],
+              [True] * 8)
         check("[fixture] B1 · Q3 B took the earlier-coverage knob off the page with it",
               sorted(f["knobs"]), ["paragraph_words"])
 
@@ -1534,6 +1535,146 @@ PS.pinnedStories = new Set();
 PS.pinIds = {};
 PS.openStoryId = null;
 PS.digest = {stories: []};
+
+
+// === B7 · the Explore screen (brief 2 §8.5) ======================================
+
+PS.flags.explore = true;
+PS.facets = {papers: ["Mint", "The Hindu"], topics: ["AI", "Protests & movements"],
+             kinds: ["news", "opinion"], date_min: "2026-10-09", date_max: "2026-10-15"};
+PS.explore = null;
+var ex = APP.exploreState();
+eq("[fixture] §8.5 · it opens as a browse, newest first, nothing chosen",
+   [ex.query, ex.sort, ex.rows, ex.selected.size, Object.keys(ex.filters).length],
+   ["", "newest", "stories", 0, 0]);
+
+eq("[fixture] §8.5 · the count line counts both populations",
+   APP.exploreCounts({total_stories: 24, total_articles: 61}),
+   "24 stories · 61 articles");
+eq("[fixture] §8.5 · and one of each reads in the singular",
+   APP.exploreCounts({total_stories: 1, total_articles: 1}), "1 story · 1 article");
+eq("[fixture] §8.5 · nothing found counts to nothing",
+   APP.exploreCounts(null), "0 stories · 0 articles");
+
+// the chips say what is narrowing the screen
+eq("[fixture] §8.5 · the keyword is a chip, in quotes",
+   APP.exploreChips({query: "police", filters: {}}),
+   [{key: "query", text: "“police”"}]);
+eq("[fixture] §8.5 · each filter is its own chip, dates read from and to",
+   APP.exploreChips({query: "", filters: {papers: ["Mint", "The Hindu"],
+                                          date_from: "2026-10-11",
+                                          kinds: ["opinion"]}})
+     .map(function (c) { return c.key + "=" + c.text; }),
+   ["papers=Mint, The Hindu", "date_from=from 2026-10-11", "kinds=opinion"]);
+eq("[fixture] §8.5 · a selection carried in from the pane says how many",
+   APP.exploreChips({query: "", filters: {story_ids: ["a", "b"]}})[0].text,
+   "2 stories chosen");
+eq("[fixture] §8.5 · and the machinery of a scope is not a chip",
+   APP.exploreChips({query: "", filters: {text_hashes: ["h"],
+                                          exclude_story_ids: ["s"]}}), []);
+
+// Stories | Articles changes what a row IS
+var exResult = {query: "police", filters: {}, sort: "relevance", verdict: "enough",
+  searched_days: 7, total_stories: 2, total_articles: 5,
+  stories: [
+    {story_id: "e1", headline: "The first story", dates: ["2026-10-11"], papers: 2,
+     score: 2.0, articles: [
+       {text_hash: "a1", headline: "First article", paper: "Mint", date: "2026-10-11",
+        kind: "news", snippet: "First article",
+        page_link: {pdf: "x/y/z.pdf", pdf_page: 3, label: "PDF p3", paper: "Mint"}},
+       {text_hash: "a2", headline: "Second article", paper: "The Hindu",
+        date: "2026-10-11", kind: "news", snippet: "Second article",
+        page_link: {pdf: "x/y/w.pdf", pdf_page: 9, label: "PDF p9",
+                    paper: "The Hindu"}}]},
+    {story_id: "e2", headline: "The second story", dates: ["2026-10-09"], papers: 1,
+     score: 1.0, articles: [
+       {text_hash: "a3", headline: "Third article", paper: "Mint", date: "2026-10-09",
+        kind: "opinion", snippet: "Third article",
+        page_link: {pdf: "x/y/v.pdf", pdf_page: 1, label: "PDF p1", paper: "Mint"}}]}]};
+
+eq("[fixture] §8.5 · Articles flattens each story into its own articles",
+   APP.exploreArticleRows(exResult).map(function (r) {
+     return r.story.story_id + "/" + r.article.text_hash; }),
+   ["e1/a1", "e1/a2", "e2/a3"]);
+eq("[fixture] §8.5 · and Stories keeps one row per story",
+   exResult.stories.length, 2);
+
+var storyRow = APP.exploreRow(exResult.stories[0], null);
+eq("[fixture] §8.5 · a row names its best article's page and snippet",
+   textOf(storyRow).indexOf("Mint PDF p3 · First article") > 0, true);
+eq("[fixture] §8.5 · and the day, the papers and how many matched",
+   textOf(storyRow).indexOf("11 Oct · 2 papers · 2 matching articles") > 0, true);
+eq("[fixture] §8.5 · with a checkbox that says what it chooses",
+   controlsOf(storyRow).filter(function (c) {
+     return c.tag === "INPUT" && c.aria === "Choose The first story"; }).length, 1);
+eq("[fixture] §8.5 · every control in a row is real and labelled",
+   controlsOf(storyRow).filter(function (c) { return !c.label; }), []);
+var articleRow = APP.exploreRow(exResult.stories[0], exResult.stories[0].articles[1]);
+eq("[fixture] §8.5 · an article row is headed by the article, not the story",
+   textOf(articleRow).indexOf("Second article"), 0);
+
+// the whole screen, including H6
+document.byId.reading = document.createElement("section");
+function exploreText(result, over) {
+  PS.explore = Object.assign({query: "", filters: {}, sort: "newest", rows: "stories",
+                              result: result, selected: new Set(), openMenu: null},
+                             over || {});
+  var pane = document.createElement("section");
+  document.byId["explore-actions"] = null;
+  APP.exploreScreen(pane);
+  return {text: textOf(pane), controls: controlsOf(pane), node: pane};
+}
+var screen = exploreText(exResult, {query: "police", sort: "relevance"});
+eq("[fixture] §8.5 · the screen names itself", screen.text.indexOf("Explore"), 0);
+eq("[fixture] §8.5 · both switches are there",
+   ["Relevance", "Newest", "Stories", "Articles"].filter(function (w) {
+     return screen.controls.filter(function (c) {
+       return c.text === w; }).length !== 1; }), []);
+eq("[fixture] §8.5 · the filter menus come from the facets",
+   screen.controls.filter(function (c) {
+     return c.text.indexOf("Papers ▾") === 0 || c.text.indexOf("Topics ▾") === 0
+            || c.text.indexOf("Kinds ▾") === 0; }).length, 3);
+eq("[fixture] §8.5 · the date fields are bounded by the archive's own range",
+   [APP.FILTER_MENUS.length, PS.facets.date_min], [3, "2026-10-09"]);
+
+var browsing = exploreText(exResult, {query: ""});
+eq("[fixture] §8.5 · with no keyword, Relevance cannot be chosen",
+   browsing.controls.filter(function (c) {
+     return c.text === "Relevance" && c.disabled; }).length, 1);
+eq("[fixture] §8.5 · and Newest is the one that is pressed",
+   browsing.controls.filter(function (c) {
+     return c.text === "Newest" && !c.disabled; }).length, 1);
+
+var chosen = exploreText(exResult, {query: "police", selected: new Set(["e1", "e2"])});
+eq("[fixture] §8.5 · the actions say how many are chosen, and cost nothing",
+   [chosen.controls.filter(function (c) {
+      return c.text === "Ask about these 2"; }).length,
+    chosen.text.indexOf("no model call · 0¢") > 0,
+    chosen.controls.filter(function (c) { return c.text === "Pin selected"; }).length],
+   [1, true, 1]);
+var none = exploreText(exResult, {});
+eq("[fixture] §8.5 · with nothing chosen both actions are off",
+   none.controls.filter(function (c) {
+     return c.text.indexOf("Ask about these") === 0 && c.disabled; }).length, 1);
+
+// H6 · zero results
+var empty = exploreText({query: "Norway", filters: {papers: ["Mint"]}, sort: "relevance",
+                         verdict: "empty", total_stories: 0, total_articles: 0,
+                         searched_days: 7, stories: []},
+                        {query: "Norway", filters: {papers: ["Mint"]}});
+eq("[fixture] H6 · it says nothing matches", empty.text.indexOf("No stories match") > 0,
+   true);
+eq("[fixture] H6 · the chips that caused it are still on screen",
+   [empty.text.indexOf("“Norway”") > 0, empty.text.indexOf("Mint") > 0], [true, true]);
+eq("[fixture] H6 · and Clear all is the way out",
+   empty.controls.filter(function (c) { return c.text === "Clear all"; }).length, 1);
+
+// check 8 · explore off takes the nav item away
+eq("[fixture] check 8 · the flag names the nav item it removes",
+   APP.FLAG_ELEMENTS.explore, '.nav-item[data-screen="explore"]');
+
+PS.explore = null;
+PS.facets = null;
 
 // every feature flag has to say what it takes off the page, or a flag can be added
 // that silently hides nothing (acceptance check 7)

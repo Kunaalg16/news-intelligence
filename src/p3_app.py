@@ -112,6 +112,7 @@ FLAGS = {
     "cap_override": True,          # "Allow $1 more today" in the cap band
     "suggest_connections": True,   # the Suggest connections button and its box
     "user_links": True,            # off hides the + icon AND the user thread entries
+    "explore": True,               # the EXPLORE nav item and its screen
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,

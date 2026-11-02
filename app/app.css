@@ -1199,3 +1199,68 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 /* The marks the `?` sheet explains, since the thread's shapes are not keys. */
 .cheat-marks { margin: 14px 0 0; }
 .cheat-marks .node { position: static; display: inline-block; vertical-align: middle; }
+
+/* ===================================================== the Explore screen (§8.5)
+
+   The filter row, then what it found. Nothing on this screen costs anything, and the
+   cost line says so outright beside the two actions that leave the screen. */
+
+.explore-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.explore-filters input[type="text"],
+.explore-filters input[type="date"] {
+  padding: 5px 7px;
+  border: 1px solid var(--mark);
+  border-radius: 2px;
+  font-family: var(--sans);
+  font-size: var(--s125);
+  background: var(--page);
+  color: var(--ink);
+}
+.explore-date { font-size: var(--s11); color: var(--text-muted); }
+.explore-menu { right: auto; left: 0; min-width: 190px; max-height: 280px;
+                overflow-y: auto; }
+.explore-menu button[aria-pressed="true"] { font-weight: 600; }
+
+.explore-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
+.explore-chips:empty { display: none; }
+
+.explore-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--rule);
+}
+.explore-count { margin: 0; flex: 1; font-size: var(--s125);
+                 color: var(--text-secondary); }
+
+.explore-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--rule-light);
+}
+.explore-row input[type="checkbox"] { margin: 4px 0 0; width: 15px; height: 15px; }
+.explore-open { text-align: left; }
+.explore-open h4 { margin: 0; font-family: var(--serif); font-size: var(--s16);
+                   font-weight: 600; }
+.explore-open:hover h4 { text-decoration: underline; }
+.explore-best { margin: 3px 0 0; font-size: var(--s14); color: var(--text-secondary); }
+.explore-meta { margin: 2px 0 0; font-size: var(--s11); color: var(--text-muted); }
+
+.explore-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--rule);
+}
