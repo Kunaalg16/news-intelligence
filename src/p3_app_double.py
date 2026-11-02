@@ -138,8 +138,23 @@ KNOBS = {
     "conversation_new_each_day": False,
     # Suggestions are fetched only when the button is pressed (D4), never on open.
     "suggest_auto": False,
-    "suggest_min": 3,                  # §4.4: 3-5 suggestions
+    # Decision D11 (2 Nov): the set is never padded. §4.4's old "3-5" is withdrawn --
+    # a short set is the honest answer, so this is a ceiling with no floor under it.
     "suggest_max": 5,
+    # D11 · the relevance bar one suggestion has to clear: it must share at least ONE
+    # word with the story that is NOT in more than this fraction of the corpus's
+    # stories. Below the bar there is nothing to say about the row, so it is not shown
+    # and the set comes back short -- 0 to `suggest_max`. Measured 2 Nov over the 19
+    # stories: "and" and "the" are in 16 of them and "for" in 14, all far above half,
+    # while "gst", "crore" and "ending" are in 1-3. What would change it: a corpus big
+    # enough that half of it is no longer a meaningful share.
+    "common_word_share": 0.5,
+    # How many search hits the bar is applied to. The bar is STRICTER than the search's
+    # own "shares at least one word of the query", so filtering the top five would
+    # return two suggestions on a story that has five qualifying ones further down.
+    # Twenty is the whole corpus today (19 stories); what would change it is an archive
+    # wider than one screen.
+    "suggest_candidates": 20,
     # A word held by more than this fraction of the corpus is not worth NAMING as the
     # reason two stories go together, however rare it is among the rest. Measured on the
     # GST story, 2 Nov: "for" is in 14 of the 19 stories and "and" and "the" in 16, so
@@ -152,6 +167,15 @@ KNOBS = {
     # be pressed in a day -- presses add up (D2), but not without end.
     "cap_override_usd": 1.00,
     "cap_override_max_per_day": 5,
+
+    # --- v0.1 the answer's stored results (decision D12) --------------------
+    # How many result rows an answer keeps for after a reload: the number the pane
+    # shows (§8.3 state 1), plus every cited story on top of them however far down the
+    # list it sat. The page has the same number as `PANE_RESULTS_SHOWN` in app.js and
+    # the suite checks the two against each other, because a page that shows six rows
+    # and an answer that remembers five would lose a row on reload and nothing else
+    # would say so.
+    "pane_results_shown": 5,
 
     # --- visits -------------------------------------------------------------
     # Re-opening the same digest within this many minutes is the same sitting, not a new
@@ -721,8 +745,13 @@ def pin(board_id, item_type, payload, source, created_by="app"):
 
 
 def unpin(pin_id):
+    """Contract v2.2: a pin that is not there is a LookupError, not a quiet no-op. The
+    route turns that into a 404 by the exception's class."""
     state = _load_state()
-    state["pins"] = [p for p in state["pins"] if p["pin_id"] != pin_id]
+    kept = [p for p in state["pins"] if p["pin_id"] != pin_id]
+    if len(kept) == len(state["pins"]):
+        raise LookupError(f"no such pin: {pin_id!r}")
+    state["pins"] = kept
     _save_state(state)
 
 
@@ -1175,6 +1204,35 @@ def _passage_set(result):
     return arts, "ps_" + _fixture_hash(*ids) if ids else "ps_empty"
 
 
+def _compact_results(stories, cited, limit):
+    """Decision D12 · the result rows an answer keeps, so a reloaded answer draws the
+    same "FOUND · N STORIES" list it drew when it streamed.
+
+    Compact on purpose: story_id, headline, dates, papers and the mark, and no article
+    rows -- the whole search result is tens of kilobytes and lands in the state file
+    once per question. The rows kept are the ones the pane shows (`limit`) plus every
+    story the answer actually cited, however far down the list it sat: a CITED row that
+    the reader can see before a reload and not after would be the same lost row the
+    decision is about.
+
+    `mark` is computed here rather than on the page because the page no longer has the
+    article hashes after a reload. "cited" means one of this story's shown articles is
+    in the answer's `cited` list; everything else is "found"."""
+    cited = set(cited or [])
+    out = []
+    for i, story in enumerate(stories):
+        hashes = {a.get("text_hash") for a in story.get("articles") or []}
+        mark = "cited" if hashes & cited else "found"
+        if i >= limit and mark != "cited":
+            continue
+        out.append({"story_id": story.get("story_id"),
+                    "headline": story.get("headline"),
+                    "dates": list(story.get("dates") or []),
+                    "papers": story.get("papers"),
+                    "mark": mark})
+    return out
+
+
 def _fixture_sentences(result, lead="Sample answer"):
     """Two or three sentences built out of the headlines the search found, each citing
     the real text_hashes behind it (§4.2). Never invented prose about the news: the
@@ -1304,6 +1362,13 @@ def ask(question, scope=None, conversation_id=None):
         "cited": sorted({h for s in sentences for h in s["cites"]}),
         "found": [s["story_id"] for s in result["stories"]],
         "closest": _closest() if empty else [],
+        # Decision D12. The `results` event is gone after a reload and the pane's list
+        # went with it, so the answer carries its own compact copy of the rows, the
+        # total they were drawn out of, and how many passages it was allowed to cite
+        # ("Sonnet · same N passages"). Logged for K3 as contract additions.
+        "results": [],                                      # filled just below
+        "results_total": result["total_stories"],
+        "passage_count": len(arts),
         "passage_set_id": passage_set_id,
         "cost_usd": round(cost, 6),
         "attempts": 1,             # K3's referee loop; one try, nothing dropped
@@ -1311,6 +1376,8 @@ def ask(question, scope=None, conversation_id=None):
         "at": _now(),
         "fixture": True,
     }
+    answer["results"] = _compact_results(result["stories"], answer["cited"],
+                                         KNOBS["pane_results_shown"])
     state["answers"][answer["answer_id"]] = answer
     state["passage_sets"][passage_set_id] = arts
     conv["turns"].append({"kind": "answer", "answer": answer})
@@ -1333,7 +1400,7 @@ def think_harder(answer_id):
     state = _load_state()
     parent = state["answers"].get(answer_id)
     if parent is None:
-        raise ValueError(f"no such answer: {answer_id!r}")
+        raise LookupError(f"no such answer: {answer_id!r}")
 
     blocked = _cap_blocks("think_harder")
     if blocked:
@@ -1358,6 +1425,7 @@ def think_harder(answer_id):
     sentences = _fixture_sentences({"stories": stories}, lead="Sample answer, read again")
 
     cost = estimate_cost("think_harder")
+    cited = sorted({h for s in sentences for h in s["cites"]})
     answer = dict(parent,
                   answer_id=_new_id("ans"),
                   parent_answer_id=parent["answer_id"],
@@ -1365,7 +1433,17 @@ def think_harder(answer_id):
                   model_id=MODEL_IDS["sonnet"],
                   sentences=sentences,
                   background=None,
-                  cited=sorted({h for s in sentences for h in s["cites"]}),
+                  cited=cited,
+                  # D12 · the same search, so the same rows in the same order (the
+                  # passage set was built in the parent's result order and kept that
+                  # way), but this answer's own cites, so the marks are recomputed
+                  # rather than inherited. `passage_count` is the parent's by
+                  # construction: these are the same passages, which is the entire
+                  # claim Think harder makes.
+                  results=_compact_results(stories, cited,
+                                           KNOBS["pane_results_shown"]),
+                  results_total=parent.get("results_total"),
+                  passage_count=len(arts),
                   cost_usd=round(cost, 6),
                   at=_now())
     conv = _conversation(state)
@@ -1397,7 +1475,7 @@ def ask_background(answer_id):
     state = _load_state()
     answer = state["answers"].get(answer_id)
     if answer is None:
-        raise ValueError(f"no such answer: {answer_id!r}")
+        raise LookupError(f"no such answer: {answer_id!r}")
     if answer.get("background"):
         raise ValueError("that answer already has a background line")
 
@@ -1451,47 +1529,53 @@ def suggest_connections(story_id, text_hashes=None):
     it into a thread link (R13)."""
     story = _find_story(lambda s: s.get("story_id") == story_id)
     if story is None:
-        raise ValueError(f"no such story: {story_id!r}")
+        raise LookupError(f"no such story: {story_id!r}")
 
     query = " ".join([(story.get("headline") or {}).get("text") or "",
                       (story.get("one_liner") or {}).get("text") or ""])
     exclude = _thread_story_ids(story)
+    # The bar below is stricter than the search's own "shares a word", so the candidates
+    # are the whole corpus's worth of hits, not the top five. Filtering five would hand
+    # back two on a story whose fifth qualifying suggestion sat sixth in the search.
     found = search(query, filters={"exclude_story_ids": sorted(exclude)},
-                   limit=KNOBS["suggest_max"])
+                   limit=KNOBS["suggest_candidates"])
     rows = list(found["stories"])
-    if len(rows) < KNOBS["suggest_min"]:
-        # Fewer than three matched. Rather than show one suggestion and call it a set,
-        # the newest unseen stories fill it up -- marked by a `why` that says so.
-        have = {r["story_id"] for r in rows} | exclude
-        filler = search("", filters={"exclude_story_ids": sorted(have)},
-                        limit=KNOBS["suggest_min"] - len(rows))
-        rows += filler["stories"]
 
     words = _query_words(query)
     by_id = {s.get("story_id"): s for s in _search_corpus()}
-    # The two words named in `why` are the rarest shared ones -- and a word that is in
-    # most of the archive is not named at all, however it ranks. Taking the first two
-    # gave "shares the words 'the', 'chief'"; ranking by rarity alone still gave
-    # "shares the words 'for', 'and'" on a story whose only overlap with the others IS
-    # stopwords. Both read as a reason and neither is one. A story that shares nothing
-    # worth naming now says so, which is the honest answer and the one that tells the
-    # reader to ignore the row.
+    # Two bars over the same measurement, `spread` -- how many of the corpus's stories
+    # hold a word.
+    #
+    # `common_word_share` (0.5) decides whether a row is SHOWN AT ALL (decision D11). A
+    # story whose only overlap is words half the archive uses is not a connection; it is
+    # a coincidence of English, and the old code padded the set with exactly those rows
+    # under a `why` that admitted it ("nothing in common but words the whole archive
+    # uses; shown to fill the set"). That path and that wording are gone: the set is
+    # 0 to `suggest_max` and short when the archive is short.
+    #
+    # `suggest_why_max_spread` (0.4) is tighter and decides only what gets NAMED, which
+    # is the older measurement: ranking by rarity alone still produced "shares the words
+    # 'for', 'and'". When a row clears the first bar but nothing clears the second, the
+    # named word is the rarest one that got it in -- never nothing, because a row that is
+    # here at all has a real shared word to point at.
     texts = {sid: _story_text(st) for sid, st in by_id.items()}
     spread = {w: sum(1 for t in texts.values() if _word_hits([w], t)) for w in words}
-    everywhere = max(1, int(len(texts) * KNOBS["suggest_why_max_spread"]))
+    not_common = max(1, int(len(texts) * KNOBS["common_word_share"]))
+    nameable = max(1, int(len(texts) * KNOBS["suggest_why_max_spread"]))
     suggestions = []
-    for row in rows[:KNOBS["suggest_max"]]:
+    for row in rows:
+        if len(suggestions) >= KNOBS["suggest_max"]:
+            break
         text = texts.get(row["story_id"], "")
-        shared = sorted((w for w in words
-                         if _word_hits([w], text) and spread[w] <= everywhere),
-                        key=lambda w: (spread[w], w))[:2]
-        if shared:
-            why = ("Sample reason · shares the "
-                   + ("words " if len(shared) > 1 else "word ")
-                   + ", ".join(f"'{w}'" for w in shared))
-        else:
-            why = ("Sample reason · nothing in common but words the whole archive uses; "
-                   "shown to fill the set")
+        by_rarity = sorted((w for w in words if _word_hits([w], text)),
+                           key=lambda w: (spread[w], w))
+        clears = [w for w in by_rarity if spread[w] <= not_common]
+        if not clears:
+            continue                      # D11: below the bar, so not shown at all
+        shared = [w for w in clears if spread[w] <= nameable][:2] or clears[:1]
+        why = ("Sample reason · shares the "
+               + ("words " if len(shared) > 1 else "word ")
+               + ", ".join(f"'{w}'" for w in shared))
         suggestions.append({"story_id": row["story_id"], "headline": row["headline"],
                             "dates": row["dates"], "papers": row["papers"],
                             "why": why, "articles": row["articles"]})
@@ -1522,11 +1606,15 @@ def add_user_link(story_id, story_text_hashes, target_story_id, target_text_hash
 
 
 def remove_user_link(link_id):
+    """Contract v2.2: a link that is not there is a LookupError. v0.1 returned False and
+    left the route to decide what that meant; the class says it instead."""
     state = _load_state()
-    before = len(state["user_links"])
-    state["user_links"] = [l for l in state["user_links"] if l["link_id"] != link_id]
+    kept = [l for l in state["user_links"] if l["link_id"] != link_id]
+    if len(kept) == len(state["user_links"]):
+        raise LookupError(f"no such link: {link_id!r}")
+    state["user_links"] = kept
     _save_state(state)
-    return before != len(state["user_links"])
+    return True
 
 
 def list_user_links(story_text_hashes):

@@ -51,6 +51,7 @@ KNOBS AND FLAGS
   Two blocks below: the knobs, each with its reason, and the §8.8 feature flags.
 """
 
+import contextlib
 import itertools
 import json
 import os
@@ -129,6 +130,24 @@ def _need(payload, *keys):
         raise HTTPException(status_code=400,
                             detail=f"missing: {', '.join(sorted(missing))}")
     return [payload[k] for k in keys]
+
+
+@contextlib.contextmanager
+def _mapped():
+    """Contract v2.2: the double raises `LookupError` for a thing that does not exist and
+    `ValueError` for a request that cannot be honoured, and the status comes from the
+    CLASS, never from the message.
+
+    v0.1 decided per route and got it wrong in one place: `/api/background` answered 400
+    both for an answer that already had a background line (right) and for an answer id
+    that was never issued (wrong -- nothing was unhonourable about the request, the thing
+    simply was not there). `KeyError` is a `LookupError`, so the double may raise either."""
+    try:
+        yield
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 # Two fixed-width look-behinds rather than one with an optional quote: Python's re needs
@@ -356,7 +375,8 @@ def pin(payload: dict = Body(...)):
 
 @app.delete("/api/pin/{pin_id}")
 def remove_pin(pin_id: str):
-    data.unpin(pin_id)
+    with _mapped():
+        data.unpin(pin_id)
     return {"pin_id": pin_id, "unpinned": True}
 
 
@@ -586,11 +606,9 @@ def think_harder(payload: dict = Body(...)):
     """Read the same passages again with the bigger model. No `results` event: the list
     on the screen is the one the answer was built from, and must not change under it."""
     (answer_id,) = _need(payload, "answer_id")
-    try:
+    with _mapped():
         events = data.think_harder(answer_id)
         first = next(events)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
     return _stream(itertools.chain([first], events))
 
 
@@ -598,20 +616,16 @@ def think_harder(payload: dict = Body(...)):
 def background(payload: dict = Body(...)):
     """A paragraph from the model's own knowledge, for an answer that has none."""
     (answer_id,) = _need(payload, "answer_id")
-    try:
+    with _mapped():
         return data.ask_background(answer_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/estimate")
 def estimate(kind: str, answer_id: str = None):
     """What a call would cost, for the buttons that print their own price."""
-    try:
+    with _mapped():
         return {"kind": kind, "answer_id": answer_id,
                 "cost_usd": data.estimate_cost(kind, answer_id)}
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/conversation")
@@ -636,20 +650,16 @@ def conversation_divider(payload: dict = Body(...)):
 def suggest(payload: dict = Body(...)):
     """Other stories that may belong with this one. On request only (D4)."""
     (story_id,) = _need(payload, "story_id")
-    try:
+    with _mapped():
         return data.suggest_connections(story_id, payload.get("text_hashes"))
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/api/cap/raise")
 def cap_raise(payload: dict = Body(None)):
     """Allow more spending for today only. The page confirms in the page first; this
     route is the Yes, and the amount is the double's knob unless one is sent."""
-    try:
+    with _mapped():
         return data.raise_cap_today((payload or {}).get("amount_usd"))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/user_link")
@@ -663,9 +673,8 @@ def user_link(payload: dict = Body(...)):
 
 @app.delete("/api/user_link/{link_id}")
 def user_link_remove(link_id: str):
-    removed = data.remove_user_link(link_id)
-    if not removed:
-        raise HTTPException(status_code=404, detail="no such link")
+    with _mapped():
+        data.remove_user_link(link_id)
     return {"removed": link_id}
 
 

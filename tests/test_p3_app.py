@@ -423,9 +423,9 @@ def mock(tmp):
 def real():
     """Read-only on the two digests in _work/, with the state file sent somewhere safe."""
     D.ROOT = ROOT
-    D.WORK = ROOT / "_work"
     D.ARCHIVE = ROOT / "archive"
     with tempfile.TemporaryDirectory() as tmp:
+        D.WORK = Path(tmp)              # §3 rule 7, as in routes() below
         D.STATE_FILE = Path(tmp) / "state.json"
 
         refs = [d["ref"] for d in D.list_digests()]
@@ -493,10 +493,18 @@ def routes():
     import p3_app as A
 
     D.ROOT = ROOT
-    D.WORK = ROOT / "_work"
     D.ARCHIVE = ROOT / "archive"
     with tempfile.TemporaryDirectory() as tmp:
+        # Brief 2b §3 rule 7. `_save_state` writes its temporary file into `WORK` and
+        # only then renames it onto `STATE_FILE`, so redirecting the file alone still
+        # put a `.k1_state_*.json` into the real `_work/` -- a write into a read-only
+        # area (brief rule 4), found by build 2's report §6. The digests are read from
+        # `ROOT / KNOBS["digest_dir"]`, not from `WORK`, so the real ones are still
+        # there to test against.
+        D.WORK = Path(tmp)
         D.STATE_FILE = Path(tmp) / "state.json"
+        check("[fixture] the state DIRECTORY is redirected too, not only the file, so "
+              "no check writes into the real _work/", D.WORK == Path(tmp), True)
 
         paths = {r.path for r in A.app.routes if hasattr(r, "path")}
         wanted = {"/", "/api/digest", "/api/digests", "/api/status",
@@ -2323,15 +2331,17 @@ def v01_ask():
         check("[behaviour] 10 · every cited hash belongs to a story in found",
               sorted(set(answer["cited"]) - found_hashes), [])
 
-        # Twenty keys from §4.2, plus `searched_days`, which the contract does not name
-        # and the page needs: without it a reloaded empty answer said "searched 0 days"
-        # about a search that covered one (logged for K3).
+        # Twenty keys from §4.2, plus four the contract does not name and the page
+        # needs, all logged for K3: `searched_days` (without it a reloaded empty answer
+        # said "searched 0 days" about a search that covered one) and D12's `results`,
+        # `results_total` and `passage_count` (without them a reloaded answer lost its
+        # results list and Think harder's label lost its number).
         check("[fixture] an answer carries the contract's keys", sorted(answer),
               ["answer_id", "at", "attempts", "background", "cited", "closest",
                "conversation_id", "cost_usd", "drops", "fixture", "found",
                "found_count", "model", "model_id", "parent_answer_id",
-               "passage_set_id", "question", "scope", "searched_days", "sentences",
-               "verdict"])
+               "passage_count", "passage_set_id", "question", "results",
+               "results_total", "scope", "searched_days", "sentences", "verdict"])
         check("[fixture] and searched_days matches the search behind it",
               answer["searched_days"], result["searched_days"])
         check("[fixture] it is Haiku, named by its model id",
@@ -2400,16 +2410,25 @@ def v01_ask():
         try:
             D.ask_background(empty["answer_id"])
             twice = "no error"
-        except ValueError as exc:
-            twice = "error"
-        check("[behaviour] 6 · asking twice is an error", twice, "error")
+        except LookupError:
+            twice = "LookupError"
+        except ValueError:
+            twice = "ValueError"
+        check("[behaviour] 6 · asking twice is an error, and 19 · it is a ValueError: "
+              "the answer exists, the request cannot be honoured", twice, "ValueError")
+        # Contract v2.2: a thing that is not there is a LookupError, a request that
+        # cannot be honoured is a ValueError, and the two are told apart by CLASS. Both
+        # halves are checked, because "it raised something" is what let v0.1 answer 400
+        # for an answer id that was never issued.
         try:
             D.ask_background("ans_nope")
             unknown = "no error"
+        except LookupError as exc:
+            unknown = type(exc).__name__
         except ValueError:
-            unknown = "error"
-        check("[fixture] background on an answer that does not exist is an error",
-              unknown, "error")
+            unknown = "ValueError"
+        check("[behaviour] 19 · background on an answer that is not there is LookupError",
+              unknown, "LookupError")
 
         # the alternating background line on enough answers
         marks = [bool(list(D.ask("police", None))[-1]["answer"]["background"])
@@ -2554,8 +2573,12 @@ def v01_ask():
               story_id in ids, False)
         check("[behaviour] 9 · nor anything its own thread already holds",
               sorted(set(ids) & D._thread_story_ids(story)), [])
-        check("[fixture] three to five suggestions",
-              D.KNOBS["suggest_min"] <= len(ids) <= D.KNOBS["suggest_max"], True)
+        # Decision D11 withdrew §4.4's "3-5": the floor is gone, because a padded set
+        # is worse than a short one. `suggest_min` went with it.
+        check("[behaviour] 18 · zero to five suggestions, and never padded",
+              0 <= len(ids) <= D.KNOBS["suggest_max"], True)
+        check("[fixture] and `suggest_min` is gone rather than left unused",
+              "suggest_min" in D.KNOBS, False)
         check("[fixture] each says why",
               [s for s in sugg["suggestions"] if not s["why"].startswith("Sample reason")],
               [])
@@ -2566,10 +2589,13 @@ def v01_ask():
         everywhere = max(1, int(len(texts) * D.KNOBS["suggest_why_max_spread"]))
         named = [w.strip("'") for s2 in sugg["suggestions"]
                  for w in re.findall(r"'([a-z0-9]+)'", s2["why"])]
-        check("[fixture] no why names a word the whole archive uses",
+        # D11's relevance bar: a row is shown only if it shares a word that is not in
+        # more than `common_word_share` of the corpus's stories. That is also the widest
+        # word a `why` can name, because the row got in on it.
+        bar = max(1, int(len(texts) * D.KNOBS["common_word_share"]))
+        check("[fixture] no why names a word wider than that bar",
               [w for w in named
-               if sum(1 for t in texts.values() if D._word_hits([w], t)) > everywhere],
-              [])
+               if sum(1 for t in texts.values() if D._word_hits([w], t)) > bar], [])
         check("[fixture] and one shared word reads 'word', not 'words'",
               [s2["why"] for s2 in sugg["suggestions"]
                if len(re.findall(r"'[a-z0-9]+'", s2["why"])) == 1
@@ -2579,13 +2605,47 @@ def v01_ask():
         check("[fixture] and the set costs what the estimate said",
               [sugg["cost_usd"], round(D.cost_today()["spent_usd"] - before, 6)],
               [D.estimate_cost("suggest")] * 2)
+
+        # The naming knob (0.4) is tighter than the relevance bar (0.5), so a row whose
+        # only shared word sits between them is shown with that word named. Swept over
+        # every story in the corpus, because this one story does not produce it:
+        # measured 2 Nov, 6 of 93 rows, naming 'lic' (8 of 19 stories) and 'with' (9).
+        # Pinned as the words they are, so a corpus change says so out loud rather than
+        # quietly widening what a `why` may name.
+        # Swept over EVERY story, not just this one: the Delhi story's own five hits
+        # all clear the bar, so a bar that stopped filtering would not show up here.
+        between, padded, rows_seen = set(), [], 0
+        spread_of = {}
+        for one in D._search_corpus():
+            qwords = D._query_words((one.get("headline") or {}).get("text", "") + " "
+                                    + (one.get("one_liner") or {}).get("text", ""))
+            for w in qwords:
+                if w not in spread_of:
+                    spread_of[w] = sum(1 for t in texts.values() if D._word_hits([w], t))
+            for s2 in D.suggest_connections(one["story_id"])["suggestions"]:
+                rows_seen += 1
+                mine = texts.get(s2["story_id"], "")
+                if not [w for w in qwords
+                        if D._word_hits([w], mine) and spread_of[w] <= bar]:
+                    padded.append((one["story_id"], s2["headline"]))
+                for w in re.findall(r"'([a-z0-9]+)'", s2["why"]):
+                    if sum(1 for t in texts.values() if D._word_hits([w], t)) > everywhere:
+                        between.add(w)
+        check("[fixture] the sweep really saw every story's suggestions",
+              [len(D._search_corpus()), rows_seen > 50], [19, True])
+        check("[behaviour] 18 · no suggestion anywhere in the corpus is padding: each "
+              "shares a word that is not a common one", padded, [])
+        check("[fixture] and the words named between the two bars are the measured ones",
+              sorted(between), ["lic", "with"])
         try:
             D.suggest_connections("no_such_story")
             missing = "no error"
+        except LookupError:
+            missing = "LookupError"
         except ValueError:
-            missing = "error"
-        check("[fixture] suggestions for a story that does not exist are an error",
-              missing, "error")
+            missing = "ValueError"
+        check("[behaviour] 19 · suggestions for a story that is not there is LookupError",
+              missing, "LookupError")
 
         # --- rule 14 · the reader's own links ----------------------------------
         bare = [s["story_id"] for s in D._search_corpus()
@@ -2620,8 +2680,17 @@ def v01_ask():
               D.list_user_links(D._story_hashes(bare_story)), [])
         check("[behaviour] 14 · nothing outside the reader's own state was touched",
               sorted(D._load_state()), state_keys_before)
-        check("[fixture] removing a link that is not there says so",
-              D.remove_user_link("ulink_nope"), False)
+        # v0.1 returned False and left the route to decide what that meant. Contract
+        # v2.2 makes it the class, so the route maps it without reading the message.
+        try:
+            D.remove_user_link("ulink_nope")
+            gone = "no error"
+        except LookupError:
+            gone = "LookupError"
+        except ValueError:
+            gone = "ValueError"
+        check("[behaviour] 19 · removing a link that is not there is LookupError",
+              gone, "LookupError")
 
         # a user link on a story that HAS a thread joins the days it already had
         has_thread = [s["story_id"] for s in D._search_corpus()
@@ -2671,6 +2740,231 @@ def drain(response):
 
     body = asyncio.run(collect())
     return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+
+
+# ============================================== 2b. CONTRACT v2.2 (brief 2b §2)
+#
+# The five behaviour rules the contract numbers 15-19, in one place, because K3 reads
+# them as a set, plus the "confirm present" list of §2 -- the v2.2 additions that build
+# 2 already shipped and that nobody has checked by name since.
+#
+# Rule 18 is not repeated here: it lives in `v01_ask()` with the suggestion flow it
+# belongs to, tagged `[behaviour] 18`.
+#
+# WHAT WOULD MAKE EACH NEW CHECK PASS WHILE THE THING IS BROKEN (brief 2b §3 rule 3)
+#  15  If the scope were ignored, every story the query matches would come back -- so
+#      the check first pins that the UNSCOPED search returns more than one story. Without
+#      that line, a query matching only the scoped story would pass a broken filter.
+#  16  A browse also has `stories`, so "it returned something" proves nothing: the check
+#      reads `verdict` itself, which is null for a browse and a word for a search.
+#  17  If `current_conversation()` handed back the same object `ask()` built, the fields
+#      would match because they ARE the same fields. So the answer is read through a
+#      SECOND copy of the module pointed at the same file -- a restart -- which can only
+#      see what was written down.
+#  19  "It raised something" is what let v0.1 answer 400 for an answer id that was never
+#      issued, so every line here names the CLASS, and the two kinds are checked against
+#      each other: a missing thing must NOT be a ValueError and an unhonourable request
+#      must NOT be a LookupError.
+
+def v01b_contract():
+    """Contract v2.2 §6-§9 -- the rules numbered 15-19, and the v2.2 keys by name."""
+    import p3_app as A
+
+    D.ROOT = ROOT
+    D.ARCHIVE = ROOT / "archive"
+    with tempfile.TemporaryDirectory() as tmp:
+        D.WORK = Path(tmp)                              # §3 rule 7
+        D.STATE_FILE = Path(tmp) / "state.json"
+
+        # --- 15 · a scoped search returns nothing outside story_ids -------------
+        wide = D.search("police", limit=50)
+        check("[fixture] 15 · the unscoped query matches more than one story, so the "
+              "next check has something to exclude", len(wide["stories"]) > 1, True)
+        only = wide["stories"][0]["story_id"]
+        scoped = D.search("police", filters={"story_ids": [only]}, limit=50)
+        check("[behaviour] 15 · a scoped search returns nothing outside story_ids",
+              sorted({s["story_id"] for s in scoped["stories"]} - {only}), [])
+        check("[behaviour] 15 · and the totals are the scope's, not the archive's",
+              scoped["total_stories"], 1)
+        # the include side's other half, confirmed by name (§2)
+        hashes = [a["text_hash"] for a in wide["stories"][0]["articles"]][:1]
+        by_hash = D.search("police", filters={"text_hashes": hashes}, limit=50)
+        check("[behaviour] 15 · and filters.text_hashes narrows to those articles",
+              sorted({a["text_hash"] for s in by_hash["stories"]
+                      for a in s["articles"]} - set(hashes)), [])
+
+        # --- 16 · a query of only short words is searched, not browsed (D5/D6) --
+        ai = D.search("AI", limit=50)
+        check("[behaviour] 16 · search('AI') has a verdict, so it is a search and not "
+              "a browse", ai["verdict"] in ("enough", "thin", "empty"), True)
+        check("[behaviour] 16 · and the sort is the one a search uses",
+              ai["sort"], "relevance")
+        check("[behaviour] 16 · D6 · a short word matches only as a whole word",
+              D._word_hits(["ai"], "he said again he had aid"), 0)
+        check("[behaviour] 16 · while a long one matches inside a longer word",
+              D._word_hits(["protest"], "the protesters gathered"), 1)
+        check("[behaviour] 16 · D5 · a short word is dropped only when a long one "
+              "remains", [D._query_words("AI"), D._query_words("AI policy")],
+              [["ai"], ["policy"]])
+
+        # --- 17 · an answer survives the restart with its v2.2 fields -----------
+        events = list(D.ask("police", None))
+        live = events[-1]["answer"]
+        # From the `results` EVENT, not from the answer's own stored `results`: a check
+        # that reads the field it is checking passes when the field is empty.
+        streamed = events[0]["search"]
+        cited_ids = sorted({s["story_id"] for s in streamed["stories"]
+                            if {a["text_hash"] for a in s["articles"]}
+                            & set(live["cited"])})
+        after = _fresh_double(D.STATE_FILE).current_conversation()
+        stored = [t["answer"] for t in after["turns"] if t["kind"] == "answer"
+                  and t["answer"]["answer_id"] == live["answer_id"]][0]
+        check("[behaviour] 17 · a restart finds the answer in the conversation",
+              stored["answer_id"], live["answer_id"])
+        check("[behaviour] 17 · with the same searched_days, passage_count and "
+              "results_total",
+              [stored["searched_days"], stored["passage_count"],
+               stored["results_total"]],
+              [live["searched_days"], live["passage_count"], live["results_total"]])
+        check("[behaviour] 17 · and the same results rows",
+              stored["results"], live["results"])
+        check("[behaviour] 17 · results carries exactly the five compact keys and no "
+              "article rows",
+              sorted({k for r in stored["results"] for k in r}),
+              ["dates", "headline", "mark", "papers", "story_id"])
+        check("[behaviour] 17 · every mark is cited or found",
+              sorted({r["mark"] for r in stored["results"]} - {"cited", "found"}), [])
+        check("[fixture] 17 · the answer cited something and kept rows, so the two "
+              "checks below are not empty ones",
+              [len(cited_ids) > 0, len(stored["results"]) > 0], [True, True])
+        check("[behaviour] 17 · every cited story is in results however far down the "
+              "list it sat",
+              sorted(set(cited_ids) - {r["story_id"] for r in stored["results"]}), [])
+        check("[behaviour] 17 · and the rows marked cited are exactly those stories",
+              sorted(r["story_id"] for r in stored["results"]
+                     if r["mark"] == "cited"), cited_ids)
+        check("[fixture] 17 · results holds no more than the pane shows, plus the "
+              "cited ones",
+              len(stored["results"]) <= max(D.KNOBS["pane_results_shown"],
+                                            len(cited_ids)), True)
+        # The page shows PANE_RESULTS_SHOWN rows; the answer remembers
+        # KNOBS["pane_results_shown"] of them. Two numbers, one meaning: a page that
+        # showed six and an answer that kept five would lose a row on reload, and
+        # nothing else in the suite would say so.
+        js_shown = re.search(r"const PANE_RESULTS_SHOWN = (\d+)",
+                             (ROOT / "app" / "app.js").read_text())
+        check("[fixture] 17 · the page's row count and the double's knob are the same "
+              "number", int(js_shown.group(1)), D.KNOBS["pane_results_shown"])
+        # The fixture writer only ever cites the top three stories, so a real answer
+        # never puts a cited story below the pane's fold and the "plus every cited
+        # story" half of D12 goes unexercised by the flow above. Checked on the
+        # function itself, with the cited story sitting eighth.
+        made_up = [{"story_id": f"s{i}", "headline": f"H{i}",
+                    "dates": ["2026-10-01"], "papers": 1,
+                    "articles": [{"text_hash": f"h{i}"}]} for i in range(8)]
+        kept = D._compact_results(made_up, ["h7"], 5)
+        check("[behaviour] 17 · a cited story below the pane's fold is kept, and marked",
+              [[r["story_id"] for r in kept], kept[-1]["mark"]],
+              [["s0", "s1", "s2", "s3", "s4", "s7"], "cited"])
+        check("[behaviour] 17 · while an uncited story below it is dropped",
+              [r["story_id"] for r in kept if r["story_id"] in ("s5", "s6")], [])
+        harder = list(D.think_harder(live["answer_id"]))[-1]["answer"]
+        check("[behaviour] 17 · Think harder's passage_count is the parent's, which is "
+              "the whole claim it makes",
+              harder["passage_count"], live["passage_count"])
+        check("[behaviour] 17 · and it keeps a results list of its own, remarked for "
+              "its own cites",
+              [len(harder["results"]) > 0,
+               sorted({r["mark"] for r in harder["results"]} - {"cited", "found"})],
+              [True, []])
+
+        # --- 19 · the two error classes, told apart ----------------------------
+        empty = list(D.ask("Norway fjord salmon quota", None))[-1]["answer"]
+        D.ask_background(empty["answer_id"])
+        pin_board = D.create_board("errors")
+        pin_id = D.pin(pin_board, "story", {"story_id": "x"}, {"from": "test"})
+        D.unpin(pin_id)
+        missing = {
+            "think_harder": lambda: next(D.think_harder("ans_nope")),
+            "ask_background": lambda: D.ask_background("ans_nope"),
+            "suggest_connections": lambda: D.suggest_connections("no_such_story"),
+            "unpin": lambda: D.unpin(pin_id),
+            "remove_user_link": lambda: D.remove_user_link("ulink_nope"),
+        }
+        unhonourable = {
+            "ask_background twice": lambda: D.ask_background(empty["answer_id"]),
+            "estimate_cost": lambda: D.estimate_cost("nonsense"),
+            "raise_cap_today past the limit": _press_cap_past_the_limit,
+        }
+        check("[behaviour] 19 · every missing thing raises LookupError",
+              {name: _raises(fn) for name, fn in sorted(missing.items())},
+              {name: "LookupError" for name in sorted(missing)})
+        check("[behaviour] 19 · and no missing thing raises ValueError instead",
+              [n for n, fn in missing.items() if _raises(fn) == "ValueError"], [])
+        check("[behaviour] 19 · every request that cannot be honoured raises ValueError",
+              {name: _raises(fn) for name, fn in sorted(unhonourable.items())},
+              {name: "ValueError" for name in sorted(unhonourable)})
+        check("[behaviour] 19 · and none of them raises LookupError instead",
+              [n for n, fn in unhonourable.items() if _raises(fn) == "LookupError"], [])
+        # The routes decide by class, not by message, which is the point of the classes.
+        check("[behaviour] 19 · the routes turn LookupError into 404",
+              sorted({status_of(A.background, payload={"answer_id": "ans_nope"}),
+                      status_of(A.suggest, payload={"story_id": "nope"}),
+                      status_of(A.think_harder, payload={"answer_id": "ans_nope"}),
+                      status_of(A.remove_pin, pin_id),
+                      status_of(A.user_link_remove, "ulink_nope")}), [404])
+        check("[behaviour] 19 · and ValueError into 400",
+              sorted({status_of(A.background,
+                                payload={"answer_id": empty["answer_id"]}),
+                      status_of(A.estimate, kind="nonsense")}), [400])
+
+        # --- the rest of §2's confirm-present list, by name ---------------------
+        story = D._find_story(lambda s: D.thread(s.get("story_id")) is not None)
+        target = D._find_story(
+            lambda s: s.get("story_id") != story.get("story_id"))
+        before = D.thread(story["story_id"])
+        link_id = D.add_user_link(story["story_id"], D._story_hashes(story),
+                                  target["story_id"], D._story_hashes(target))
+        th = D.thread(story["story_id"])
+        user_entries = [e for e in th["entries"] if e.get("link_type") == "user"]
+        check("[behaviour] a user entry carries link_id and story_id, for Remove and "
+              "for opening the target",
+              [[e["link_id"] for e in user_entries],
+               [e["story_id"] for e in user_entries]],
+              [[link_id], [target["story_id"]]])
+        check("[behaviour] the thread counts the reader's own entries",
+              [before["entries_added_by_you"], th["entries_added_by_you"]], [0, 1])
+        # D9. The entry list DID grow -- that is the first half of the check, without
+        # which an unchanged `days` would prove only that the link was never added.
+        check("[behaviour] the link is an entry, and `days` counts days only (D9)",
+              [len(th["entries"]) - len(before["entries"]),
+               th["days"] - before["days"]], [1, 0])
+        D.remove_user_link(link_id)
+        check("[fixture] and taking it out puts the thread back as it was",
+              [len(D.thread(story["story_id"])["entries"]),
+               D.thread(story["story_id"])["entries_added_by_you"]],
+              [len(before["entries"]), 0])
+        check("[fixture] cap_override_max_per_day is a named knob, not a number in "
+              "the code", isinstance(D.KNOBS["cap_override_max_per_day"], int), True)
+
+
+def _raises(fn):
+    """The CLASS of what a call raises, as a word. LookupError is checked first because
+    KeyError is one, and the contract lets the double raise either."""
+    try:
+        fn()
+    except LookupError:
+        return "LookupError"
+    except ValueError:
+        return "ValueError"
+    return "nothing"
+
+
+def _press_cap_past_the_limit():
+    """Press the one-day override until the knob refuses one more."""
+    for _ in range(D.KNOBS["cap_override_max_per_day"] + 1):
+        D.raise_cap_today()
 
 
 def v01_routes():
@@ -2764,8 +3058,10 @@ def v01_routes():
               [bool(got["text"]), got["cost_usd"]], [True, 0.0003])
         check("[fixture] and 400s when the answer already has one",
               status_of(A.background, payload={"answer_id": empty["answer_id"]}), 400)
-        check("[fixture] and on an answer that does not exist",
-              status_of(A.background, payload={"answer_id": "ans_nope"}), 400)
+        # Contract v2.2: by class, not by message. v0.1 answered 400 here, which said
+        # "your request cannot be honoured" about a thing that simply was not there.
+        check("[behaviour] 19 · and 404s on an answer that does not exist",
+              status_of(A.background, payload={"answer_id": "ans_nope"}), 404)
         check("[fixture] /api/estimate answers the four kinds",
               [A.estimate(kind=k)["cost_usd"]
                for k in ("ask", "think_harder", "background", "suggest")],
@@ -2793,9 +3089,8 @@ def v01_routes():
         story = D._find_story(lambda s: s.get("story_id") == story_id)
         sugg = A.suggest(payload={"story_id": story_id,
                                   "text_hashes": D._story_hashes(story)})
-        check("[fixture] /api/suggest answers with three to five suggestions",
-              D.KNOBS["suggest_min"] <= len(sugg["suggestions"])
-              <= D.KNOBS["suggest_max"], True)
+        check("[fixture] /api/suggest answers with no more than five suggestions (D11)",
+              0 <= len(sugg["suggestions"]) <= D.KNOBS["suggest_max"], True)
         check("[fixture] and 404s on a story that does not exist",
               status_of(A.suggest, payload={"story_id": "nope"}), 404)
         check("[fixture] a missing story_id is a 400",
@@ -2919,9 +3214,8 @@ def v01_states():
         story_id = "2026-10-11:56eaf7aa4d5b"
         story = D._find_story(lambda s: s.get("story_id") == story_id)
         sugg = D.suggest_connections(story_id, D._story_hashes(story))
-        check("[fixture] state 10 · the Delhi story gives three to five suggestions",
-              D.KNOBS["suggest_min"] <= len(sugg["suggestions"])
-              <= D.KNOBS["suggest_max"], True)
+        check("[fixture] state 10 · the Delhi story gives up to five suggestions (D11)",
+              0 <= len(sugg["suggestions"]) <= D.KNOBS["suggest_max"], True)
         bare = [s["story_id"] for s in D._search_corpus()
                 if D.thread(s["story_id"]) is None][0]
         bare_story = D._find_story(lambda s: s.get("story_id") == bare)
@@ -3245,6 +3539,7 @@ def main():
     real()
     v01_search()
     v01_ask()
+    v01b_contract()
     routes()
     v01_routes()
     v01_states()
