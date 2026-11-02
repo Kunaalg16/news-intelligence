@@ -464,10 +464,43 @@ def pdf(date: str, name: str):
                         filename=target.name, content_disposition_type="inline")
 
 
+def port_is_free():
+    """Is the port actually ours to take?
+
+    Asked BEFORE anything is printed. uvicorn's own failure arrives after the banner,
+    so a copy started while an older one is still running printed a confident
+    "http://127.0.0.1:8765" and then failed underneath it -- which read as a successful
+    restart, three times in a row, while the browser went on talking to the old process
+    and showing old behaviour. An hour went into that.
+
+    EADDRINUSE is the only refusal that means "taken". Any other (the sandbox this was
+    built in refuses to bind at all, with EPERM) is not this function's business: it
+    says yes and lets uvicorn report whatever the real problem is."""
+    import errno
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        # uvicorn sets this too, so the probe and the real bind agree about a socket
+        # that is merely in TIME_WAIT rather than held by a live listener.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((KNOBS["host"], KNOBS["port"]))
+        except OSError as exc:
+            return exc.errno != errno.EADDRINUSE
+    return True
+
+
 def main():
     import uvicorn
+    if not port_is_free():
+        print(f"Port {KNOBS['port']} is already in use — another copy of this app is "
+              f"almost certainly still running,\nand it will keep answering with "
+              f"whatever code it was started with.", file=sys.stderr)
+        print('\nStop it, then start again:\n\n'
+              '    pkill -f "src/p3_app.py"\n', file=sys.stderr)
+        return 1
     print(f"News Intelligence {APP_VERSION} — http://{KNOBS['host']}:{KNOBS['port']}")
     uvicorn.run(app, host=KNOBS["host"], port=KNOBS["port"], log_level="warning")
+    return 0
 
 
 
@@ -639,4 +672,4 @@ def user_links(hashes: list[str] = Query(None)):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

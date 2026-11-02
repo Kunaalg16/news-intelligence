@@ -2958,6 +2958,21 @@ def script_guard():
         check(f"[fixture] and the guard is the last statement in {name}",
               [line for line in tail if not line.startswith("    ")], [])
 
+    # The banner must not be printed before the port is known to be free. uvicorn's own
+    # failure arrives AFTER it, so a second copy printed "http://127.0.0.1:8765" and
+    # then died underneath it -- which read as a successful restart while the browser
+    # went on talking to the old process, showing old behaviour. An hour went into that.
+    whole = (ROOT / "src" / "p3_app.py").read_text()
+    body = whole.split("\ndef main():", 1)[1].split("\ndef ", 1)[0]
+    check("[fixture] main() checks the port before it prints anything",
+          body.index("port_is_free") < body.index("print("), True)
+    check("[fixture] and says what to do about it, not just that it failed",
+          'pkill -f "src/p3_app.py"' in body, True)
+    check("[fixture] a busy port stops the start rather than half-starting it",
+          "return 1" in body, True)
+    check("[fixture] and the exit status really leaves the process",
+          "sys.exit(main())" in whole, True)
+
     # The same thing counted, so a route defined below the guard cannot pass unnoticed
     # even if it is written in a shape the scan above does not recognise.
     src = (ROOT / "src" / "p3_app.py").read_text()
