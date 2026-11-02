@@ -1240,6 +1240,8 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .explore-count { margin: 0; flex: 1; font-size: var(--s125);
                  color: var(--text-secondary); }
 
+.explore-list { margin: 0 0 4px; }
+
 .explore-row {
   display: grid;
   grid-template-columns: auto 1fr;

@@ -2846,6 +2846,241 @@ def v01_states():
               D.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
 
 
+def asgi():
+    """B8 · the REAL request path, without a socket.
+
+    v0 D5 said the tests call route functions directly because the sandbox cannot bind
+    a port -- and that is still true, but a route function is not a request. Driving
+    the ASGI app itself needs no port and exercises what the direct calls cannot:
+    FastAPI resolving `Query(None)` from a real query string, repeated parameters
+    becoming a list, a body being parsed, and StreamingResponse pushing real chunks
+    down the send channel.
+
+    Pass lines, written before the run:
+    - The three shell files are served with the right media types.
+    - `?papers=Mint&papers=The+Hindu` arrives as a two-item list and really narrows the
+      result -- the one thing a direct call CANNOT show, since it hands the function a
+      Python list already.
+    - `/api/ask` answers `application/x-ndjson`, every line is its own JSON object,
+      `results` is the first line out, and the body arrives in more than one chunk,
+      so it is genuinely streamed and not assembled first.
+    - A 404 and a 400 really come back as those statuses through the stack.
+    """
+    import asyncio
+    import p3_app as A
+    import p3_app_double as D
+
+    async def request(method, path, query=b"", body=None):
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": method, "scheme": "http", "path": path,
+                 "raw_path": path.encode(), "query_string": query, "root_path": "",
+                 "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8765),
+                 "headers": [(b"host", b"127.0.0.1:8765")]}
+        payload = b"" if body is None else json.dumps(body).encode()
+        if body is not None:
+            scope["headers"] = scope["headers"] + [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(payload)).encode())]
+        sent, done, calls = [], asyncio.Event(), {"n": 0}
+
+        async def receive():
+            # Starlette listens for a disconnect alongside the response, so the body
+            # goes out once and any later call waits for the response to finish and
+            # then reports the disconnect -- what a real client's socket does.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"type": "http.request", "body": payload, "more_body": False}
+            await done.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                done.set()
+
+        await A.app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        chunks = [m.get("body", b"") for m in sent
+                  if m["type"] == "http.response.body"]
+        headers = {k.decode(): v.decode() for k, v in start["headers"]}
+        return start["status"], headers, chunks
+
+    with tempfile.TemporaryDirectory() as tmp:
+        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
+        D.WORK = Path(tmp)
+        D.STATE_FILE = Path(tmp) / "state.json"
+        D.KNOBS["fixture_stream_delay_ms"] = 0
+        D.FIXTURES["assistant_error"] = False
+        D.FIXTURES["cap_reached"] = False
+
+        got = asyncio.run(request("GET", "/"))
+        check("[fixture] GET / serves the page as HTML",
+              [got[0], got[1].get("content-type", "").split(";")[0]],
+              [200, "text/html"])
+        got = asyncio.run(request("GET", "/app.js"))
+        check("[fixture] and app.js as text/javascript, which is what a browser runs",
+              [got[0], got[1].get("content-type", "").split(";")[0]],
+              [200, "text/javascript"])
+        got = asyncio.run(request("GET", "/app.css"))
+        check("[fixture] and app.css as text/css",
+              [got[0], got[1].get("content-type", "").split(";")[0]], [200, "text/css"])
+
+        # The thing a direct call cannot show: a query string becoming filters.
+        status, _h, chunks = asyncio.run(
+            request("GET", "/api/search", b"q=&papers=Mint&papers=The+Hindu"))
+        body = json.loads(b"".join(chunks))
+        check("[fixture] a repeated query parameter arrives as a list",
+              [status, sorted(body["filters"].get("papers", []))],
+              [200, ["Mint", "The Hindu"]])
+        check("[fixture] and really narrows what comes back",
+              sorted({a["paper"] for s in body["stories"] for a in s["articles"]}),
+              ["Mint", "The Hindu"])
+        status, _h, chunks = asyncio.run(
+            request("GET", "/api/search", b"q=police&sort=newest&limit=3"))
+        body = json.loads(b"".join(chunks))
+        check("[fixture] and q, sort and limit all arrive as themselves",
+              [body["verdict"], body["sort"], len(body["stories"])],
+              ["enough", "newest", 3])
+        status, _h, chunks = asyncio.run(request("GET", "/api/search", b"q="))
+        check("[fixture] while no filter at all is no filter, not a crash",
+              [status, json.loads(b"".join(chunks))["total_stories"]], [200, 19])
+
+        # The streamed route, over the real send channel.
+        status, headers, chunks = asyncio.run(
+            request("POST", "/api/ask", body={"question": "police", "scope": None}))
+        lines = [l for l in b"".join(chunks).decode().splitlines() if l.strip()]
+        events = [json.loads(l) for l in lines]
+        check("[fixture] POST /api/ask answers NDJSON",
+              [status, headers.get("content-type")], [200, "application/x-ndjson"])
+        check("[fixture] every line of it is a JSON object on its own",
+              [l for l in lines if not l.startswith("{")], [])
+        check("[behaviour] results is the first line out of the real response",
+              [events[0]["type"], events[-1]["type"]], ["results", "done"])
+        check("[fixture] and the body arrives in more than one chunk, so it streams",
+              len([c for c in chunks if c]) > 1, True)
+
+        answer_id = events[-1]["answer"]["answer_id"]
+        status, _h, chunks = asyncio.run(
+            request("POST", "/api/think_harder", body={"answer_id": answer_id}))
+        harder = [json.loads(l) for l in b"".join(chunks).decode().splitlines()
+                  if l.strip()]
+        check("[fixture] think_harder streams a Sonnet answer and no results event",
+              [status, harder[-1]["answer"]["model"],
+               [e for e in harder if e["type"] == "results"]], [200, "sonnet", []])
+
+        status, _h, _c = asyncio.run(
+            request("POST", "/api/think_harder", body={"answer_id": "ans_nope"}))
+        check("[fixture] a 404 really comes back as 404 through the stack", status, 404)
+        status, _h, _c = asyncio.run(request("GET", "/api/estimate", b"kind=nonsense"))
+        check("[fixture] and a 400 as 400", status, 400)
+        status, _h, chunks = asyncio.run(request("GET", "/api/flags"))
+        check("[fixture] the flags the page boots from come over the wire",
+              [status, len(json.loads(b"".join(chunks))["flags"])], [200, 19])
+
+
+def page_contract():
+    """B8 · the page against the server, which the rest of this file cannot see.
+
+    Everything else here calls route FUNCTIONS (v0 D5: no port to bind). So the page's
+    own URLs are never exercised: `'/api/sugest'` would pass every check above and fail
+    in the browser. Same for a class the page draws that the stylesheet never styles,
+    and for a flag whose selector matches nothing.
+
+    Pass lines, written before the run:
+    - Every '/api/...' and '/pdf/...' string the page builds resolves to a real route,
+      prefixes it concatenates onto included.
+    - Every class the page draws has a rule in app.css, bar the two that are only
+      hooks for the flag map.
+    - Every flag the server sends is in the page's map and vice versa (v0 checked this)
+      AND every selector the map names is something that is really drawn or styled --
+      which v0 did not check, and which two v0 flags fail (see KNOWN_DEAD below).
+    - Every id the page looks up is in index.html or built by the page itself.
+    - Every nav item in the shell is a screen the page knows how to draw.
+    """
+    import p3_app as A
+
+    js = (ROOT / "app" / "app.js").read_text()
+    css = (ROOT / "app" / "app.css").read_text()
+    html = (ROOT / "app" / "index.html").read_text()
+
+    routes = {r.path for r in A.app.routes if hasattr(r, "path")}
+    rx = [re.compile("^" + re.sub(r"\{[^}]+\}", "[^/]+", p.replace(":path", "")) + "$")
+          for p in routes]
+
+    def resolves(path):
+        # A complete path must match a route outright. A path the page CONCATENATES
+        # onto ("/api/boards/" + id + "/pins") cannot be matched that way, because the
+        # suffix is not in the literal -- so what is checked there is that a route
+        # family begins with it. That is the real question: whether the page is
+        # building onto a path the server knows about at all.
+        if not path.endswith("/"):
+            return any(r.match(path) for r in rx)
+        return any(route.startswith(path) for route in routes)
+
+    urls = sorted(set(re.findall(r"'(/(?:api|pdf)[^'\s]*)'", js)))
+    check("[fixture] every URL the page builds hits a real route",
+          [u for u in urls if not resolves(u.split("?")[0])], [])
+    check("[fixture] and there are enough of them to be the whole page",
+          len(urls) >= 30, True)
+
+    drawn = set()
+    for group in re.findall(r"class:\s*'([^']+)'", js):
+        for one in group.replace("+", " ").split():
+            if re.fullmatch(r"[a-z][a-z0-9-]*", one):
+                drawn.add(one)
+    styled = set(re.findall(r"\.([a-z][a-z0-9-]*)", css))
+    # `reset` is the shared button reset; `background-button` is a hook the flag map
+    # needs, drawn on top of `.action`, and styling it again would say nothing.
+    HOOKS = {"reset", "background-button"}
+    check("[fixture] every class the page draws is styled", sorted(drawn - styled - HOOKS),
+          [])
+    check("[fixture] and the sweep really saw the whole page", len(drawn) > 140, True)
+
+    flag_block = re.search(r"const FLAG_ELEMENTS = \{(.*?)\n\};", js, re.S).group(1)
+    flag_sel = dict(re.findall(r"(\w+):\s*'([^']+)'", flag_block))
+    check("[fixture] every server flag is in the page's flag map",
+          sorted(set(A.FLAGS) - set(flag_sel)), [])
+    check("[fixture] and the map names no flag the server does not send",
+          sorted(set(flag_sel) - set(A.FLAGS)), [])
+
+    # Two v0 flags name an element that is never drawn and never styled. Both are OFF,
+    # so nothing is broken -- a flag that is off and has no element removes nothing --
+    # but v0's own check compares flag KEYS only, so it never noticed, and this build
+    # found it. `theme_bar_strip` is off by design (request R9's data is not in the
+    # JSON). `agency_copy`'s stated reason, "OFF until the v0.1 assistant exists", has
+    # now expired, and brief 2 §8.6 does not ask for it, so it is logged for Kunaal
+    # rather than turned on here. Naming them keeps the check honest AND catches any
+    # NEW dangling selector.
+    KNOWN_DEAD = {"theme_bar_strip", "agency_copy"}
+    dangling = []
+    for flag, selector in flag_sel.items():
+        for one in [piece.strip() for piece in selector.split(",")]:
+            cls = re.match(r"\.([a-z0-9-]+)", one)
+            if cls and cls.group(1) not in styled and cls.group(1) not in drawn:
+                dangling.append(flag)
+            seen = re.search(r'\[data-screen="(\w+)"\]', one)
+            if seen and f'data-screen="{seen.group(1)}"' not in html:
+                dangling.append(flag)
+    check("[fixture] every flag selector matches something drawn, bar the two known dead",
+          sorted(set(dangling) - KNOWN_DEAD), [])
+    check("[fixture] and the two known dead ones are still exactly those two",
+          sorted(set(dangling) & KNOWN_DEAD), sorted(KNOWN_DEAD))
+    check("[fixture] both of which are off, so they remove nothing",
+          [A.FLAGS[f] for f in sorted(KNOWN_DEAD)], [False, False])
+
+    used = set(re.findall(r"getElementById\('([\w-]+)'\)", js))
+    in_html = set(re.findall(r'id="([\w-]+)"', html))
+    built = set(re.findall(r"id:\s*'([\w-]+)'", js))
+    check("[fixture] every id the page looks up is in the shell or built by the page",
+          sorted(used - in_html - built), [])
+
+    screens = set(re.findall(r'data-screen="(\w+)"', html))
+    handled = set(re.findall(r"S\.screen === '(\w+)'", js)) | {"today"}
+    check("[fixture] every nav item in the shell is a screen the page draws",
+          sorted(screens - handled), [])
+    check("[fixture] and Explore is one of them", "explore" in screens, True)
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         mock(tmp)
@@ -2859,6 +3094,8 @@ def main():
     js_logic()
     contrast()
     markup()
+    asgi()
+    page_contract()
     ownership()
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
