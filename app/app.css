@@ -1153,6 +1153,10 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .suggest-open:hover h4 { text-decoration: underline; }
 .suggest-why { margin: 3px 0 0; font-size: var(--s125); color: var(--text-muted); }
 .added-note { color: var(--ochre); }
+/* D11 · a short or empty set says so. Muted, under the rows: it is a caveat about the
+   set, not a row of its own, and at zero it is the only thing in the box above the cost. */
+.suggest-short { margin: 9px 0 0; font-size: var(--s125); color: var(--text-muted); }
+.suggest-none { margin: 0; font-size: var(--s14); color: var(--text-secondary); }
 .suggest-cost { margin: 9px 0 0; font-size: var(--s11); color: var(--text-muted); }
 
 /* The two icon buttons. 32 x 32 is the target; the icon inside is 16. */

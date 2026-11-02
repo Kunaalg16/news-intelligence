@@ -1466,6 +1466,114 @@ PS.scope = {story_id: null, text_hashes: [], filters: {}};
 PS.results = {};
 
 
+// === C2 · D11, a short or empty suggestion set (brief 2b §1) =======================
+// Tagged [page]: K1's own page logic over the count the double returns. The double's
+// side of D11 -- that the count is honest -- is checked in Python as rule 18.
+
+function suggestFixture(n) {
+  var rows = [];
+  for (var i = 0; i < n; i++) {
+    rows.push({story_id: "t" + i, headline: "Related story " + i,
+               dates: ["2026-10-12"], papers: 1,
+               why: "Sample reason · shares the word 'gst'",
+               articles: [{text_hash: "r" + i, headline: "An article", paper: "Mint",
+                           date: "2026-10-12",
+                           page_link: {pdf: "archive/x/y.pdf", pdf_page: 2,
+                                       label: "PDF p2", paper: "Mint"}}]});
+  }
+  return {story_id: "s1", suggestions: rows, verdict: "thin", model: "haiku",
+          model_id: "claude-haiku-5-5", cost_usd: 0.0005, fixture: true};
+}
+var openStory = {story_id: "s1", headline: {text: "A STORY"}, coverage: {rows: []}};
+function suggestText(n) {
+  return textOf(APP.suggestionsBox(openStory, suggestFixture(n)));
+}
+
+eq("[page] D11 · at zero the box says nothing related was found",
+   suggestText(0).indexOf("Nothing related found.") >= 0, true);
+eq("[page] D11 · and only that: no head to a set that is not there, no 'Not checked'",
+   [suggestText(0).indexOf("Suggested by assistant") >= 0,
+    suggestText(0).indexOf("Not checked") >= 0], [false, false]);
+eq("[page] D11 · but it still prints what the press cost, which was paid either way",
+   suggestText(0).indexOf("Suggestions · ") > 0, true);
+eq("[page] D11 · one suggestion says so under the row",
+   suggestText(1).indexOf("Only 1 looks related.") > 0, true);
+eq("[page] D11 · two says two", suggestText(2).indexOf("Only 2 look related.") > 0,
+   true);
+eq("[page] D11 · and the line is under the rows, not above them",
+   suggestText(2).indexOf("Related story 1")
+   < suggestText(2).indexOf("Only 2 look related."), true);
+eq("[page] D11 · three is a set and says nothing about its size",
+   suggestText(3).indexOf("Only ") >= 0, false);
+eq("[page] D11 · nor does a full five", suggestText(5).indexOf("Only ") >= 0, false);
+eq("[page] D11 · a short set is still headed and still caveated",
+   [suggestText(1).indexOf("Suggested by assistant") >= 0,
+    suggestText(1).indexOf("Not checked") >= 0], [true, true]);
+eq("[page] D11 · the wording reads its number from the count and nothing else",
+   [APP.shortfallWords(1), APP.shortfallWords(2)],
+   ["Only 1 looks related.", "Only 2 look related."]);
+eq("[page] D11 · and the line appears below three, which is the knob",
+   APP.SUGGEST_FEW, 3);
+
+// === C2 · D12, an answer's results after a reload (brief 2b §1) ====================
+// The reload is simulated the only way it can be: `S.results` is emptied, which is
+// exactly what a restart leaves behind, and the answer is drawn from its stored fields
+// alone. If the page were still reading the search result, these checks would draw
+// nothing at all.
+
+var storedRows = [1, 2, 3, 4, 5].map(function (i) {
+  return {story_id: "s" + i, headline: "Story number " + i,
+          dates: ["2026-10-1" + (i % 5)], papers: 2,
+          mark: i === 1 ? "cited" : "found"};
+});
+var reloaded = answerFixture({results: storedRows, results_total: 9, passage_count: 8,
+                              scope: {story_id: null, text_hashes: [],
+                                      filters: {papers: ["Mint"]}}});
+var liveResultsWere = PS.results;
+PS.results = {};                        /* the restart: nothing in memory */
+var back = textOf(APP.answerTurn(reloaded, {}));
+eq("[page] D12 · a reloaded answer draws its results list, with the total it was "
+   + "drawn out of", back.indexOf("Found · 9 stories") > 0, true);
+eq("[page] D12 · and every row it kept",
+   [1, 2, 3, 4, 5].filter(function (i) {
+     return back.indexOf("Story number " + i) < 0; }), []);
+eq("[page] D12 · the cited row is CITED and the other four FOUND",
+   [back.indexOf("CITED") > 0, (back.match(/FOUND/g) || []).length], [true, 4]);
+eq("[page] D12 · Show all N in Explore survives the reload, with the real total",
+   back.indexOf("Show all 9 in Explore") > 0, true);
+eq("[page] D12 · because the question and the scope are on the answer",
+   [APP.storedResults(reloaded).query, APP.storedResults(reloaded).filters],
+   ["what happened in Delhi?", {papers: ["Mint"]}]);
+eq("[page] D12 · an answer that kept no rows draws no list rather than an empty one",
+   [APP.storedResults(answerFixture({results: []})),
+    APP.storedResults(answerFixture({}))], [null, null]);
+eq("[page] D12 · a stored row's mark is read off the row, never recomputed from cites "
+   + "it no longer carries",
+   [APP.markFor({story_id: "s9", mark: "cited"}, answerFixture({cited: []})).word,
+    APP.markFor({story_id: "s9", mark: "found"}, answerFixture({cited: ["h1"]})).word],
+   ["CITED", "FOUND"]);
+eq("[page] D12 · while a live row is still marked from the answer's cites",
+   APP.markFor(resultsFixture.stories[0], answerFixture()).word, "CITED");
+PS.results.a1 = resultsFixture;
+eq("[page] D12 · and a live result in memory wins over the stored copy, so a re-sort "
+   + "is not undone by a redraw",
+   textOf(APP.answerTurn(reloaded, {})).indexOf("Found · 9 stories") > 0, true);
+eq("[page] D12 · which it does by showing the live rows, articles and all",
+   textOf(APP.answerTurn(reloaded, {})).indexOf("PDF p3") > 0, true);
+PS.results = liveResultsWere;
+
+eq("[page] D12 · Sonnet's label reads its passage count off the answer",
+   APP.sonnetLabel(answerFixture({parent_answer_id: "a1", passage_count: 8})),
+   "Sonnet · same 8 passages");
+eq("[page] D12 · one passage is a passage, not passages",
+   APP.sonnetLabel(answerFixture({parent_answer_id: "a1", passage_count: 1})),
+   "Sonnet · same 1 passage");
+eq("[page] D12 · and with neither the field nor the parent in memory it says what it "
+   + "knows rather than inventing a number",
+   APP.sonnetLabel(answerFixture({parent_answer_id: "zz_nothing", passage_count: 0})),
+   "Sonnet · the same passages");
+
+
 // === B6 · Suggest connections and the reader's own links (brief 2 §8.4) ===========
 
 PS.ref = "digest_live";
@@ -2945,6 +3053,14 @@ def v01b_contract():
               [len(D.thread(story["story_id"])["entries"]),
                D.thread(story["story_id"])["entries_added_by_you"]],
               [len(before["entries"]), 0])
+        # D11 deleted a wording as well as a code path. A deleted path can come back
+        # as a one-line fallback, so the words themselves are checked for by name.
+        sources = "".join((ROOT / f).read_text() for f in
+                          ("src/p3_app_double.py", "src/p3_app.py", "app/app.js"))
+        check("[fixture] the filler wording is gone from the app, not just unreachable",
+              [w for w in ("shown to fill the set",
+                           "nothing in common but words the whole archive uses")
+               if w in sources], [])
         check("[fixture] cap_override_max_per_day is a named knob, not a number in "
               "the code", isinstance(D.KNOBS["cap_override_max_per_day"], int), True)
 

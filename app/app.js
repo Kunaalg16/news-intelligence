@@ -1738,15 +1738,39 @@ function renderScope(into) {
 
 /* ------------------------------------------------------------------- the results */
 
+const MARKS = { cited: { word: 'CITED', cls: 'mark-cited' },
+                found: { word: 'FOUND', cls: 'mark-found' } };
+
+/* A row from a live search carries its articles, so the mark is worked out here from
+   the answer's `cited` hashes. A row read back from a stored answer (D12) carries no
+   articles -- that is what makes it compact -- so it carries its own `mark` instead,
+   decided by the double when the answer was written. Either way the word on screen is
+   the same word it was. */
 function markFor(story, answer) {
+  if (story && story.mark) return MARKS[story.mark] || MARKS.found;
   const cited = new Set((answer && answer.cited) || []);
   const hit = (story.articles || []).some((a) => cited.has(a.text_hash));
-  return hit ? { word: 'CITED', cls: 'mark-cited' }
-             : { word: 'FOUND', cls: 'mark-found' };
+  return hit ? MARKS.cited : MARKS.found;
+}
+
+/* D12 · the results list of an answer whose search is no longer in memory, in the shape
+   `resultsList` already draws. Everything it needs is on the answer: the compact rows,
+   the total they were drawn out of, and the question and scope, which are what "Show
+   all N in Explore" and the sort switcher re-search with. */
+function storedResults(answer) {
+  if (!answer || !answer.results || !answer.results.length) return null;
+  return { stories: answer.results,
+           total_stories: answer.results_total || answer.results.length,
+           query: answer.question,
+           filters: (answer.scope && answer.scope.filters) || {},
+           sort: 'relevance',
+           stored: true };
 }
 
 function resultRow(story, answer) {
   const mark = markFor(story, answer);
+  /* A stored row has no articles, so the "BL PDF p1 · " part of the meta line is left
+     off rather than invented; the date and the paper count are the row's own. */
   const best = (story.articles || [])[0];
   return el('div', { class: 'result-row' },
     el('button', { class: 'reset result-open', type: 'button',
@@ -1776,7 +1800,7 @@ function resultsList(answerId, result, answer) {
       class: 'reset', type: 'button',
       'aria-pressed': sort === name ? 'true' : 'false',
       disabled: name === 'relevance' && !result.query ? true : null,
-      onclick: () => resortResults(answerId, name),
+      onclick: () => resortResults(answerId, name, result),
     }, name === 'relevance' ? 'Relevance' : 'Newest'));
   }
   head.append(switcher);
@@ -1792,8 +1816,8 @@ function resultsList(answerId, result, answer) {
   return section;
 }
 
-async function resortResults(answerId, sort) {
-  const result = S.results[answerId];
+async function resortResults(answerId, sort, from) {
+  const result = S.results[answerId] || from;
   if (!result) return;
   S.sorts[answerId] = sort;
   const again = await api.search(searchQueryString(result.query, result.filters, sort));
@@ -1946,7 +1970,9 @@ function answerTurn(answer, opts) {
   block.append(actionsRow(answer));
 
   if (!o.noResults) {
-    const list = resultsList(answer.answer_id, S.results[answer.answer_id], answer);
+    const list = resultsList(answer.answer_id,
+                             S.results[answer.answer_id] || storedResults(answer),
+                             answer);
     if (list) block.append(list);
   }
   return block;
@@ -1970,12 +1996,16 @@ function keepLiveAfterStream(live) {
   return live.error.code !== 'cap_reached';
 }
 
-/* §8.3 state 3: "SONNET · SAME 8 PASSAGES". The count is the parent's passage set --
-   how many articles the first answer was allowed to cite -- which is the whole claim
-   Think harder makes: the same passages, read better. With the results gone after a
-   reload (D12) there is no number to show, and the label says "the same passages"
-   rather than an invented one. */
+/* §8.3 state 3: "SONNET · SAME 8 PASSAGES". The count is the passage set -- how many
+   articles the first answer was allowed to cite -- which is the whole claim Think harder
+   makes: the same passages, read better. D12 puts `passage_count` on the answer itself,
+   so the number survives a reload; the in-memory parent result is the fallback for an
+   answer written before that field existed, and only if neither has it does the label
+   say "the same passages" rather than an invented number. */
 function sonnetLabel(answer) {
+  if (answer.passage_count) {
+    return 'Sonnet · same ' + count(answer.passage_count, 'passage');
+  }
   const parent = S.results[answer.parent_answer_id];
   if (!parent) return 'Sonnet · the same passages';
   const passages = (parent.stories || [])
@@ -2306,6 +2336,11 @@ function openExploreFrom(result) {
    this page.
 */
 
+/* Below this many suggestions the box says how few there are. Three because that was
+   §4.4's old floor: a set of three or more reads as a set, and one or two does not.
+   What would change it: Kunaal finding that three rows also want the line. */
+const SUGGEST_FEW = 3;
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /* Inline stroke SVG, 16px inside a 32px target. `currentColor` is the whole trick:
@@ -2473,13 +2508,29 @@ function suggestionRow(story, suggestion) {
     actions);
 }
 
+/* Decision D11: the set is never padded, so it can be short or empty, and the box has
+   to say which rather than letting two rows read as the whole answer. The count is the
+   only thing it reads -- there is no field on the response saying "this set is short". */
+function shortfallWords(n) {
+  return 'Only ' + n + (n === 1 ? ' looks' : ' look') + ' related.';
+}
+
 function suggestionsBox(story, got) {
   const box = el('section', { class: 'suggest-box' });
-  box.append(el('div', { class: 'suggest-head' },
-    el('p', { class: 'block-label', text: 'Suggested by assistant' }),
-    el('p', { class: 'block-label', text: 'Not checked' })));
-  for (const suggestion of (got.suggestions || [])) {
-    box.append(suggestionRow(story, suggestion));
+  const rows = got.suggestions || [];
+  /* At zero there is nothing to head and nothing to caveat -- "Not checked" is a
+     warning about suggestions, and there are none -- so the box says what happened and
+     prints what the press cost, which the reader paid either way. */
+  if (!rows.length) {
+    box.append(el('p', { class: 'suggest-none', text: 'Nothing related found.' }));
+  } else {
+    box.append(el('div', { class: 'suggest-head' },
+      el('p', { class: 'block-label', text: 'Suggested by assistant' }),
+      el('p', { class: 'block-label', text: 'Not checked' })));
+    for (const suggestion of rows) box.append(suggestionRow(story, suggestion));
+    if (rows.length < SUGGEST_FEW) {
+      box.append(el('p', { class: 'suggest-short', text: shortfallWords(rows.length) }));
+    }
   }
   box.append(el('p', { class: 'suggest-cost' },
     'Suggestions · ' + moneyFine(got.cost_usd),
@@ -3093,6 +3144,7 @@ const EXPORTS = {
   paperFromPdf, seeAlsoPlan,
   moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
+  storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */

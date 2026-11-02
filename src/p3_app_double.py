@@ -1549,9 +1549,9 @@ def suggest_connections(story_id, text_hashes=None):
     # `common_word_share` (0.5) decides whether a row is SHOWN AT ALL (decision D11). A
     # story whose only overlap is words half the archive uses is not a connection; it is
     # a coincidence of English, and the old code padded the set with exactly those rows
-    # under a `why` that admitted it ("nothing in common but words the whole archive
-    # uses; shown to fill the set"). That path and that wording are gone: the set is
-    # 0 to `suggest_max` and short when the archive is short.
+    # under a `why` that admitted as much in so many words. That path and that wording
+    # are both gone -- the suite greps for the words, so they cannot come back as a
+    # one-line fallback -- and the set is 0 to `suggest_max`, short when the archive is.
     #
     # `suggest_why_max_spread` (0.4) is tighter and decides only what gets NAMED, which
     # is the older measurement: ranking by rarity alone still produced "shares the words
