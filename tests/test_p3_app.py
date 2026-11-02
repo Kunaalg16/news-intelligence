@@ -1197,6 +1197,20 @@ delete PS.results.a1;
 var state5 = APP.answerTurn(none, {});
 eq("[fixture] state 5 · it says what it did not find, and how far it looked",
    textOf(state5).indexOf("Not in your papers · searched 7 days") > 0, true);
+// After a restart the results are gone (D12). The number has to come off the answer,
+// and if it is not there either the clause goes rather than claiming "0 days".
+var noResults = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 0,
+                               searched_days: 7, closest: []});
+delete PS.results.a1;
+eq("[fixture] state 5 · the day count survives a reload, off the answer itself",
+   textOf(APP.answerTurn(noResults, {})).indexOf("searched 7 days") > 0, true);
+var noDays = answerFixture({verdict: "empty", sentences: [], cited: [], cost_usd: 0,
+                            closest: []});
+delete noDays.searched_days;
+eq("[fixture] state 5 · and an answer with no count says nothing, never '0 days'",
+   [textOf(APP.answerTurn(noDays, {})).indexOf("Not in your papers") >= 0,
+    textOf(APP.answerTurn(noDays, {})).indexOf("searched") >= 0],
+   [true, false]);
 eq("[fixture] state 5 · the three closest stories are offered",
    textOf(state5).indexOf("The closest story") > 0
    && textOf(state5).indexOf("A third") > 0, true);
@@ -2309,11 +2323,17 @@ def v01_ask():
         check("[behaviour] 10 · every cited hash belongs to a story in found",
               sorted(set(answer["cited"]) - found_hashes), [])
 
+        # Twenty keys from §4.2, plus `searched_days`, which the contract does not name
+        # and the page needs: without it a reloaded empty answer said "searched 0 days"
+        # about a search that covered one (logged for K3).
         check("[fixture] an answer carries the contract's keys", sorted(answer),
               ["answer_id", "at", "attempts", "background", "cited", "closest",
                "conversation_id", "cost_usd", "drops", "fixture", "found",
                "found_count", "model", "model_id", "parent_answer_id",
-               "passage_set_id", "question", "scope", "sentences", "verdict"])
+               "passage_set_id", "question", "scope", "searched_days", "sentences",
+               "verdict"])
+        check("[fixture] and searched_days matches the search behind it",
+              answer["searched_days"], result["searched_days"])
         check("[fixture] it is Haiku, named by its model id",
               [answer["model"], answer["model_id"]], ["haiku", "claude-haiku-5-5"])
         check("[fixture] one attempt, nothing dropped",

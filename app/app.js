@@ -1908,10 +1908,16 @@ function answerTurn(answer, opts) {
   }
 
   if (answer.verdict === 'empty') {
+    /* The number comes from the answer itself, falling back to the results while they
+       are still in memory. If neither has it, the clause is left off rather than
+       printed as "searched 0 days", which would be a claim about the archive that the
+       page cannot stand behind. */
+    const days = answer.searched_days
+                 || (S.results[answer.answer_id] || {}).searched_days
+                 || null;
     block.append(el('p', { class: 'answer-none' },
       el('strong', { text: 'Not in your papers' }),
-      ' · searched ' + count((S.results[answer.answer_id] || {}).searched_days
-                             || answer.searched_days || 0, 'day')));
+      days ? ' · searched ' + count(days, 'day') : ''));
     if (answer.closest && answer.closest.length) {
       block.append(el('p', { class: 'block-label', text: 'Closest stories' }));
       block.append(el('ul', { class: 'closest' }, answer.closest.map((story) =>

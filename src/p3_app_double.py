@@ -1292,6 +1292,13 @@ def ask(question, scope=None, conversation_id=None):
         "model_id": MODEL_IDS["haiku"],
         "verdict": result["verdict"],
         "found_count": result["total_articles"],
+        # How wide the search actually was. §4.2's answer shape does not name it, and
+        # only the `results` event carried it -- so after a restart, when the results
+        # are gone (decision D12), state 5 fell back to zero and said "searched 0 days"
+        # about a search that covered one. A wrong number is worse than no number, and
+        # this is the one screen whose job is to say how wide the search was. Logged for
+        # K3 as a contract addition.
+        "searched_days": result["searched_days"],
         "sentences": sentences,
         "background": background,
         "cited": sorted({h for s in sentences for h in s["cites"]}),
