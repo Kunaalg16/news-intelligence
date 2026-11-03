@@ -1110,13 +1110,15 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 /* I6 · call 8: the divider a question adds when its scope changes. A full-width black
    rule on both sides of "NOW ASKING ABOUT · <HEADLINE>". */
 .pane-divider.ask-divider { color: var(--ink); letter-spacing: 0.06em; }
+/* Each rule keeps at least 24 px, so a long headline wraps between them rather than
+   squeezing both to nothing (seen at I6's run check: 0 px wide in a 342 px pane). */
 .pane-divider.ask-divider::before {
   content: "";
-  flex: 1;
+  flex: 1 0 24px;
   height: 1px;
   background: var(--ink);
 }
-.pane-divider.ask-divider::after { background: var(--ink); }
+.pane-divider.ask-divider::after { flex: 1 0 24px; background: var(--ink); }
 
 /* I6 · meaning search is off: one grey line above the results, not a warning. */
 .mode-note { margin: 6px 0; font-size: var(--s11); color: var(--text-muted); }
