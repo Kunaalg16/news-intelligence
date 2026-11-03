@@ -190,6 +190,9 @@ def on_copy(tmp):
 
     # 3. a second run is a no-op, and does not disturb rows already written
     con = S.open_intel(path, quiet=True)
+    # The copy's own viewer_prefs (e.g. current_conversation_id, written by the ask pane
+    # since 3 Nov) must survive too, so the expectation is real rows + the one added.
+    real_prefs = con.execute("SELECT key, value FROM viewer_prefs").fetchall()
     con.execute("INSERT INTO viewer_prefs VALUES ('window', ?, '2026-11-01T06:00:00')",
                 (json.dumps("day"),))
     con.execute("INSERT INTO read_state VALUES ('abc123', '2026-11-01T06:01:00')")
@@ -202,7 +205,7 @@ def on_copy(tmp):
     reads = con.execute("SELECT text_hash, read_at FROM read_state").fetchall()
     version = S.k3_version(con)
     con.close()
-    check("re-run keeps K3 rows", prefs, [("window", '"day"')])
+    check("re-run keeps K3 rows", sorted(prefs), sorted(real_prefs + [("window", '"day"')]))
     check("re-run keeps read_state rows", reads, [("abc123", "2026-11-01T06:01:00")])
     check("re-run leaves the schema row at 2", version, 2)
     check("re-run still leaves K2 alone", k2_fingerprint(path)["counts"], again["counts"])

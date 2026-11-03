@@ -484,12 +484,20 @@ def mock(tmp):
 # ================================================================= 3. the real archive
 
 def real():
+    # The archive grows every morning, so its size is COUNTED here, by plain SQL on the
+    # frozen run's placements, not hard-coded (was 23 days / 6,655 texts to 24 Oct; 33 /
+    # 8,744 on 3 Nov). The count does not go through the search code it checks.
+    news = sqlite3.connect(f"file:{S.NEWS_DB}?mode=ro", uri=True)
+    days, first, last, texts = news.execute(
+        "SELECT COUNT(DISTINCT date), MIN(date), MAX(date), COUNT(DISTINCT text_hash) "
+        "FROM placements WHERE run_id = ?", (S.D.RUN_ID,)).fetchone()
+    news.close()
     f = S.facets()
     check("real: five papers", len(f["papers"]), 5)
     check("real: 75 topics, the current tag record's own (not 91 across versions)",
           len(f["topics"]), 75)
-    check("real: the archive's 23 stored paper-days, end to end",
-          [f["date_min"], f["date_max"]], ["2026-09-16", "2026-10-24"])
+    check("real: the archive's stored paper-days, end to end",
+          [f["date_min"], f["date_max"]], [first, last])
 
     # Three questions with known answers, from the frozen Q17 set and its N-list.
     epfo = S.search("why do employers welcome the move of the EPFO wage ceiling "
@@ -511,9 +519,9 @@ def real():
 
     browse = S.search("", limit=5)
     check("real: a browse is newest-first", browse["sort"], "newest")
-    check("real: and counts every article once (6,655 texts in exam-v1)",
-          browse["total_articles"], 6655)
-    check("real: searched_days is the 23 stored paper-days", browse["searched_days"], 23)
+    check("real: and counts every article once (the texts in exam-v1)",
+          browse["total_articles"], texts)
+    check("real: searched_days is the stored paper-days", browse["searched_days"], days)
 
 
 # ================================================================= 3b. the ask pane (B2-5)
