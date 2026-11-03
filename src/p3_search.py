@@ -207,7 +207,9 @@ KNOBS = {
     # (Q17_EVIDENCE "why_not_fused": RRF scores positions, not match quality). The value
     # is in SUGGEST_EVIDENCE below. With the embedding service down there is no cosine,
     # so no bar can be read and the set is empty, said with `mode: fts_only`.
-    "suggest_min_similarity": 0.6150,
+    # DECIDED by Kunaal 3 Nov: 0.65, from the 20-story measurement in SUGGEST_EVIDENCE.
+    # A V2 design question, not settled: no ground truth for "related story" exists.
+    "suggest_min_similarity": 0.65,
 
     # The live client: few SDK retries, because a reader is waiting on the pane.
     "live_max_retries": 2,
@@ -1523,9 +1525,14 @@ SUGGEST_PROMPT_VERSION = "g1.0"
 
 # The bar's evidence, filled in by the measurement it names. Until then it is PLACED.
 SUGGEST_EVIDENCE = {
-    "measured": None,
-    "placed_at": "thin_similarity (0.6150): a story that would not make a question's "
-                 "verdict better than thin is not offered as a connection",
+    "measured": "2026-11-03, the 20 Q17 stories as queries, service up, s0.1",
+    # bar: (stories offered 0, stories pinned at 5, median offered)
+    "counts": {0.615: (1, 10, 4.5), 0.65: (2, 8, 2.5), 0.70: (6, 5, 1.0),
+               0.75: (10, 2, 0.5), 0.80: (16, 0, 0.0)},
+    "why_not_0615": "a whole story as the query sits closer to same-topic stories than "
+                    "a question does; the question-calibrated line let 5+ through on "
+                    "half the stories, so the cap decided, not the bar",
+    "v2_open": "is 0.65 offering the RIGHT stories? Needs a judged 'related' set.",
 }
 
 SUGGEST_RULES = """You explain why other newspaper stories may connect to a story.
