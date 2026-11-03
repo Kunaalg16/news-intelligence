@@ -924,6 +924,68 @@ def suggest_mock(tmp):
         os.environ.pop(k, None)
 
 
+def shapes_mock():
+    """The live client against a FAKE `anthropic` SDK (option C, B2-6): each model's
+    request shape comes from MODEL_REGISTER, one request per call, and an unregistered
+    model raises before anything is sent. No key is read; the fake records requests."""
+    import os
+    import types
+    sent = []
+
+    class Msg:
+        def __init__(self, kw):
+            self.usage = types.SimpleNamespace(input_tokens=10, output_tokens=5)
+            self.content = ([types.SimpleNamespace(type="tool_use", input={"text": "x"})]
+                            if "tool_choice" in kw else
+                            [types.SimpleNamespace(type="text", text='{"text": "x"}')])
+
+    class Messages:
+        def create(self, **kw):
+            sent.append(kw)
+            return Msg(kw)
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = lambda **kw: types.SimpleNamespace(messages=Messages())
+    fake.BadRequestError = type("BadRequestError", (Exception,), {})
+    dot = types.ModuleType("dotenv")
+    dot.load_dotenv = lambda *a, **k: None
+    saved = {m: sys.modules.get(m) for m in ("anthropic", "dotenv")}
+    saved_key = os.environ.get("ANTHROPIC_API_KEY")
+    sys.modules.update(anthropic=fake, dotenv=dot)
+    os.environ["ANTHROPIC_API_KEY"] = "fake-not-a-key"
+    try:
+        call = S._live_client()
+        for kind, model in (("haiku", S.MODEL_IDS["haiku"]), ("sonnet", S.MODEL_IDS["sonnet"])):
+            sent.clear()
+            reply = call("P", "SYS", "ask", model, "text")[0]
+            check(f"shape · {kind} sends exactly one request", len(sent), 1)
+            check(f"shape · {kind} reply read", reply, {"text": "x"})
+            want = (False, True) if kind == "haiku" else (True, False)
+            check(f"shape · {kind} carries (output_config, tool_choice)",
+                  ("output_config" in sent[0], "tool_choice" in sent[0]), want)
+        sent.clear()
+        check("shape · an unregistered model raises",
+              raises(lambda: call("P", "SYS", "ask", "claude-unknown-1", "text"), ValueError),
+              True)
+        check("shape · ... with zero requests sent", len(sent), 0)
+        S.MODEL_REGISTER["claude-noshape-1"] = {"auto_tool": True}
+        check("shape · a registered model with no shape raises",
+              raises(lambda: call("P", "SYS", "ask", "claude-noshape-1", "text"), ValueError),
+              True)
+        check("shape · ... with zero requests sent", len(sent), 0)
+    finally:
+        S.MODEL_REGISTER.pop("claude-noshape-1", None)
+        for m, v in saved.items():
+            if v is None:
+                sys.modules.pop(m, None)
+            else:
+                sys.modules[m] = v
+        if saved_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = saved_key
+
+
 def followup_real():
     """Contract §8's pass line on the REAL archive, read-only: after the Musk question
     (Q10), the follow-up "what did the government say?" -- searched as `ask()` searches
@@ -975,6 +1037,7 @@ def main():
         ask_mock(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         suggest_mock(tmp)
+    shapes_mock()
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():

@@ -901,11 +901,14 @@ MODEL_REGISTER = {
     # Request shapes PROBED against the real API, 3 Nov (count_tokens, free; script
     # _work/k3_b2_b26_out/sonnet_probe.py): forced tool / auto tool / structured output.
     # Overhead on a one-line prompt: forced 569, auto 445, structured 321 tokens.
-    "claude-haiku-5-5": {"forced_tool": True, "auto_tool": True,
+    # `shape` is the request _live_client SENDS for that model (option C, Kunaal 3 Nov):
+    # chosen here before the call, never by catching a refusal. A model without one
+    # raises before any request.
+    "claude-haiku-5-5": {"shape": "forced_tool", "forced_tool": True, "auto_tool": True,
                          "structured_output": "accepted (probe); not yet used live",
                          "thinking_default": "adaptive, effort medium",
                          "verified": "2026-11-03, live ask (forced tool, $0.000792)"},
-    "claude-sonnet-5-5": {"forced_tool": False, "auto_tool": True, "structured_output": True,
+    "claude-sonnet-5-5": {"shape": "structured_output", "forced_tool": False, "auto_tool": True, "structured_output": True,
                           "thinking_default": "adaptive, effort high (billed as output; "
                           "counts against max_tokens)",
                           "verified": "2026-11-03, live: forced tool -> 400 (refused, $0); "
@@ -1007,42 +1010,24 @@ def _live_client():
     sdk = anthropic.Anthropic(max_retries=KNOBS["live_max_retries"],
                               timeout=KNOBS["live_timeout_s"])
 
-    forced_refused = set()          # models that answered 400 to a forced tool call
-
     def call(prompt, system, purpose, model, schema):
-        args = dict(model=model, max_tokens=KNOBS["max_tokens"][purpose],
-                    messages=[{"role": "user", "content": prompt}],
-                    tools=[{"name": "answer", "description": f"Return the {purpose}.",
-                            "input_schema": SCHEMAS[schema]}])
-        forced = dict(args, system=system, tool_choice={"type": "tool", "name": "answer"})
-        # Sonnet 5.5 refuses a FORCED tool call (400, "tool_choice ... not supported for
-        # this model"; first live Think harder, 3 Nov). A refused request is not
-        # charged, so the fallback is decided by the API's own answer rather than a
-        # model list. The fallback is a STRUCTURED OUTPUT, not tools: the documented
-        # route when a forced call
-        # existed only to get JSON back (output_config.format). The reply is one text
-        # block of JSON matching the schema; every object must close its properties.
-        structured = dict(model=model, max_tokens=KNOBS["max_tokens"][purpose],
-                          system=system, messages=args["messages"],
-                          output_config={"format": {"type": "json_schema",
-                                                    "schema": _closed(SCHEMAS[schema])}})
-        if model in forced_refused:
-            return _from_text(sdk.messages.create(**structured))
-        try:
-            message = sdk.messages.create(**forced)
-        except anthropic.BadRequestError as e:
-            if "tool_choice" not in str(e):
-                raise
-            forced_refused.add(model)
-            try:
-                return _from_text(sdk.messages.create(**structured))
-            except anthropic.BadRequestError as e2:
-                # Name WHICH request failed and what it carried, so a second refusal is
-                # evidence rather than a repeat of the first one's message.
-                # The SDK prints its own message format, so the stage travels as an
-                # attribute that _error_event reads, not inside the message.
-                e2.p3_stage = "structured fallback (forced call was refused first)"
-                raise
+        shape = request_shape(model)              # raises before any request is sent
+        messages = [{"role": "user", "content": prompt}]
+        if shape == "structured_output":
+            # Sonnet 5.5 refuses a FORCED tool call (400, live 3 Nov; probe 3 Nov). A
+            # structured output is the documented route when a forced call existed only
+            # to get JSON back: the reply is one text block of JSON matching the schema,
+            # and every object must close its properties.
+            return _from_text(sdk.messages.create(
+                model=model, max_tokens=KNOBS["max_tokens"][purpose], system=system,
+                messages=messages,
+                output_config={"format": {"type": "json_schema",
+                                          "schema": _closed(SCHEMAS[schema])}}))
+        message = sdk.messages.create(
+            model=model, max_tokens=KNOBS["max_tokens"][purpose], messages=messages,
+            tools=[{"name": "answer", "description": f"Return the {purpose}.",
+                    "input_schema": SCHEMAS[schema]}],
+            system=system, tool_choice={"type": "tool", "name": "answer"})
         usage = message.usage
         block = next((b for b in message.content
                       if getattr(b, "type", "") == "tool_use"), None)
@@ -1050,6 +1035,19 @@ def _live_client():
             raise MalformedReply(usage.input_tokens, usage.output_tokens)
         return block.input, usage.input_tokens, usage.output_tokens
     return call
+
+
+REQUEST_SHAPES = ("forced_tool", "structured_output")
+
+
+def request_shape(model):
+    """The request shape MODEL_REGISTER records for `model`. A model missing from the
+    register, or with no known shape, raises ValueError: its first request would be a
+    guess, and a guess is what option C removed."""
+    shape = MODEL_REGISTER.get(model, {}).get("shape")
+    if shape not in REQUEST_SHAPES:
+        raise ValueError(f"no request shape recorded for model {model!r} in MODEL_REGISTER")
+    return shape
 
 
 def _closed(schema):
