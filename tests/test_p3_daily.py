@@ -329,6 +329,25 @@ def catch_up(tmp):
           (code, "failed on 2026-10-30" in out), (1, True))
 
 
+# ------------------------- 4a2. extract's quality lines are kept, not only printed
+
+def tee_check(tmp):
+    """p2_extract prints each paper's coverage / flags / jumps / ads and stores them
+    nowhere; the wrapper keeps a copy per day. Checked on a tiny real command."""
+    root = Path(tmp) / "tee"
+    root.mkdir()
+    log = P.extract_log("2026-11-05", root)
+    code = P.tee_runner([sys.executable, "-c", "print('X.pdf  92 articles | coverage 100.0%')"],
+                        root, keep=log)
+    kept = log.read_text() if log.exists() else ""
+    check("[tee] the command's exit code comes back", code, 0)
+    check("[tee] its quality line is kept in data/logs/extract_<day>.txt",
+          "coverage 100.0%" in kept, True)
+    check("[tee] with a header naming the command that wrote it", kept.startswith("# "), True)
+    P.tee_runner([sys.executable, "-c", "print('second')"], root, keep=log)
+    check("[tee] a re-run appends, never overwrites", "coverage 100.0%" in log.read_text(), True)
+
+
 # --------------------------------------- 4b. the day the archive step has just filed
 
 class FilingStub(Stub):
@@ -456,6 +475,7 @@ def main():
             dry(root)
             lock(root)
             failure(root)
+            tee_check(tmp)
             catch_up(tmp)
             after_filing(tmp)
             batch(tmp)

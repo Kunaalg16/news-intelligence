@@ -392,6 +392,39 @@ def subprocess_runner(cmd, root=ROOT):
     return subprocess.run(cmd, cwd=str(root)).returncode
 
 
+def tee_runner(cmd, root=ROOT, keep=None):
+    """Like `subprocess_runner`, and every line ALSO appended to `keep`.
+
+    For extract: `p2_extract.py` prints each paper's quality line -- coverage %, flagged
+    pages, jumps joined, ads, pages screened -- and stores it nowhere, and the extractor
+    is frozen (exam-v1). Kept here, per paper-day, those numbers survive the terminal
+    (found 3 Nov: every day before it is lost). The screen still shows each line live.
+    """
+    keep = Path(keep) if keep else None
+    if keep:
+        keep.parent.mkdir(parents=True, exist_ok=True)
+    out = keep.open("a", encoding="utf-8") if keep else None
+    try:
+        if out:
+            out.write(f"# {datetime.now():%Y-%m-%d %H:%M:%S} {' '.join(cmd)}\n")
+        proc = subprocess.Popen(cmd, cwd=str(root), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if out:
+                out.write(line)
+        return proc.wait()
+    finally:
+        if out:
+            out.close()
+
+
+def extract_log(day, root=ROOT):
+    """Where one paper-day's extract output is kept: data/logs/extract_<day>.txt."""
+    return Path(root) / "data" / "logs" / f"extract_{day}.txt"
+
+
 def open_batch(root=ROOT):
     """The id of a tag batch already out, read from news.db read-only; None if none.
 
@@ -552,7 +585,10 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
                 for d in step.get("days") or []:
                     one = dict(step, kind="command", args=_extract_args(d))
                     log(f"  extract {d} · {shown(one, root)}")
-                    if run_command(one, runner, root) != 0:
+                    code = (tee_runner([str(one["python"])] + [str(a) for a in one["args"]],
+                                       root, keep=extract_log(d, root))
+                            if runner is subprocess_runner else run_command(one, runner, root))
+                    if code != 0:
                         return stop(dict(step, what=f"{step['what']} · failed on {d}"),
                                     started, ran, log)
                 ran.append(step["name"])
