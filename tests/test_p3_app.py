@@ -11,6 +11,13 @@ SINCE THE INTEGRATION (brief `_docs/K1_integration_brief.md`, I1-I2)
     cannot run on real data is SKIPPED with its reason and counted, never dropped.
     Parts 1-5 below are build 1's description and are kept for the record; where they
     say "the double", read "the data layer".
+    I2 (3 Nov) changed these pass lines below, to the contract's rule: spend is every
+    paid call of the day from cost_log (not the digest's costs); the invented thread and
+    article are [fixture] SKIPS until K2's typed links; search covers the whole archive,
+    so counts come from K3's `corpus()`, not the 19-story world; a background line comes
+    only from ask_background(); "no padding" is K3's relevance bar. The mock world runs
+    on an EMPTY intel.db cloned from the copy's schema. Every changed check is listed
+    in `_work/k1_integration_handoff.md` (I2).
 
 WHAT IT DOES
     Six parts, none of which touches a database or the reader's real state file.
@@ -147,6 +154,7 @@ REAL_INTEL = ROOT / "data" / "intel.db"
 
 CHECKS = []
 SKIPS = []      # (name, reason): a check that cannot run on real data, said out loud
+SEARCH_MODE = []  # what K3's search ran on: "both", or "fts_only" with meaning search off
 
 
 def skip(name, reason):
@@ -245,6 +253,21 @@ def thread_story_ids(story):
 
 def check(name, got, want):
     CHECKS.append((name, got, want))
+
+
+def todays_cost_log():
+    """The day's spend counted straight off the section's COPY of intel.db, read-only:
+    every cost_log row is a paid call (contract v2 §3), so the oracle is their sum for
+    the reader's local date. Independent of `cost_today()`, which it checks."""
+    import datetime
+    import sqlite3
+    con = sqlite3.connect(f"file:{os.environ['P3_READER_INTEL_DB']}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT COALESCE(SUM(usd), 0) FROM cost_log WHERE date(at) = ?",
+                          (datetime.date.today().isoformat(),)).fetchone()
+    finally:
+        con.close()
+    return round(float(row[0]), 6)
 
 
 # ------------------------------------------------------------------ the mock world
@@ -349,6 +372,27 @@ def build_mock_world(tmp):
     R.ROOT = tmp
     R.WORK = tmp / "_work"
     R.ARCHIVE = tmp / "archive"
+    # An invented archive gets an EMPTY intel.db of its own: the copy run_section made
+    # holds the reader's real visits and today's real spend, which this world never had
+    # (I2: "no visit yet" read a real 3 Nov visit). Its schema is cloned from that copy,
+    # every table and index with no rows -- K2's `links` included, which K3's store
+    # does not create. run_section drops the variable and every connection afterwards.
+    import sqlite3
+    empty = tmp / "intel_mock.db"
+    src = sqlite3.connect(f"file:{os.environ['P3_READER_INTEL_DB']}?mode=ro", uri=True)
+    schema = [sql for (sql,) in src.execute(
+        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' "
+        "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END")]   # tables, then the rest
+    versions = src.execute("SELECT key, value FROM meta").fetchall()  # K2's and K3's
+    src.close()
+    dst = sqlite3.connect(empty)
+    for sql in schema:
+        dst.execute(sql)
+    dst.executemany("INSERT INTO meta VALUES (?, ?)", versions)
+    dst.commit()
+    dst.close()
+    os.environ["P3_READER_INTEL_DB"] = str(empty)
+    R.close_all()
     return digest
 
 
@@ -455,9 +499,12 @@ def mock(tmp):
           bool(R.last_visit(opened_only=True)), True)
 
     # --- cost ---------------------------------------------------------------------
+    # Contract v2 §3: spend is every paid call of the day, from cost_log -- not the
+    # digest's write-up and story-so-far costs (0.0048 here), which the double added up.
+    # This world's intel.db has no paid call in it, so the day's spend is nothing.
     cost = R.cost_today()
-    check("spend is the write-up and story-so-far costs of the latest digest",
-          round(cost["spent_usd"], 6), round(0.001 * 3 + 0.0006 * 3, 6))
+    check("spend is every paid call of the day from cost_log: none here, so 0, not "
+          "the digest's own write-up costs", round(cost["spent_usd"], 6), 0.0)
     check("the cap is the digest's own knob", cost["cap_usd"], 0.5)
     R.FIXTURES["cap_reached"] = True
     check("the cap_reached fixture spends exactly the cap (H5)",
@@ -468,69 +515,47 @@ def mock(tmp):
           all(R.read_state(story_hashes(one_day)).values()), True)
     R.FIXTURES["nothing_new"] = False
 
-    # --- the invented thread ------------------------------------------------------
-    check("a day-1 story has no thread (H3)", R.thread(one_day["story_id"]), None)
-    t3 = R.thread(three_day["story_id"])
-    t5 = R.thread(five_day["story_id"])
-    check("a 3-day thread has 3 entries", t3["days"], 3)
-    check("a 5-day thread gains one run-up day", t5["days"], 6)
-    check("entries are newest first",
-          [e["date"] for e in t5["entries"]] ==
-          sorted([e["date"] for e in t5["entries"]], reverse=True), True)
-    check("the oldest entry of the long thread is the run-up",
-          t5["entries"][-1]["link_type"], "run_up")
-    check("'where it began' sits above the run-up",
-          t5["entries"][-2]["link_type"], "start")
-    check("one day is a follow-up", t5["entries"][-3]["link_type"], "follow_up")
-    check("one day is untyped earlier coverage", t5["entries"][-4]["link_type"], None)
-    check("the newest day is continuing", t5["entries"][0]["link_type"], "continuing")
-    types = {e["link_type"] for t in (t3, t5) for e in t["entries"]}
-    check("every link type the drawing handles appears across the fixture threads",
-          types, {"run_up", "start", "follow_up", None, "continuing"})
-    root_entries = [e for e in t5["entries"] if e["entry_id"] == five_day["story_id"]]
-    check("the entry on the thread's root date carries the thread's own id, so a "
-          "story-so-far chip resolves", len(root_entries), 1)
-    check("that entry is the one 'where it began'",
-          root_entries[0]["link_type"], "start")
-    parents = [(e["entry_id"], e["parent_id"]) for e in t5["entries"]]
-    check("each day's parent is the day before it",
-          all(parents[i][1] == parents[i + 1][0] for i in range(len(parents) - 1)), True)
-    check("thread.articles is the sum of its entries",
-          t5["articles"], sum(e["articles"] for e in t5["entries"]))
-    papers_seen = {p for e in t5["entries"] for p in e["paper_names"]}
-    check("thread.papers counts distinct papers, not the sum",
-          t5["papers"], len(papers_seen))
-    check("the thread is flagged as fixture", t5["fixture"], True)
-    check("one related item, attached to a real entry",
-          [r["attaches_to"] in {e["entry_id"] for e in t5["entries"]} for r in t5["related"]],
-          [True])
-    missing = [pg["pdf"] for t in (t3, t5) for e in t["entries"] for pg in e["pages"]
-               if not (R.ROOT / pg["pdf"]).exists()]
-    check("every page link in every invented entry points at a PDF that exists",
-          missing, [])
-    wrong_date = [pg["pdf"] for t in (t3, t5) for e in t["entries"] for pg in e["pages"]
-                  if e["date"] not in pg["pdf"]]
-    check("and at a PDF of that entry's own date", wrong_date, [])
-    check("every page link names its paper (K1's addition to R2)",
-          all(pg.get("paper") for t in (t3, t5) for e in t["entries"] for pg in e["pages"]),
-          True)
-
-    # --- the invented article -----------------------------------------------------
-    art = R.article("h-five-3")
-    check("the article's headline is the real one from the coverage row",
-          art["headline"], "A printed headline on Business Line p5")
-    check("its paper, date and page are real",
-          [art["paper"], art["date"], art["page_link"]["pdf_page"]],
-          ["Business Line", "2026-10-01", 5])
-    check("it is flagged as fixture", art["fixture"], True)
-    check("the body is long enough to need several paragraphs",
-          len(art["body"].split()) >= KNOBS["body_words_min"], True)
-    check("an unknown text_hash is None", R.article("nope"), None)
+    # --- the invented thread and the invented article (brief I2 item 5) ------------
+    # The double invented both: thread roles (run_up / follow_up / continuing) that
+    # wait on K2's typed links, and an article body for hashes no paper printed. A real
+    # data layer cannot serve either for story ids that exist in no database, so each
+    # check is a [fixture] SKIP, named, until K2's typed links land. The thread rules
+    # that real data CAN answer are checked in real() on the live digest's thread.
+    for name in ("a day-1 story has no thread (H3)",
+                 "a 3-day thread has 3 entries",
+                 "a 5-day thread gains one run-up day",
+                 "entries are newest first",
+                 "the oldest entry of the long thread is the run-up",
+                 "'where it began' sits above the run-up",
+                 "one day is a follow-up",
+                 "one day is untyped earlier coverage",
+                 "the newest day is continuing",
+                 "every link type the drawing handles appears across the fixture threads",
+                 "the entry on the thread's root date carries the thread's own id, so a "
+                 "story-so-far chip resolves",
+                 "that entry is the one 'where it began'",
+                 "each day's parent is the day before it",
+                 "thread.articles is the sum of its entries",
+                 "thread.papers counts distinct papers, not the sum",
+                 "the thread is flagged as fixture",
+                 "one related item, attached to a real entry",
+                 "every page link in every invented entry points at a PDF that exists",
+                 "and at a PDF of that entry's own date",
+                 "every page link names its paper (K1's addition to R2)"):
+        skip("[fixture] " + name, "the invented thread (run_up / follow_up / continuing) "
+             "waits on K2's typed links; no real data layer can serve it")
+    for name in ("the article's headline is the real one from the coverage row",
+                 "its paper, date and page are real",
+                 "it is flagged as fixture",
+                 "the body is long enough to need several paragraphs"):
+        skip("[fixture] " + name, "an invented body for a hash no paper printed; real() "
+             "reads a real article through article()")
 
     # --- what it wrote ------------------------------------------------------------
+    # K3 keeps the reader's state in intel.db, so nothing lands in the work directory.
     written = sorted(p.name for p in (R.ROOT / "_work").iterdir()
                      if not p.name.startswith("digest") and p.name != "not_a_digest.json")
-    check("the double wrote exactly one file", written, ["k1_app_state.json"])
+    check("the data layer wrote no file into the work directory", written, [])
 
 
 # -------------------------------------------------------------------- 2. real data
@@ -550,7 +575,9 @@ def real():
         check("the live digest has ten stories", len(live["stories"]), 10)
 
         cost = R.cost_today()
-        check("today's spend on the live digest", round(cost["spent_usd"], 6), 0.010941)
+        check("today's spend is every paid call of the day in cost_log (contract v2 §3), "
+              "not a number pinned on the day this was written",
+              round(cost["spent_usd"], 6), todays_cost_log())
         check("the cap comes from the live digest's own knob", cost["cap_usd"], 0.5)
 
         day = R.get_digest("k3_b1_3_digest_2026-10-11")
@@ -565,7 +592,10 @@ def real():
         story = shown[0]
         tid = story["story_so_far"]["thread_id"]
         t = R.thread(tid)
-        check("its thread is 5 story-so-far days plus the run-up day", t["days"], 6)
+        # The double added an invented run-up day (6); real threads have none until
+        # K2's typed links, so the thread's days are the story so far's days.
+        check("its thread has the story so far's days (no invented run-up day)",
+              t["days"], story["story_so_far"]["days"])
         cited = {c for s in story["story_so_far"]["sentences"] for c in s["cites"]}
         ids = {e["entry_id"] for e in t["entries"]}
         check("every day a story-so-far sentence cites is an entry in the thread",
@@ -584,6 +614,8 @@ def real():
         art = R.article(first_hash)
         check("a real coverage hash resolves to an article",
               art["headline"], live["stories"][0]["coverage"]["rows"][0]["headline"])
+        # moved from mock() at I2: the mock world has no news.db for article() to ask
+        check("an unknown text_hash is None", R.article("nope"), None)
         check("its page link is the row's own",
               art["page_link"]["pdf"],
               live["stories"][0]["coverage"]["rows"][0]["page_link"]["pdf"])
@@ -683,8 +715,8 @@ def routes():
               status_of(A.digest, ref="nope"), 404)
         check("/api/digests lists both", len(A.digests()["digests"]), 2)
         check("/api/status is ready", A.status()["state"], "ready")
-        check("/api/cost is the live digest's spend",
-              round(A.cost()["spent_usd"], 6), 0.010941)
+        check("/api/cost is every paid call of the day in cost_log",
+              round(A.cost()["spent_usd"], 6), todays_cost_log())
 
         # --- the fixture switches, which are how the states are seen ---------------
         A.set_fixtures(payload={"processing": True})
@@ -806,9 +838,13 @@ def routes():
         check("an unset pref reads as None", A.pref("thread_view")["value"], None)
         check("a pref posts and reads back",
               A.set_pref("thread_view", payload={"value": "graph"})["value"], "graph")
+        # The copy carries the reader's real visits, so "before" is whatever it holds
+        # (None was only true of the double's empty state file). A route that recorded
+        # first and read after would answer with this visit's own time instead.
+        before_visit = R.last_visit()
         check("/api/visit answers with the visit BEFORE this one",
               A.visit(payload={"digest_ref": "digest_live",
-                               "window": live["window"]})["last_visit"], None)
+                               "window": live["window"]})["last_visit"], before_visit)
         A.visit(payload={"digest_ref": "digest_live", "window": live["window"],
                          "opened_story": True})
         check("and then that visit is the last one",
@@ -1273,12 +1309,12 @@ eq("[page] and v0's own money() is untouched, still saying <1¢",
 
 // Acceptance check 4 · a line split across two chunks is still one event
 var first = APP.ndjsonSplit("", '{"type":"results"}\n{"type":"sen');
-eq("[behaviour] the whole line is an event", first.events, [{type: "results"}]);
-eq("[behaviour] and the half line is carried", first.rest, '{"type":"sen');
+eq("[page] the whole line is an event", first.events, [{type: "results"}]);
+eq("[page] and the half line is carried", first.rest, '{"type":"sen');
 var second = APP.ndjsonSplit(first.rest, 'tence","text":"x"}\n');
-eq("[behaviour] which the next chunk completes",
+eq("[page] which the next chunk completes",
    second.events, [{type: "sentence", text: "x"}]);
-eq("[behaviour] leaving nothing behind", second.rest, "");
+eq("[page] leaving nothing behind", second.rest, "");
 eq("[page] a chunk with no newline at all yields nothing yet",
    APP.ndjsonSplit("", '{"a":1}').events, []);
 eq("[page] blank lines are not events",
@@ -2016,15 +2052,15 @@ var dayEntry = {entry_id: "2026-10-11:x", date: "2026-10-11", link_type: null,
 var threadFixture = {thread_id: "open1", days: 1, entries_added_by_you: 1,
   articles: 4, papers: 2, entries: [userEntry, dayEntry], related: [], fixture: true};
 
-eq("[behaviour] check 12 · a user entry is a user node, not 'today', whatever its date",
+eq("[page] check 12 · a user entry is a user node, not 'today', whatever its date",
    APP.nodeKind(userEntry, 0), "user");
-eq("[behaviour] check 12 · and a day entry at the top still is today",
+eq("[page] check 12 · and a day entry at the top still is today",
    APP.nodeKind(dayEntry, 0), "today");
-eq("[behaviour] check 12 · both views draw the same entries, the user one included",
+eq("[page] check 12 · both views draw the same entries, the user one included",
    [APP.viewEntryIds(threadFixture, "timeline").sort(),
     APP.viewEntryIds(threadFixture, "graph").sort()],
    [["2026-10-11:x", "user:ul1"], ["2026-10-11:x", "user:ul1"]]);
-eq("[behaviour] check 12 · the graph gives it its own kind, so its box is ochre",
+eq("[page] check 12 · the graph gives it its own kind, so its box is ochre",
    APP.graphPlan(threadFixture).filter(function (p) {
      return p.entry_id === "user:ul1"; })[0].kind, "user");
 
@@ -2530,6 +2566,14 @@ def v01_search():
       behind it, so no filter can be chosen that returns nothing.
     """
 
+    # I2 (3 Nov): search covers the WHOLE archive (contract §6), not the digests' 19
+    # stories, so the numbers above are the double's. A rule that holds on any archive
+    # now reads its number from the archive; a check of the double's own algorithm
+    # (word-count scores, verdicts by count, headline snippets) is SKIPPED with its
+    # reason. K3's `corpus()` is the oracle for which story an article belongs to: it is
+    # built from p3_digest's own functions, as a digest item is.
+    world = PS.corpus()
+
     # --- browse ----------------------------------------------------------------
     browse = R.search("")
     check("[behaviour] a browse has no verdict to give", browse["verdict"], None)
@@ -2537,47 +2581,55 @@ def v01_search():
     latest = [max(s["dates"]) for s in browse["stories"]]
     check("[behaviour] and really is in newest-first order",
           latest, sorted(latest, reverse=True))
+    police = R.search("police")
+    SEARCH_MODE.append(police.get("mode") or "both")
     check("[behaviour] every article in a story row is one of that story's own rows",
-          sorted({a["text_hash"] for s in browse["stories"] for a in s["articles"]}
-                 - {h for s in digest_stories() for h in story_hashes(s)}), [])
+          sorted(a["text_hash"] for res in (browse, police) for s in res["stories"]
+                 for a in s["articles"]
+                 if world["story_of_hash"].get(a["text_hash"]) != s["story_id"]), [])
 
-    check("[fixture] the corpus is 19 stories, the one in both files counted once",
-          browse["total_stories"], 19)
-    check("[fixture] and 81 distinct coverage rows", browse["total_articles"], 81)
-    check("[fixture] no story_id comes back twice",
-          len({s["story_id"] for s in browse["stories"]}), len(browse["stories"]))
-    check("[fixture] the story that is in both digests is in the corpus once",
-          [s["story_id"] for s in browse["stories"]].count("2026-10-11:56eaf7aa4d5b"), 1)
+    every = R.search("", limit=browse["total_stories"])
+    check("[fixture] a browse counts every story in the archive",
+          browse["total_stories"], len(world["stories"]))
+    check("[fixture] and every distinct article", browse["total_articles"],
+          len(world["story_of_hash"]))
+    check("[fixture] no story_id comes back twice, over the whole archive",
+          len({s["story_id"] for s in every["stories"]}), len(every["stories"]))
+    skip("[fixture] the story that is in both digests is in the corpus once",
+         "that 11 Oct story id is not in today's story set (stories regroup as the "
+         "archive grows); 'no story_id twice' above covers the rule over all of them")
 
-    # --- the three verdicts, from real queries ---------------------------------
-    enough, thin, empty = R.search("police"), R.search("GST"), R.search("Norway")
-    check("[fixture] 'police' is enough", [enough["verdict"], enough["total_stories"]],
-          ["enough", 4])
-    check("[fixture] 'GST' is thin", [thin["verdict"], thin["total_stories"]],
-          ["thin", 1])
-    check("[fixture] 'Norway' is empty", [empty["verdict"], empty["total_stories"]],
-          ["empty", 0])
-    check("[fixture] an empty verdict brings back no stories", empty["stories"], [])
-
-    KNOBS["verdict_enough_min"] = 5
-    check("[fixture] the verdict line is the knob, not a 3 in the code",
-          R.search("police")["verdict"], "thin")
-    KNOBS["verdict_enough_min"] = 3
+    # --- the verdicts ----------------------------------------------------------
+    for name in ("'police' is enough", "'GST' is thin", "'Norway' is empty",
+                 "an empty verdict brings back no stories"):
+        skip("[fixture] " + name,
+             "pinned on the double's 19-story world and its count rule; K3 reads the "
+             "verdict off the best passage's cosine (contract §11 row 2, measured on the "
+             "Q17 set by K3), and an empty verdict still returns the closest stories (§7)")
+    gst = R.search("GST")
+    base = gst["verdict"]
+    lines = ("not_found_similarity", "not_found_bm25")
+    saved = {k: PS.KNOBS[k] for k in lines}
+    PS.KNOBS.update(not_found_similarity=2.0, not_found_bm25=-1e9)   # nothing clears
+    try:
+        check("[fixture] the verdict line is the knob, not a number in the code",
+              R.search("GST")["verdict"], "empty")
+    finally:
+        PS.KNOBS.update(saved)
     check("[fixture] and putting the knob back restores it",
-          R.search("police")["verdict"], "enough")
+          [R.search("GST")["verdict"], base != "empty"], [base, True])
 
     # --- scoring ---------------------------------------------------------------
+    for name in ("a story matching both query words scores 2",
+                 "and every score is a count of words, never above the word count",
+                 "a story that matches nothing is not in the result"):
+        skip("[fixture] " + name, "the double's score was a count of query words; "
+             "K3's is a fused rank (RRF, contract §6)")
     two = R.search("Delhi police")
-    check("[fixture] a story matching both query words scores 2",
-          max(s["score"] for s in two["stories"]), 2.0)
-    check("[fixture] and every score is a count of words, never above the word count",
-          [s for s in two["stories"] if s["score"] > 2.0], [])
-    check("[fixture] a story that matches nothing is not in the result",
-          [s for s in two["stories"] if s["score"] == 0.0], [])
 
     short = R.search("AI")
     check("[fixture] a query of only short words still searches, not browses",
-          [short["verdict"], short["total_stories"]], ["thin", 2])
+          [short["verdict"] is not None, short["sort"]], [True, "relevance"])
     for name in ("[fixture] a short word matches whole words only",
                  "[fixture] a long word matches inside a longer one, so plurals are found"):
         skip(name, "tested the double's own matcher, which is gone; behaviour check 16 "
@@ -2586,21 +2638,21 @@ def v01_search():
           PS.tokens("of the police"), ["the", "police"])
 
     # --- the article rows ------------------------------------------------------
-    gst = thin["stories"][0]
-    check("[fixture] a story shows at most three articles", len(gst["articles"]), 3)
-    check("[fixture] while the total counts every matching row",
-          thin["total_articles"], 5)
-    art = gst["articles"][0]
+    top = gst["stories"][0]
+    check("[fixture] a story shows at most three articles", len(top["articles"]), 3)
+    check("[fixture] while the total counts every matching row, more than are shown",
+          gst["total_articles"] > sum(len(s["articles"]) for s in gst["stories"]), True)
+    art = top["articles"][0]
     check("[fixture] an article carries the contract's keys", sorted(art),
           ["date", "headline", "kind", "page_link", "paper", "snippet", "text_hash"])
     check("[fixture] its page_link carries the paper, which K3's rows do not",
           sorted(art["page_link"]), ["label", "paper", "pdf", "pdf_page"])
     check("[fixture] and the paper in it is the article's own paper",
           art["page_link"]["paper"], art["paper"])
-    check("[fixture] the snippet is the row headline (fixture, recorded as such)",
-          art["snippet"], art["headline"])
+    skip("[fixture] the snippet is the row headline (fixture, recorded as such)",
+         "the double's snippet was the headline; K3's is the best-matching passage")
     check("[fixture] a story row counts its papers, not lists them",
-          isinstance(gst["papers"], int), True)
+          isinstance(top["papers"], int), True)
 
     # --- filters ---------------------------------------------------------------
     one_paper = R.search("", filters={"papers": ["Mint"]})
@@ -2620,28 +2672,33 @@ def v01_search():
           ["2026-10-11"])
     check("[fixture] and searched_days says one day was searched",
           one_day["searched_days"], 1)
-    check("[fixture] where the unfiltered search says seven",
-          browse["searched_days"], 7)
+    check("[fixture] where the unfiltered search counts every day in the archive",
+          browse["searched_days"], world["searched_days"])
 
-    drop = enough["stories"][0]["story_id"]
-    minus = R.search("police", filters={"exclude_story_ids": [drop]})
+    drop = police["stories"][0]["story_id"]
+    minus = R.search("police", filters={"exclude_story_ids": [drop]}, limit=50)
+    minus_ids = {s["story_id"] for s in minus["stories"]}
     check("[fixture] exclude_story_ids removes exactly that story",
-          [minus["total_stories"], drop in [s["story_id"] for s in minus["stories"]]],
-          [enough["total_stories"] - 1, False])
+          [drop in minus_ids,
+           sorted({s["story_id"] for s in police["stories"]} - {drop} - minus_ids)],
+          [False, []])
     check("[fixture] excluding a story does not change the days searched",
-          minus["searched_days"], enough["searched_days"])
+          minus["searched_days"], police["searched_days"])
 
     # --- order and limit -------------------------------------------------------
     scores = [s["score"] for s in two["stories"]]
     check("[fixture] relevance order puts the best score first",
           scores, sorted(scores, reverse=True))
-    newest = R.search("Delhi police", sort="newest")
+    # Both orders over EVERY hit: with a limit, relevance keeps its 20 best and newest
+    # its 20 newest, which are different stories by design.
+    all_two = R.search("Delhi police", limit=two["total_stories"])
+    newest = R.search("Delhi police", sort="newest", limit=two["total_stories"])
     check("[fixture] newest order ignores the score",
           [max(s["dates"]) for s in newest["stories"]],
           sorted([max(s["dates"]) for s in newest["stories"]], reverse=True))
     check("[fixture] and keeps the same stories",
           sorted(s["story_id"] for s in newest["stories"]),
-          sorted(s["story_id"] for s in two["stories"]))
+          sorted(s["story_id"] for s in all_two["stories"]))
     small = R.search("", limit=4)
     check("[fixture] limit caps what comes back", len(small["stories"]), 4)
     check("[fixture] and leaves the totals alone",
@@ -2649,18 +2706,22 @@ def v01_search():
           [browse["total_stories"], browse["total_articles"]])
     check("[fixture] limit 0 brings back nothing but still counts",
           [len(R.search("", limit=0)["stories"]), R.search("", limit=0)["total_stories"]],
-          [0, 19])
+          [0, browse["total_stories"]])
 
     # --- facets ----------------------------------------------------------------
     f = R.facets()
+    stories = world["stories"].values()
     check("[fixture] facets name the five papers in the archive",
           f["papers"], ["Business Line", "Business Standard", "Mint", "The Hindu",
                         "Times of India"])
-    check("[fixture] and the five kinds, 'brief' among them (v0 D3)",
-          f["kinds"], ["analysis", "brief", "data", "news", "opinion"])
-    check("[fixture] and fourteen theme topics", len(f["topics"]), 14)
+    check("[fixture] and the kinds, 'brief' among them (v0 D3)", "brief" in f["kinds"],
+          True)
+    check("[fixture] and one topic per theme the archive's stories carry",
+          sorted(f["topics"]), sorted({s["topic"] for s in stories if s["topic"]}))
     check("[fixture] and the archive's own date range",
-          [f["date_min"], f["date_max"]], ["2026-10-09", "2026-10-15"])
+          [f["date_min"], f["date_max"]],
+          [min(d for s in stories for d in s["dates"]),
+           max(d for s in stories for d in s["dates"])])
     empty_facets = []
     for paper in f["papers"]:
         if not R.search("", filters={"papers": [paper]})["total_stories"]:
@@ -2673,8 +2734,8 @@ def v01_search():
             empty_facets.append(topic)
     check("[fixture] every value a filter offers has stories behind it",
           empty_facets, [])
-    check("[fixture] every search result says it is a fixture",
-          [browse["fixture"], thin["fixture"], empty["fixture"]], [True, True, True])
+    check("[fixture] no search result says it is a fixture: the archive is real",
+          [browse["fixture"], gst["fixture"], police["fixture"]], [False, False, False])
 
 
 def _fresh_double(_state_file=None):
@@ -2782,7 +2843,8 @@ def v01_ask():
               answer["found_count"], result["total_articles"])
         check("[fixture] an enough answer has two or three sentences",
               2 <= len(answer["sentences"]) <= 3, True)
-        check("[fixture] and says it is a fixture", answer["fixture"], True)
+        check("[fixture] and says it is not a fixture: the archive is real",
+              answer["fixture"], False)
 
         # --- rule 11 · the cost moves by exactly the call's own cost -----------
         before = R.cost_today()["spent_usd"]
@@ -2790,8 +2852,9 @@ def v01_ask():
         thin = events2[-1]["answer"]
         check("[behaviour] 11 · spend rises by exactly that answer's cost",
               round(R.cost_today()["spent_usd"] - before, 6), thin["cost_usd"])
-        check("[fixture] a thin answer still gets two sentences",
-              [thin["verdict"], len(thin["sentences"])], ["thin", 2])
+        skip("[fixture] a thin answer still gets two sentences",
+             "the double wrote two for thin by rule; on the real reader the (fake) model "
+             "decides how many sentences come back")
 
         # --- rule 3 · the empty verdict ----------------------------------------
         before = R.cost_today()["spent_usd"]
@@ -2802,9 +2865,11 @@ def v01_ask():
               len(empty["closest"]), 3)
         check("[behaviour] 3 · and the spend did not move",
               R.cost_today()["spent_usd"], before)
-        check("[fixture] the closest stories are newest first",
-              [max(s["dates"]) for s in empty["closest"]],
-              sorted([max(s["dates"]) for s in empty["closest"]], reverse=True))
+        # Contract §7: `closest` is the 3 NEAREST stories (K3 Q12 m), the search's own
+        # first three -- the double ordered them newest first.
+        check("[fixture] the closest stories are the search's three nearest",
+              [s["story_id"] for s in empty["closest"]],
+              [s["story_id"] for s in R.search("Norway")["stories"][:3]])
 
         # --- rule 4 · think harder ---------------------------------------------
         harder_events = list(R.think_harder(answer["answer_id"]))
@@ -2823,9 +2888,12 @@ def v01_ask():
               list(R.ask("police", None))[-1]["answer"]["model"], "haiku")
 
         # --- rules 5 and 6 · background ----------------------------------------
+        before = R.cost_today()["spent_usd"]
         got = R.ask_background(empty["answer_id"])
-        check("[fixture] background on an empty answer is answered",
-              [got["model"], got["cost_usd"]], ["haiku", 0.0003])
+        check("[fixture] background on an empty answer is answered, costing what the "
+              "day's spend rose by",
+              [got["model"], got["cost_usd"]],
+              ["haiku", round(R.cost_today()["spent_usd"] - before, 6)])
         reloaded = R.current_conversation()
         stored = [t["answer"] for t in reloaded["turns"] if t.get("kind") == "answer"
                   and t["answer"]["answer_id"] == empty["answer_id"]][0]
@@ -2860,23 +2928,24 @@ def v01_ask():
         check("[behaviour] 19 · background on an answer that is not there is LookupError",
               unknown, "LookupError")
 
-        # the alternating background line on enough answers
-        marks = [bool(list(R.ask("police", None))[-1]["answer"]["background"])
-                 for _ in range(4)]
-        check("[fixture] an enough answer carries a background line every second time",
-              marks, [marks[0], not marks[0], marks[0], not marks[0]])
-        with_line = list(R.ask("police", None))[-1]["answer"]
-        without = list(R.ask("police", None))[-1]["answer"]
-        if with_line["background"] is None:                  # whichever way it fell
-            with_line, without = without, with_line
-        check("[behaviour] 6 · background works on an enough answer that came without one",
-              isinstance(R.ask_background(without["answer_id"])["text"], str), True)
+        # K-1 (Kunaal, 3 Nov): contract v2.1 -- a background line comes ONLY from
+        # ask_background(); the double attached one to every second answer by itself.
+        # So no written answer arrives with one, and the refusal is checked on a
+        # written answer that was GIVEN one by ask_background().
+        written = [list(R.ask("GST", None))[-1]["answer"] for _ in range(2)]
+        check("[fixture] no answer comes with a background line: it is only ever "
+              "asked for (v2.1)", [a["background"] for a in written], [None, None])
+        without = written[-1]
+        check("[behaviour] 6 · background works on a written answer that came without one",
+              [without["verdict"] in ("thin", "enough"),
+               isinstance(R.ask_background(without["answer_id"])["text"], str)],
+              [True, True])
         try:
-            R.ask_background(with_line["answer_id"])
+            R.ask_background(without["answer_id"])
             already = "no error"
         except ValueError:
             already = "error"
-        check("[behaviour] 6 · and is refused on the one that came with one",
+        check("[behaviour] 6 · and is refused on it once ask_background has given it one",
               already, "error")
 
         # --- rule 12 · the error reasons ---------------------------------------
@@ -2908,8 +2977,8 @@ def v01_ask():
         failed = list(R.ask("police", None))
         check("[fixture] an error answer still sends its results first, so the reader "
               "sees what was found",
-              [failed[0]["type"], failed[0]["search"]["verdict"], len(failed)],
-              ["results", "enough", 2])
+              [failed[0]["type"], failed[0]["search"]["verdict"] is not None,
+               len(failed)], ["results", True, 2])
         R.FIXTURES["assistant_error"] = False
 
         # --- rule 7 and 13 · the cap ------------------------------------------
@@ -3010,25 +3079,42 @@ def v01_ask():
               0 <= len(ids) <= KNOBS["suggest_max"], True)
         check("[fixture] and `suggest_min` is gone rather than left unused",
               "suggest_min" in KNOBS, False)
-        check("[fixture] each says why",
-              [s for s in sugg["suggestions"] if not s["why"].startswith("Sample reason")],
-              [])
+        check("[fixture] each says why, in words",
+              [s["story_id"] for s in sugg["suggestions"]
+               if not (isinstance(s["why"], str) and s["why"].strip())], [])
         # A word the whole archive uses is never NAMED as the reason, however rare it
         # ranks among the rest: "shares the words 'for', 'and'" reads as a reason and is
         # not one. Measured on the GST story: "for" is in 14 of the 19 stories.
         check("[fixture] each carries one to three articles",
               sorted({len(s["articles"]) for s in sugg["suggestions"]} - {1, 2, 3}), [])
-        check("[fixture] and the set costs what the estimate said",
-              [sugg["cost_usd"], round(R.cost_today()["spent_usd"] - before, 6)],
-              [R.estimate_cost("suggest")] * 2)
+        # K3's estimate is the average of logged calls of that kind, so one call's cost
+        # need not equal it (the double's was a fixed price); the spend must, exactly.
+        check("[fixture] and the set costs what the day's spend rose by",
+              sugg["cost_usd"], round(R.cost_today()["spent_usd"] - before, 6))
         for name in ("[fixture] no why names a word wider than that bar",
                      "[fixture] and one shared word reads 'word', not 'words'",
                      "[fixture] the sweep really saw every story's suggestions",
                      "[fixture] and the words named between the two bars are the measured ones"):
             skip(name, "the double's word-share rule; K3 uses a similarity bar and writes "
                        "`why` with Haiku (contract v2.3)")
-        skip("[behaviour] 18 · no suggestion anywhere in the corpus is padding",
-             "PENDING I2: rewritten to K3's relevance bar")
+        # K-1: rule 18 on K3's relevance bar (contract v2.3), not the double's word share.
+        # Suggestions carry no similarity, so the rule is observed through the knob: with
+        # the bar above any cosine, nothing qualifies, and the answer must be NO
+        # suggestion and no call -- never the nearest stories padded in. An extra hash
+        # makes the cache key one no earlier call can have stored (`suggest_cache` is
+        # keyed by the hashes), so the bar is really applied.
+        bar = PS.KNOBS["suggest_min_similarity"]
+        before = R.cost_today()["spent_usd"]
+        PS.KNOBS["suggest_min_similarity"] = 2.0
+        try:
+            barred = R.suggest_connections(story_id,
+                                           story_hashes(story) + ["k1-i2-no-cache"])
+        finally:
+            PS.KNOBS["suggest_min_similarity"] = bar
+        check("[behaviour] 18 · no suggestion anywhere in the corpus is padding: with "
+              "nothing over the relevance bar there are none, and nothing is paid",
+              [barred["suggestions"], barred["cost_usd"],
+               round(R.cost_today()["spent_usd"] - before, 6)], [[], 0.0, 0.0])
         try:
             R.suggest_connections("no_such_story")
             missing = "no error"
@@ -3104,10 +3190,12 @@ def v01_ask():
         R.remove_user_link(link2)
 
         # --- estimates ----------------------------------------------------------
-        check("[fixture] every kind has an estimate",
-              [R.estimate_cost(k) for k in ("ask", "think_harder", "background",
-                                            "suggest")],
-              [0.0005, 0.011, 0.0003, 0.0005])
+        # K3 estimates from the logged calls of each kind, so the numbers move with the
+        # archive's own history; the rule is that every kind has a price above zero.
+        check("[fixture] every kind has an estimate, a price above zero",
+              [k for k in ("ask", "think_harder", "background", "suggest")
+               if not (isinstance(R.estimate_cost(k), float) and R.estimate_cost(k) > 0)],
+              [])
         try:
             R.estimate_cost("nonsense")
             bad_kind = "no error"
@@ -3194,9 +3282,38 @@ def v01b_contract():
               "a browse", ai["verdict"] in ("enough", "thin", "empty"), True)
         check("[behaviour] 16 · and the sort is the one a search uses",
               ai["sort"], "relevance")
-        for name in ("[behaviour] 16 · D6 · a short word matches only as a whole word",
-                     "[behaviour] 16 · while a long one matches inside a longer word"):
-            skip(name, "PENDING I2: rewritten to observe K3's search results")
+        # D6 is a rule about WORD matching, so it is observed with meaning search off:
+        # with the embedding service answering, a story can come back for meaning alone
+        # and say nothing about how words match. A dead port is how "not running" looks
+        # to search; it then answers `mode: fts_only` (contract v2.4).
+        def texts_of(result):
+            return [[(R.article(a["text_hash"]) or {}).get("headline", "") + " "
+                     + (R.article(a["text_hash"]) or {}).get("body", "")
+                     for a in s["articles"]] for s in result["stories"]]
+        url = PS.KNOBS["embed_url"]
+        PS.KNOBS["embed_url"] = "http://127.0.0.1:9"
+        try:
+            ai_words = R.search("AI", limit=20)
+            protest = R.search("protest", limit=20)
+        finally:
+            PS.KNOBS["embed_url"] = url
+        whole = re.compile(r"\bai\b", re.I)
+        check("[behaviour] 16 · D6 · a short word matches only as a whole word: with "
+              "word search alone, every 'AI' story has the whole word in an article "
+              "shown (none is there for 'said' or 'aid')",
+              [ai_words.get("mode"), len(ai_words["stories"]) > 0,
+               [i for i, arts in enumerate(texts_of(ai_words))
+                if not any(whole.search(t) for t in arts)]],
+              ["fts_only", True, []])
+        bare = re.compile(r"\bprotest\b", re.I)
+        longer = re.compile(r"\bprotest\w+", re.I)
+        check("[behaviour] 16 · while a long one matches inside a longer word: 'protest' "
+              "finds a story whose articles say only 'protests' / 'protesters'",
+              [protest.get("mode"),
+               any(not any(bare.search(t) for t in arts)
+                   and any(longer.search(t) for t in arts)
+                   for arts in texts_of(protest))],
+              ["fts_only", True])
         check("[behaviour] 16 · D5 · a short word is dropped only when a long one "
               "remains", [PS.tokens("AI"), PS.tokens("AI policy")],
               [["ai"], ["policy"]])
@@ -3412,19 +3529,24 @@ def v01_routes():
               sorted(wanted - paths), [])
 
         # --- search and facets --------------------------------------------------
+        # I2: the numbers are the reader's own for the same call (the double's world
+        # said enough/4 and 19); the route must hand them through unchanged.
         found = A.search(q="police")
+        own = R.search("police")
         check("[fixture] /api/search searches",
-              [found["verdict"], found["total_stories"]], ["enough", 4])
+              [found["verdict"], found["total_stories"]],
+              [own["verdict"], own["total_stories"]])
         browse = A.search(q="")
+        everything = R.search("")["total_stories"]
         check("[fixture] and browses when the query is empty",
-              [browse["verdict"], browse["total_stories"]], [None, 19])
+              [browse["verdict"], browse["total_stories"]], [None, everything])
         check("[fixture] a filter arrives through the query string",
               sorted({a["paper"] for s in A.search(q="", papers=["Mint"])["stories"]
                       for a in s["articles"]}), ["Mint"])
         check("[fixture] the Query placeholder is read as 'no filter', not a crash",
-              A.search(q="")["total_stories"], 19)
+              A.search(q="")["total_stories"], everything)
         check("[fixture] the limit is capped so one request cannot ask for everything",
-              len(A.search(q="", limit=10_000)["stories"]), 19)
+              len(A.search(q="", limit=10_000)["stories"]) < everything, True)
         check("[fixture] /api/facets answers its five keys", sorted(A.facets()),
               ["date_max", "date_min", "kinds", "papers", "topics"])
 
@@ -3451,9 +3573,11 @@ def v01_routes():
 
         # --- background and estimates -------------------------------------------
         empty = drain(A.ask(payload={"question": "Norway"}))[-1]["answer"]
+        spent = R.cost_today()["spent_usd"]
         got = A.background(payload={"answer_id": empty["answer_id"]})
         check("[fixture] /api/background answers with the paragraph and its cost",
-              [bool(got["text"]), got["cost_usd"]], [True, 0.0003])
+              [bool(got["text"]), got["cost_usd"]],
+              [True, round(R.cost_today()["spent_usd"] - spent, 6)])
         check("[fixture] and 400s when the answer already has one",
               status_of(A.background, payload={"answer_id": empty["answer_id"]}), 400)
         # Contract v2.2: by class, not by message. v0.1 answered 400 here, which said
@@ -3463,7 +3587,8 @@ def v01_routes():
         check("[fixture] /api/estimate answers the four kinds",
               [A.estimate(kind=k)["cost_usd"]
                for k in ("ask", "think_harder", "background", "suggest")],
-              [0.0005, 0.011, 0.0003, 0.0005])
+              [R.estimate_cost(k) for k in ("ask", "think_harder", "background",
+                                            "suggest")])
         check("[fixture] and 400s on a kind it does not know",
               status_of(A.estimate, kind="nonsense"), 400)
 
@@ -3558,8 +3683,8 @@ def v01_states():
         events = list(R.ask("police", None))
         answer = events[-1]["answer"]
         check("[fixture] state 1 · 'police' gives a results event before any sentence",
-              [events[0]["type"], events[0]["search"]["verdict"]],
-              ["results", "enough"])
+              [events[0]["type"], events[0]["search"]["verdict"] in ("thin", "enough")],
+              ["results", True])
         check("[fixture] state 2 · and an answer with sentences and cites",
               [len(answer["sentences"]) >= 2, len(answer["cited"]) >= 1], [True, True])
 
@@ -3625,8 +3750,12 @@ def v01_states():
               [v for key in ("papers", "topics", "kinds")
                for v in R.facets()[key]
                if not R.search("", filters={key: [v]})["total_stories"]], [])
+        # H6 is "nothing matches these filters". K3 still returns the closest stories
+        # for a weak query, so the pair that empties the list is a real date filter
+        # with nothing in it: Explore's date fields allow any range.
         check("[fixture] state 11 · and H6 is reachable with a real filter pair",
-              R.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
+              R.search("Norway", filters={"papers": ["Mint"], "date_from": "2026-01-01",
+                                          "date_to": "2026-01-02"})["total_stories"], 0)
 
 
 def script_guard():
@@ -3783,10 +3912,11 @@ def asgi():
         body = json.loads(b"".join(chunks))
         check("[fixture] and q, sort and limit all arrive as themselves",
               [body["verdict"], body["sort"], len(body["stories"])],
-              ["enough", "newest", 3])
+              [R.search("police", sort="newest", limit=3)["verdict"], "newest", 3])
         status, _h, chunks = asyncio.run(request("GET", "/api/search", b"q="))
         check("[fixture] while no filter at all is no filter, not a crash",
-              [status, json.loads(b"".join(chunks))["total_stories"]], [200, 19])
+              [status, json.loads(b"".join(chunks))["total_stories"]],
+              [200, R.search("")["total_stories"]])
 
         # The streamed route, over the real send channel.
         status, headers, chunks = asyncio.run(
@@ -3950,6 +4080,10 @@ def run_section(fn, *args):
         os.environ["P3_READER_INTEL_DB"] = str(copy)
         R.close_all()
         PS._CLIENT = fake_model
+        # A fresh conversation per section (brief I2 item 2): the copy's current one is
+        # the reader's live talk, and a short question asked into it is searched WITH
+        # its last question (`_search_query`), so "police" came back empty on 3 Nov.
+        PS.new_conversation()
         root, archive, work = R.ROOT, R.ARCHIVE, R.WORK
         try:
             fn(*args)
@@ -3985,6 +4119,8 @@ def main():
     untagged = len(CHECKS) - sum(len(v) for v in tags.values())
     print("  ".join(f"[{t}] {len(v) - sum(g != w for _, g, w in v)}/{len(v)}"
                     for t, v in tags.items()) + f"  untagged {untagged}")
+    print(f"search ran with {'/'.join(SEARCH_MODE) or 'unknown'}: results that depend on "
+          f"meaning search (verdicts, suggestions) were seen in this mode")
     print(f"{len(SKIPS)} checks skipped on real data, each with its reason "
           f"(`--skips` lists them)")
     if "--skips" in sys.argv:
