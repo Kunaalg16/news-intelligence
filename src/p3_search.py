@@ -888,6 +888,23 @@ MODEL_IDS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5"}
 # record a twentieth of what it spent, in the very table the cap is enforced from.
 PRICES_PER_MTOK = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.00, 10.00)}
 
+# WHAT EACH MODEL ACCEPTS, AS VERIFIED -- not assumed from a sibling model. Request
+# shapes differ between models and between versions of one model (Sonnet 5.5 refuses
+# the forced tool call Haiku 5.5 accepts: a 400 on the first live Think harder, 3 Nov,
+# because the code assumed Sonnet behaved like Haiku). RULE (Kunaal, 3 Nov): a new or
+# changed model id is not used until its row here is checked against the API docs AND
+# one live call, and the date is written in. The client below decides per call from the
+# API's own refusal where it can, but this table is what a reader checks first.
+MODEL_REGISTER = {
+    "claude-haiku-5-5": {"forced_tool": True, "structured_output": "not yet used live",
+                         "thinking_default": "adaptive, effort medium",
+                         "verified": "2026-11-03, live ask (forced tool, $0.000792)"},
+    "claude-sonnet-5-5": {"forced_tool": False, "structured_output": "documented; first "
+                          "live call pending", "thinking_default": "adaptive, effort high "
+                          "(counts against max_tokens)",
+                          "verified": "2026-11-03: forced tool -> 400 (live); docs read"},
+}
+
 ASK_PROMPT_VERSION = "a1.0"
 
 ERROR_RETRYABLE = {"model_busy": True, "no_network": True, "timeout": True,
