@@ -388,8 +388,10 @@ def new_board(payload: dict = Body(...)):
 @app.post("/api/pin")
 def pin(payload: dict = Body(...)):
     board_id, item_type, pin_payload = _need(payload, "board_id", "item_type", "payload")
-    pin_id = data.pin(board_id, item_type, pin_payload, payload.get("source") or {},
-                      payload.get("created_by", "app"))
+    # (I6) A board deleted since the menu was drawn is a 404 the page can name, not a 500.
+    with _mapped():
+        pin_id = data.pin(board_id, item_type, pin_payload, payload.get("source") or {},
+                          payload.get("created_by", "app"))
     return {"pin_id": pin_id}
 
 
@@ -398,6 +400,15 @@ def remove_pin(pin_id: str):
     with _mapped():
         data.unpin(pin_id)
     return {"pin_id": pin_id, "unpinned": True}
+
+
+@app.post("/api/boards/{board_id}/touch")
+def touch_board(board_id: str):
+    """(I6) The reader opened this board: bump its `last_used_at`. A board that is gone
+    is a 404, so the page can say so."""
+    with _mapped():
+        data.touch_board(board_id)
+    return {"board_id": board_id}
 
 
 @app.get("/api/boards/{board_id}/pins")

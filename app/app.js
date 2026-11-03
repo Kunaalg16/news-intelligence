@@ -32,6 +32,9 @@ const S = {
   estimates: {},                 /* kind -> cost_usd, read once at boot */
   reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
   suggestions: {},               /* story_id -> its suggestion set, once asked for */
+  suggesting: {},                /* story_id -> true while its suggest call runs (K-3) */
+  backgroundBusy: {},            /* answer_id -> true while its background call runs */
+  backgroundError: {},           /* answer_id -> {message} from a refused background */
   seeAlsoOpen: {},               /* story_id -> true while D1's fold is open; not a pref */
   userLinks: {},                 /* story_id -> the links the reader made out of it */
   pinnedStories: new Set(),      /* so a dark pin is dark again after a reload */
@@ -83,6 +86,33 @@ async function getJSON(url) {
   }
 }
 
+/* K-4 · what the page says when nothing answers at all. A missing article and a server
+   that is not running are different failures, and the reader can fix only the second. */
+const NOT_RUNNING = "The app isn't running. Click the News Intelligence icon.";
+
+/* I6 · for the posts whose refusal the reader must SEE (suggest, background, pin):
+   success is the body as usual; a refusal is {error: {status, message}} with the
+   server's own reason (FastAPI's `detail`); nothing answering is status 0. */
+async function postOrError(url, body) {
+  let r;
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    S.reachable = false;
+    return { error: { status: 0, message: NOT_RUNNING } };
+  }
+  S.reachable = true;
+  let got = null;
+  try { got = await r.json(); } catch (e) { got = null; }
+  if (r.ok) return got;
+  const detail = got && typeof got.detail === 'string' ? got.detail : null;
+  return { error: { status: r.status, message: detail || 'The server refused it.' } };
+}
+
 async function postJSON(url, body, method) {
   try {
     const r = await fetch(url, {
@@ -120,9 +150,11 @@ const api = {
   boards: () => getJSON('/api/boards'),
   newBoard: (name) => postJSON('/api/boards', { name: name }),
   pin: (boardId, itemType, payload, source) =>
-    postJSON('/api/pin', { board_id: boardId, item_type: itemType, payload: payload,
+    postOrError('/api/pin', { board_id: boardId, item_type: itemType, payload: payload,
                            source: source }),
   unpin: (pinId) => postJSON('/api/pin/' + encodeURIComponent(pinId), undefined, 'DELETE'),
+  touchBoard: (boardId) =>
+    postJSON('/api/boards/' + encodeURIComponent(boardId) + '/touch', {}),
   boardPins: (boardId) => getJSON('/api/boards/' + encodeURIComponent(boardId) + '/pins'),
   votes: () => getJSON('/api/feedback'),
   feedback: (kind, id, hashes, vote, note) =>
@@ -146,9 +178,9 @@ const api = {
   divider: (conversationId, storyId, headline) =>
     postJSON('/api/conversation/divider', { conversation_id: conversationId,
                                             story_id: storyId, headline: headline }),
-  background: (answerId) => postJSON('/api/background', { answer_id: answerId }),
+  background: (answerId) => postOrError('/api/background', { answer_id: answerId }),
   suggest: (storyId, hashes) =>
-    postJSON('/api/suggest', { story_id: storyId, text_hashes: hashes }),
+    postOrError('/api/suggest', { story_id: storyId, text_hashes: hashes }),
   raiseCap: () => postJSON('/api/cap/raise', {}),
   addUserLink: (storyId, hashes, targetId, targetHashes) =>
     postJSON('/api/user_link', { story_id: storyId, text_hashes: hashes,
@@ -724,6 +756,24 @@ function pinMenuKeys(menu, close, button) {
   });
 }
 
+/* I6 · a pin the server refused. A board deleted since the menu was drawn is a 404
+   (`pin()` raises LookupError); the boards are read again so the menu stops offering
+   it. Returns true when there was nothing pinned. */
+const BOARD_GONE = 'That board no longer exists';
+
+async function pinRefused(res) {
+  if (res && !res.error) return false;
+  const error = (res && res.error) || { status: 0, message: NOT_RUNNING };
+  if (error.status === 404) {
+    toast(BOARD_GONE);
+    const boards = await api.boards();
+    if (boards) S.boards = boards.boards || [];
+  } else {
+    toast(error.status === 0 ? NOT_RUNNING : 'Not pinned · ' + error.message);
+  }
+  return true;
+}
+
 function fillPinMenu(menu, itemType, what, close, after) {
   clear(menu);
   const { payload, source } = what();
@@ -735,6 +785,7 @@ function fillPinMenu(menu, itemType, what, close, after) {
     el('button', { class: 'reset', type: 'button', onclick: async () => {
       close();
       const res = await api.pin(b.board_id, itemType, payload, source);
+      if (await pinRefused(res)) return;
       pinnedToast(b.name, res && res.pin_id);
       await done(b, res && res.pin_id, payload, source);
     } },
@@ -753,6 +804,7 @@ function fillPinMenu(menu, itemType, what, close, after) {
       if (!made) return;
       S.boards = made.boards || S.boards;
       const res = await api.pin(made.board_id, itemType, payload, source);
+      if (await pinRefused(res)) return;
       pinnedToast(name, res && res.pin_id);
       await done({ board_id: made.board_id, name: name }, res && res.pin_id,
                  payload, source);
@@ -1386,7 +1438,9 @@ async function openArticle(textHash) {
   const pane = document.getElementById('reading');
   clear(pane);
   if (!article) {
-    pane.append(el('p', { class: 'drawer-note', text: 'That article could not be found.' }));
+    pane.append(el('p', { class: 'drawer-note',
+                          text: S.reachable ? 'That article could not be found.'
+                                            : NOT_RUNNING }));
     return;
   }
   pane.append(el('button', {
@@ -1472,17 +1526,32 @@ function boardsScreen(pane) {
   }
   pane.append(el('ul', { class: 'plain-list' }, S.boards.map((b) => el('li', {},
     el('button', { class: 'reset plain-row', type: 'button',
-      onclick: async () => {
-        const pins = await api.boardPins(b.board_id);
-        S.pins = (pins && pins.pins) || [];
-        S.openBoardId = b.board_id;
-        render();
-      } },
+      onclick: () => openBoard(b) },
       el('span', { class: 'plain-name', text: b.name }),
       el('span', { class: 'plain-sub',
         text: count(b.pin_count, 'pin')
               + (b.last_used_at ? ' · last used ' + dateWithDay(b.last_used_at)
                                 : '') }))))));
+}
+
+/* I6 · opening a board bumps its `last_used_at` (touch_board), so the pin menu's
+   most-recent-first order follows what the reader actually uses. A board that is gone
+   says so; a server that is not running says that. */
+async function openBoard(b) {
+  const touched = await api.touchBoard(b.board_id);
+  if (!touched) {
+    toast(S.reachable ? BOARD_GONE : NOT_RUNNING);
+    if (S.reachable) {
+      const boards = await api.boards();
+      if (boards) S.boards = boards.boards || [];
+      render();
+    }
+    return;
+  }
+  const pins = await api.boardPins(b.board_id);
+  S.pins = (pins && pins.pins) || [];
+  S.openBoardId = b.board_id;
+  render();
 }
 
 /* A pin goes back to what it came from: a story in its own digest, or an article. */
@@ -1561,8 +1630,7 @@ function renderReading() {
       text: S.reachable ? 'No digest to show' : 'The server is not answering' }));
     pane.append(el('p', { class: 'empty-note', text: S.reachable
       ? 'The server is running, but it has no digest to show yet.'
-      : 'Nothing is answering at 127.0.0.1:8765. Start it with'
-        + '  .venv/bin/python src/p3_app.py  in ~/news-intel, then reload this page.' }));
+      : NOT_RUNNING + ' Then reload this page.' }));
     return;
   }
 
@@ -1733,6 +1801,8 @@ const ERROR_WORDS = {
             'Retry usually works.'],
   checks_failed: ["The answer didn't pass the source checks twice",
                   'See what was found below, or try Think harder.'],
+  not_running: ["Couldn't get an answer · " + NOT_RUNNING,
+                'Nothing was asked and nothing was charged.'],
   other: ["Couldn't get an answer · unexpected error",
           'Retry; if it repeats, tell Claude Code.'],
 };
@@ -2054,11 +2124,25 @@ function backgroundBlock(answer) {
     el('p', { text: answer.background }));
 }
 
+/* I6 · the background call returns an object, not a stream, so its refusal (a cap, a
+   failed call, an answer that already has one: all `ValueError` -> 400) arrives as the
+   server's message; it is shown under the answer with a Retry. While the call runs the
+   button is disabled, so a second press cannot pay twice (as K-3 for suggestions). */
 async function askBackground(answerId) {
+  if (S.backgroundBusy[answerId]) return;
+  S.backgroundBusy[answerId] = true;
+  delete S.backgroundError[answerId];
+  renderAssistant();
   const got = await api.background(answerId);
-  const answer = answerById(answerId);
-  if (answer) answer.background = got.text;
-  S.cost = await api.cost();
+  delete S.backgroundBusy[answerId];
+  if (got && got.error) {
+    S.backgroundError[answerId] = got.error;
+  } else {
+    const answer = answerById(answerId);
+    if (answer && got) answer.background = got.text;
+  }
+  const cost = await api.cost();
+  if (cost) S.cost = cost;
   renderAssistant();
 }
 
@@ -2114,11 +2198,14 @@ function actionsRow(answer) {
   }
 
   if (S.flags.background_on_request && !answer.background) {
+    const busy = Boolean(S.backgroundBusy[answer.answer_id]);
     row.append(el('button', {
       class: 'reset action background-button', type: 'button',
+      disabled: busy ? true : null, 'aria-busy': busy ? 'true' : null,
       onclick: () => askBackground(answer.answer_id),
-    }, none ? 'Answer from background knowledge'
-            : 'Background · ≈ ' + moneyFine(S.estimates.background)));
+    }, busy ? 'Writing background…'
+            : none ? 'Answer from background knowledge'
+                   : 'Background · ≈ ' + moneyFine(S.estimates.background)));
   }
 
   row.append(answerPinButton(answer));
@@ -2127,6 +2214,24 @@ function actionsRow(answer) {
 
 /* States 2, 4, 5 and 6 are all this function: what differs is the note above the
    sentences and whether there are any. */
+/* I6 · a refused call, in the place its button was: the server's own message and a
+   Retry. Used by Background and Suggest connections. */
+function refusedBox(error, retry, what) {
+  return el('div', { class: 'pane-error' },
+    el('p', { class: 'error-first',
+              text: error.status === 0 ? NOT_RUNNING : what + ' · ' + error.message }),
+    el('button', { class: 'reset action', type: 'button', onclick: retry }, 'Retry'));
+}
+
+/* I6 · meaning search is off: K3's search() then says `mode: "fts_only"` (absent in
+   normal operation, F-3), and the results are word matches only. */
+const WORDS_ONLY = "Word search only: meaning search isn't running";
+
+function searchModeNote(result) {
+  if (!result || result.mode !== 'fts_only') return null;
+  return el('p', { class: 'mode-note', text: WORDS_ONLY });
+}
+
 function answerTurn(answer, opts) {
   const o = opts || {};
   const byHash = paneHashes();
@@ -2181,11 +2286,17 @@ function answerTurn(answer, opts) {
   const back = backgroundBlock(answer);
   if (back) block.append(back);
   block.append(actionsRow(answer));
+  const refused = S.backgroundError[answer.answer_id];
+  if (refused) {
+    block.append(refusedBox(refused, () => askBackground(answer.answer_id),
+                            'No background line'));
+  }
 
   if (!o.noResults) {
-    const list = resultsList(answer.answer_id,
-                             S.results[answer.answer_id] || storedResults(answer),
-                             answer);
+    const result = S.results[answer.answer_id] || storedResults(answer);
+    const note = searchModeNote(result);
+    if (note) block.append(note);
+    const list = resultsList(answer.answer_id, result, answer);
     if (list) block.append(list);
   }
   return block;
@@ -2229,11 +2340,20 @@ function sonnetLabel(answer) {
 /* ------------------------------------------------------------------ the streaming */
 
 async function streamAnswer(url, body, onEvent) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    /* K-4 · nothing answered, so nothing was asked or charged: say so, offer Retry. */
+    S.reachable = false;
+    onEvent({ type: 'error', code: 'unreachable', reason: 'not_running', retryable: true });
+    return;
+  }
+  S.reachable = true;
   if (!response.ok || !response.body) {
     onEvent({ type: 'error', code: 'model_error', reason: 'other', retryable: true });
     return;
@@ -2283,6 +2403,8 @@ function liveTurn() {
   }
 
   if (live.results) {
+    const note = searchModeNote(live.results);
+    if (note) block.append(note);
     const list = resultsList('live', live.results, null);
     if (list) block.append(list);
   }
@@ -2294,6 +2416,12 @@ async function askNow(question, options) {
   if (!question || !question.trim()) return;
   const scope = { story_id: S.scope.story_id, text_hashes: S.scope.text_hashes || [],
                   filters: S.scope.filters || {} };
+  const divider = o.body ? null
+    : dividerFor(S.conversation, Object.assign({ label: S.scopeLabel }, S.scope));
+  if (divider) {
+    await api.divider(conversationId(), divider.story_id, divider.headline);
+    await refreshConversation();
+  }
   S.live = { question: question, sentences: [], results: null, error: null };
   renderAssistant();
 
@@ -2455,8 +2583,8 @@ function renderAssistant() {
   }
   for (const turn of ((S.conversation && S.conversation.turns) || [])) {
     if (turn.kind === 'divider') {
-      body.append(el('p', { class: 'pane-divider',
-                            text: 'Now reading · ' + turn.headline }));
+      body.append(el('p', { class: 'pane-divider ask-divider',
+                            text: 'Now asking about · ' + turn.headline }));
     } else if (turn.kind === 'answer') {
       const answer = turn.answer;
       if (answer.parent_answer_id) {
@@ -2518,16 +2646,38 @@ async function startNewConversation() {
 
 /* State 7 — opening a different story while the conversation has something in it puts
    a divider in, so an answer is never read against the wrong story. */
+/* I6 · call 8: browsing moves the pane's scope and adds nothing to the conversation.
+   The divider is the question's business (askNow). */
 async function paneStoryOpened(story) {
-  const had = ((S.conversation && S.conversation.turns) || []).length;
-  const changing = S.scope.story_id && S.scope.story_id !== story.story_id;
   S.scope.story_id = story.story_id;
   S.scope.headline = story.headline.text;
   S.scope.text_hashes = storyHashes(story);
-  if (had && changing) {
-    await api.divider(conversationId(), story.story_id, story.headline.text);
-    await refreshConversation();
+}
+
+/* What the conversation was last asked about: the story of its last answer or divider,
+   null for all papers. `undefined` when it has neither -- a first question needs no
+   divider, the pane's scope chip already says what it is about. */
+function lastAskedStory(conversation) {
+  const turns = (conversation && conversation.turns) || [];
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const t = turns[i];
+    if (t.kind === 'divider') return t.story_id || null;
+    if (t.kind === 'answer') return ((t.answer && t.answer.scope) || {}).story_id || null;
   }
+  return undefined;
+}
+
+const ALL_PAPERS = 'All papers';
+
+/* The divider a question needs before it is sent, or null. Scope = the story (or no
+   story); filters alone do not change it (brief: "another story, or no story"). */
+function dividerFor(conversation, scope) {
+  const last = lastAskedStory(conversation);
+  if (last === undefined) return null;
+  const now = (scope && scope.story_id) || null;
+  if (now === last) return null;
+  /* No story but Explore's picked stories: name them ("3 stories"), not "All papers". */
+  return { story_id: now, headline: now ? (scope.headline || '') : (scope.label || ALL_PAPERS) };
 }
 
 /* §8.5 — "Show all N in Explore" hands the question's own query and scope straight to
@@ -2618,12 +2768,30 @@ async function loadUserLinks(story) {
   S.userLinks[story.story_id] = (got && got.user_links) || [];
 }
 
+/* K-3 (Kunaal, 3 Nov) · the call takes seconds, and the page used to show nothing
+   while it ran -- and nothing at all if it was refused, because a null answer redrew
+   the button. Now: from the press until the answer or the refusal, the button is
+   disabled and says it is working, and a second press does nothing, so it cannot pay
+   twice. A refusal is shown in the same place with Retry (brief §4.4). */
 async function askForSuggestions(story) {
-  const got = await api.suggest(story.story_id, storyHashes(story));
-  S.suggestions[story.story_id] = got;
-  await loadPinnedStories();
-  await loadUserLinks(story);
-  S.cost = await api.cost();
+  const id = story.story_id;
+  if (S.suggesting[id]) return;
+  S.suggesting[id] = true;
+  delete S.suggestions[id];
+  render();
+  let got;
+  try {
+    got = await api.suggest(id, storyHashes(story));
+  } finally {
+    delete S.suggesting[id];
+  }
+  S.suggestions[id] = got || { error: { status: 0, message: NOT_RUNNING } };
+  if (!S.suggestions[id].error) {
+    await loadPinnedStories();
+    await loadUserLinks(story);
+  }
+  const cost = await api.cost();
+  if (cost) S.cost = cost;
   render();
 }
 
@@ -2657,6 +2825,7 @@ async function unpinStory(storyId) {
   S.pinnedStories.delete(storyId);
   remember('unpin from ' + was.name, async () => {
     const again = await api.pin(was.board_id, 'story', was.payload, was.source);
+    if (await pinRefused(again)) { render(); return; }
     S.pinnedStories.add(storyId);
     S.pinIds[storyId] = { pin_id: again ? again.pin_id : null,
                           board_id: was.board_id, name: was.name,
@@ -2728,6 +2897,9 @@ function shortfallWords(n) {
   return 'Only ' + n + (n === 1 ? ' looks' : ' look') + ' related.';
 }
 
+const SUGGEST_NO_MEANING = "Can't look for related stories right now: meaning search "
+  + "isn't running. Click the News Intelligence icon to start it.";
+
 function suggestionsBox(story, got) {
   const box = el('section', { class: 'suggest-box' });
   const rows = got.suggestions || [];
@@ -2735,7 +2907,11 @@ function suggestionsBox(story, got) {
      warning about suggestions, and there are none -- so the box says what happened and
      prints what the press cost, which the reader paid either way. */
   if (!rows.length) {
-    box.append(el('p', { class: 'suggest-none', text: 'Nothing related found.' }));
+    /* I6 · with meaning search off nothing can clear the similarity bar, so "nothing
+       related" would be a claim about the archive that was never checked. */
+    box.append(el('p', { class: 'suggest-none',
+                         text: got.mode === 'fts_only' ? SUGGEST_NO_MEANING
+                                                       : 'Nothing related found.' }));
   } else {
     box.append(el('div', { class: 'suggest-head' },
       el('p', { class: 'block-label', text: 'Suggested by assistant' }),
@@ -2754,11 +2930,18 @@ function suggestionsBox(story, got) {
 function suggestSection(story) {
   if (!S.flags.suggest_connections) return null;
   const got = S.suggestions[story.story_id];
+  if (got && got.error) {
+    return el('div', { class: 'suggest-offer' },
+      refusedBox(got.error, () => askForSuggestions(story), 'No suggestions'));
+  }
   if (got) return suggestionsBox(story, got);
+  const busy = Boolean(S.suggesting[story.story_id]);
   return el('div', { class: 'suggest-offer' },
     el('button', { class: 'reset action suggest-button', type: 'button',
+                   disabled: busy ? true : null, 'aria-busy': busy ? 'true' : null,
                    onclick: () => askForSuggestions(story) },
-      'Suggest connections · ≈ ' + moneyFine(S.estimates.suggest)));
+      busy ? 'Looking for related stories…'
+           : 'Suggest connections · ≈ ' + moneyFine(S.estimates.suggest)));
 }
 
 /* ===================================================== the Explore screen (§8.5)
@@ -2793,6 +2976,7 @@ async function runExplore() {
   const sort = ex.query ? ex.sort : 'newest';
   ex.result = await api.search(searchQueryString(ex.query, ex.filters, sort,
                                                  EXPLORE_LIMIT));
+  ex.unreachable = !ex.result && !S.reachable;
   render();
 }
 
@@ -2948,10 +3132,11 @@ async function pinSelected() {
   for (const id of ids) {
     const story = rows.find((r) => r.story_id === id);
     if (!story) continue;
-    await api.pin(board.board_id, 'story',
-                  { story_id: id, headline: story.headline,
-                    text_hashes: (story.articles || []).map((a) => a.text_hash) },
-                  { digest_ref: S.ref, from: 'explore' });
+    const res = await api.pin(board.board_id, 'story',
+                              { story_id: id, headline: story.headline,
+                                text_hashes: (story.articles || []).map((a) => a.text_hash) },
+                              { digest_ref: S.ref, from: 'explore' });
+    if (await pinRefused(res)) break;
     done += 1;
   }
   toast(count(done, 'story') + ' pinned to ' + board.name);
@@ -3052,7 +3237,8 @@ function exploreScreen(pane) {
   pane.append(head);
 
   if (!result) {
-    pane.append(el('p', { class: 'empty-note', text: 'Searching…' }));
+    pane.append(el('p', { class: 'empty-note',
+                          text: ex.unreachable ? NOT_RUNNING : 'Searching…' }));
     return;
   }
   if (!result.stories.length) {
@@ -3359,6 +3545,10 @@ const EXPORTS = {
   moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
   paneHashes, passageSetsToFetch, chipsFor, deadChip, DEAD_WORDS,
+  dividerFor, lastAskedStory, ALL_PAPERS, suggestSection, refusedBox, searchModeNote,
+  WORDS_ONLY, SUGGEST_NO_MEANING, NOT_RUNNING, BOARD_GONE, pinRefused, openBoard,
+  askForSuggestions, askBackground, openArticle, exploreMenu, streamAnswer, api,
+  openStory, askNow, openExplore,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
   scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
   actionsRow, askAllPapers,

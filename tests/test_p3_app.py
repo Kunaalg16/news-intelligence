@@ -1647,8 +1647,8 @@ eq("[page] it offers a new conversation, widening and collapsing",
      return whole.indexOf(w) < 0; }), []);
 eq("[page] state 8 · a reloaded conversation says when it started",
    whole.indexOf("Conversation from Mon 9.30am") > 0, true);
-eq("[page] state 7 · the divider names the story now being read",
-   whole.indexOf("Now reading · ANOTHER STORY") > 0, true);
+eq("[page] state 7 · the divider names the story now being asked about (I6, call 8)",
+   whole.indexOf("Now asking about · ANOTHER STORY") > 0, true);
 eq("[page] both answers are in it",
    whole.indexOf("what happened in Delhi?") > 0 && whole.indexOf("and then?") > 0, true);
 eq("[page] the composer invites a question about your papers",
@@ -3832,10 +3832,10 @@ def v01_states():
         check("[fixture] state 6 · and background on request answers for it",
               bool(R.ask_background(empty["answer_id"])["text"]), True)
 
-        # 7 · a divider, from opening another story
+        # 7 · a divider (I6: added by a question whose scope changed, never by browsing)
         conv = R.current_conversation()
         R.add_divider(conv["conversation_id"], "sid", "ANOTHER STORY")
-        check("[fixture] state 7 · opening another story adds a divider turn",
+        check("[fixture] state 7 · add_divider adds a divider turn",
               R.current_conversation()["turns"][-1]["kind"], "divider")
 
         # 8 · the conversation kept across a restart
@@ -4081,20 +4081,34 @@ def asgi():
 def _get(path, query=b""):
     """One GET through the ASGI app (rule 2: a route function is not a request).
     Returns (status, headers, body bytes)."""
+    return _http("GET", path, query)
+
+
+def _post(path, body):
+    """One POST with a JSON body through the ASGI app (I6). Returns (status, parsed body)."""
+    status, _h, raw = _http("POST", path, b"", json.dumps(body).encode())
+    return status, json.loads(raw) if raw else None
+
+
+def _http(method, path, query=b"", payload=b""):
     import asyncio
     import p3_app as A
 
     async def go():
+        headers = [(b"host", b"127.0.0.1:8765")]
+        if payload:
+            headers += [(b"content-type", b"application/json"),
+                        (b"content-length", str(len(payload)).encode())]
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-                 "method": "GET", "scheme": "http", "path": path,
+                 "method": method, "scheme": "http", "path": path,
                  "raw_path": path.encode(), "query_string": query, "root_path": "",
                  "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8765),
-                 "headers": [(b"host", b"127.0.0.1:8765")]}
+                 "headers": headers}
         sent, done = [], asyncio.Event()
 
         async def receive():
             if not sent:
-                return {"type": "http.request", "body": b"", "more_body": False}
+                return {"type": "http.request", "body": payload, "more_body": False}
             await done.wait()
             return {"type": "http.disconnect"}
 
@@ -4224,6 +4238,313 @@ print(JSON.stringify({before: before, after: after, asked: asked,
           sum(x["wrong"] for x in before + after), 0)
     check("I5 · the page asks for each set once, and not again once read",
           [sorted(got["asked"]), got["again"]], [sorted(sets), []])
+
+
+# The I6 page checks that need awaiting: a stubbed `fetch` with a call log, so what the
+# page SENDS is counted, and a gate that holds a reply until the check releases it.
+I6_HARNESS = r"""
+var CALLS = [], GATES = {}, REPLIES = {};
+document.getElementById = function (id) {
+  return document.byId[id] || (document.byId[id] = new Node('div'));
+};
+if (typeof setTimeout === "undefined") { globalThis.setTimeout = function () { return 0; }; }
+if (typeof clearTimeout === "undefined") { globalThis.clearTimeout = function () {}; }
+function reply(status, body) {
+  return {ok: status >= 200 && status < 300, status: status, body: {},
+          json: async function () { return body; }};
+}
+globalThis.fetch = function (url, opts) {
+  var path = String(url).split('?')[0];
+  CALLS.push([opts && opts.method || 'GET', path, opts && opts.body ? JSON.parse(opts.body) : null]);
+  if (GATES[path]) return GATES[path];
+  var r = REPLIES[path];
+  if (r === 'down') return Promise.reject(new TypeError('Load failed'));
+  if (r) return Promise.resolve(reply(r[0], r[1]));
+  return Promise.resolve(reply(200, {}));
+};
+function gate(path) {
+  var open;
+  GATES[path] = new Promise(function (res) { open = res; });
+  return function (status, body) { delete GATES[path]; open(reply(status, body)); };
+}
+function sent(path) { return CALLS.filter(function (c) { return c[1] === path; }); }
+function buttonsOf(node) {
+  return nodesOf(node, "button").map(function (b) {
+    return [textOf(b), b.attrs.disabled !== undefined];
+  });
+}
+var OUT = {};
+var ST = APP.S;
+ST.flags = {suggest_connections: true, background_on_request: true, assistant: true};
+ST.estimates = {suggest: 0.0006, background: 0.0004};
+ST.digest = {stories: [], window: null};
+"""
+
+
+def i6_page():
+    """I6 · what the page does while a paid call runs, when it is refused, when meaning
+    search is off, when a board is gone and when the app is not running.
+
+    Pass lines, written before the run:
+    - K-3: from the press until the reply, Suggest connections is ONE disabled button
+      reading "Looking for related stories…"; a second press sends nothing (one press =
+      one /api/suggest); a 400 shows the server's message and a Retry in the same place;
+      Retry sends exactly one more.
+    - Background: the same (one call while busy; a 400's message + Retry).
+    - fts_only: an empty suggestion set with `mode: "fts_only"` says meaning search isn't
+      running (not "Nothing related found"); results with that mode carry the grey note;
+      results without it do not.
+    - Dividers (call 8): browse 3 stories -> 0 divider posts; ask in a story other than the
+      last -> exactly 1, naming it; ask with no story -> "All papers"; ask again in the
+      same scope -> 0 more; a first question -> 0.
+    - touch_board: opening a board posts /api/boards/<id>/touch once; a 404 says "That
+      board no longer exists"; a refused pin says the same and toasts no "Pinned".
+    - K-4: with nothing answering, an article click, Explore, Suggest and a question each
+      say "The app isn't running…"; a 404 article still says "could not be found".
+    What would pass while broken: a busy state drawn but not guarded (second press still
+    sends) -> counted at fetch; a divider added by browsing -> counted at fetch, not in
+    the drawn pane.
+    """
+    digest = R.get_digest("latest")
+    third = digest["stories"][2]
+    got = _jsc(I6_HARNESS + r"""
+async function main() {
+  // --- K-3 · Suggest connections: working state, one call, refusal + Retry
+  var story = {story_id: "s1", headline: {text: "One"}, coverage: {rows: [{text_hash: "h1"}]}};
+  ST.digest.stories = [story];
+  var open1 = gate('/api/suggest');
+  var first = APP.askForSuggestions(story);
+  OUT.k3_busy = buttonsOf(APP.suggestSection(story));
+  var second = APP.askForSuggestions(story);
+  OUT.k3_calls_while_busy = sent('/api/suggest').length;
+  open1(400, {detail: "suggestions not written: the model service is busy"});
+  await first; await second;
+  var box = APP.suggestSection(story);
+  OUT.k3_refused = [textOf(box), buttonsOf(box)];
+  REPLIES['/api/suggest'] = [200, {story_id: "s1", suggestions: [], verdict: "empty",
+                                   cost_usd: 0, mode: "fts_only"}];
+  (nodesOf(box, "button")[0].handlers.click || []).forEach(function (fn) { fn({}); });
+  await new Promise(function (r) { r(); }); await null; await null; await null;
+  for (var i = 0; i < 20; i++) await null;
+  OUT.k3_calls_after_retry = sent('/api/suggest').length;
+  OUT.fts_suggest = textOf(APP.suggestSection(story));
+  ST.suggestions = {};
+  REPLIES['/api/suggest'] = [200, {story_id: "s1", suggestions: [], verdict: "empty",
+                                   cost_usd: 0}];
+  await APP.askForSuggestions(story);
+  OUT.plain_none = textOf(APP.suggestSection(story));
+  ST.suggestions = {};
+  REPLIES['/api/suggest'] = 'down';
+  await APP.askForSuggestions(story);
+  OUT.k4_suggest = textOf(APP.suggestSection(story));
+  delete REPLIES['/api/suggest'];
+
+  // --- background: busy guard, refusal + Retry
+  var answer = {answer_id: "a1", question: "q", verdict: "enough", model: "haiku",
+                sentences: [], scope: {}, cost_usd: 0.0008, background: null};
+  ST.conversation = {conversation_id: "c1", started_at: "2026-11-03T09:00:00",
+                     turns: [{kind: "answer", answer: answer}]};
+  var openB = gate('/api/background');
+  var b1 = APP.askBackground("a1");
+  OUT.bg_busy = buttonsOf(APP.actionsRow(answer)).filter(function (b) {
+    return b[0].indexOf("background") >= 0 || b[0].indexOf("Background") >= 0; });
+  var b2 = APP.askBackground("a1");
+  OUT.bg_calls_while_busy = sent('/api/background').length;
+  openB(400, {detail: "Daily cap reached: $0.50 of $0.50 spent"});
+  await b1; await b2;
+  OUT.bg_refused = textOf(APP.answerTurn(answer, {noResults: true}));
+
+  // --- fts_only note on results
+  OUT.note_fts = textOf(APP.searchModeNote({mode: "fts_only", stories: []}));
+  OUT.note_both = APP.searchModeNote({stories: []});
+  ST.results.a1 = {mode: "fts_only", stories: [], total_stories: 0};
+  OUT.note_in_turn = textOf(APP.answerTurn(answer, {})).indexOf(APP.WORDS_ONLY) >= 0;
+  delete ST.results.a1;
+
+  // --- dividers on ask only (call 8)
+  CALLS = [];
+  ST.flags.user_links = false; ST.flags.story_so_far = false;
+  ST.digest = DATA.digest;
+  var stories3 = DATA.digest.stories.slice(0, 3);
+  ST.conversation = {conversation_id: "c1", started_at: "2026-11-03T09:00:00",
+                     turns: [{kind: "answer", answer: {answer_id: "a0",
+                                                       scope: {story_id: stories3[0].story_id},
+                                                       sentences: [], question: "x"}}]};
+  REPLIES['/api/conversation'] = [200, ST.conversation];
+  for (var k = 0; k < 3; k++) await APP.openStory(stories3[k].story_id);
+  OUT.div_browse = sent('/api/conversation/divider').length;
+  REPLIES['/api/ask'] = 'down';
+  await APP.askNow("and now?");
+  OUT.div_ask_new = sent('/api/conversation/divider').map(function (c) { return c[2]; });
+  ST.conversation.turns.push({kind: "divider", story_id: stories3[2].story_id,
+                              headline: stories3[2].headline.text});
+  await APP.askNow("again?");
+  OUT.div_same = sent('/api/conversation/divider').length;
+  OUT.div_cases = [
+    APP.dividerFor({turns: []}, {story_id: "d1", headline: "H"}),
+    APP.dividerFor(ST.conversation, {story_id: null}),
+    APP.dividerFor(ST.conversation, {story_id: null, label: "3 stories"}),
+    APP.dividerFor({turns: [{kind: "answer", answer: {scope: {story_id: null}}}]},
+                   {story_id: null})];
+  OUT.k4_ask = textOf(APP.liveTurn() || new Node('div'));
+  delete REPLIES['/api/ask'];
+
+  // --- boards: touch on open, gone board
+  CALLS = [];
+  ST.boards = [{board_id: "b1", name: "Work", pin_count: 0}];
+  REPLIES['/api/boards/b1/touch'] = [200, {board_id: "b1"}];
+  REPLIES['/api/boards/b1/pins'] = [200, {pins: []}];
+  await APP.openBoard(ST.boards[0]);
+  OUT.touch = [sent('/api/boards/b1/touch').length, ST.openBoardId];
+  ST.openBoardId = null;
+  REPLIES['/api/boards/b1/touch'] = [404, {detail: "no such board: 'b1'"}];
+  REPLIES['/api/boards'] = [200, {boards: []}];
+  await APP.openBoard(ST.boards[0]);
+  OUT.touch_gone = [textOf(document.byId.toast), ST.openBoardId, ST.boards.length];
+  REPLIES['/api/pin'] = [404, {detail: "no such board: 'b1'"}];
+  var refusedPin = await APP.pinRefused(await APP.api.pin("b1", "story", {}, {}));
+  OUT.pin_gone = [refusedPin, textOf(document.byId.toast)];
+  REPLIES['/api/pin'] = [200, {pin_id: "p1"}];
+  OUT.pin_ok = await APP.pinRefused(await APP.api.pin("b1", "story", {}, {}));
+
+  // --- K-4: article, Explore
+  REPLIES['/api/article/h1'] = 'down';
+  await APP.openArticle("h1");
+  OUT.k4_article = textOf(document.byId.reading);
+  REPLIES['/api/article/h1'] = [404, {detail: "no such article"}];
+  await APP.openArticle("h1");
+  OUT.a404_article = textOf(document.byId.reading);
+  REPLIES['/api/search'] = 'down';
+  REPLIES['/api/facets'] = [200, {papers: ["Mint"], topics: [], kinds: []}];
+  ST.flags.explore = true;
+  await APP.openExplore({query: "x", filters: {}});
+  OUT.k4_explore = textOf(document.byId.reading).indexOf(APP.NOT_RUNNING) >= 0;
+
+  // --- search only ever gets the page's own menu values
+  ST.facets = {papers: ["Mint", "The Hindu"], topics: ["Economy"], kinds: ["news"]};
+  ST.explore.openMenu = "papers";
+  OUT.menu = nodesOf(APP.exploreMenu("papers", "Papers"), "button").slice(0, -0 || undefined)
+    .map(textOf);
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"digest": digest})
+    check("I6 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    NR = "The app isn't running. Click the News Intelligence icon."
+    check("[page] K-3 · while the call runs: one disabled button that says it is working",
+          got["k3_busy"], [["Looking for related stories…", True]])
+    check("[page] K-3 · a second press while it runs sends nothing (one press = one call)",
+          got["k3_calls_while_busy"], 1)
+    check("[page] K-3 · a refusal shows the server's message and a Retry, in the same place",
+          [("the model service is busy" in got["k3_refused"][0]),
+           [b[0] for b in got["k3_refused"][1]]], [True, ["Retry"]])
+    check("[page] K-3 · Retry sends exactly one more", got["k3_calls_after_retry"], 2)
+    check("[page] I6 · meaning search off: the suggest box says so, not 'nothing related'",
+          got["fts_suggest"].startswith("Can't look for related stories right now: meaning "
+                                        "search isn't running. Click the News Intelligence "
+                                        "icon to start it."), True)
+    check("[page] I6 · with meaning search on, an empty set still says 'Nothing related found.'",
+          got["plain_none"].startswith("Nothing related found."), True)
+    check("[page] K-4 · Suggest with nothing answering says the app isn't running",
+          NR in got["k4_suggest"], True)
+    check("[page] I6 · Background while it runs: disabled and working, one call",
+          [got["bg_busy"], got["bg_calls_while_busy"]], [[["Writing background…", True]], 1])
+    check("[page] I6 · a refused Background shows the message and a Retry",
+          ["Daily cap reached" in got["bg_refused"], "Retry" in got["bg_refused"]],
+          [True, True])
+    check("[page] I6 · fts_only results carry the grey note, word for word",
+          got["note_fts"], "Word search only: meaning search isn't running")
+    check("[page] I6 · and results without the field carry none (F-3: absent = both)",
+          got["note_both"], None)
+    check("[page] I6 · the note is drawn in the answer's turn", got["note_in_turn"], True)
+    check("[page] I6 · call 8 · browsing three stories adds no divider", got["div_browse"], 0)
+    check("[page] I6 · call 8 · asking in another story adds exactly one, naming it",
+          got["div_ask_new"], [{"conversation_id": "c1", "story_id": third["story_id"],
+                                "headline": third["headline"]["text"]}])
+    check("[page] I6 · call 8 · asking again in the same story adds none", got["div_same"], 1)
+    check("[page] I6 · call 8 · first question none; no story = 'All papers'; Explore picks "
+          "by their label; all papers twice none", got["div_cases"],
+          [None, {"story_id": None, "headline": "All papers"},
+           {"story_id": None, "headline": "3 stories"}, None])
+    check("[page] K-4 · a question with nothing answering says the app isn't running",
+          NR in got["k4_ask"] and "Retry" in got["k4_ask"], True)
+    check("[page] I6 · opening a board touches it once, then opens it",
+          got["touch"], [1, "b1"])
+    check("[page] I6 · a board that is gone says so and leaves the boards list re-read",
+          got["touch_gone"], ["That board no longer exists", None, 0])
+    check("[page] I6 · a pin refused with 404 says the board is gone, and is not 'Pinned'",
+          got["pin_gone"], [True, "That board no longer exists"])
+    check("[page] I6 · a pin that went through is not treated as refused", got["pin_ok"], False)
+    check("[page] K-4 · an article with nothing answering says the app isn't running",
+          NR in got["k4_article"], True)
+    check("[page] K-4 · a real 404 still says the article could not be found",
+          "That article could not be found." in got["a404_article"], True)
+    check("[page] K-4 · Explore with nothing answering says the app isn't running",
+          got["k4_explore"], True)
+    check("[page] I6 · the Explore menu offers only the facets' own values (search() "
+          "never gets a value the page made up)", got["menu"], ["Papers ▾", "Mint", "The Hindu"])
+
+
+def i6_routes():
+    """I6 · the routes behind it, through the ASGI app, on the section's copy.
+
+    Pass lines, written before the run:
+    - POST /api/boards/<id>/touch bumps that board's last_used_at; an unknown board is 404.
+    - POST /api/pin to a board that does not exist is 404 with the reason (was a 500).
+    - /api/background on an answer that already has one is 400 with K3's message.
+    - With meaning search off (embed_url -> dead port, T-10), /api/search says
+      mode fts_only and /api/suggest (cache bypassed) says mode fts_only with no
+      suggestions, cost 0; the page's own box for that answer says meaning search
+      isn't running.
+    """
+    import time
+    status, made = _post("/api/boards", {"name": "k1-i6 touch"})
+    bid = made["board_id"]
+    before = next(b for b in R.list_boards() if b["board_id"] == bid)["last_used_at"]
+    time.sleep(1.1)
+    status, _b = _post(f"/api/boards/{bid}/touch", {})
+    after = next(b for b in R.list_boards() if b["board_id"] == bid)["last_used_at"]
+    check("I6 · touch_board through the route bumps last_used_at", [status, after > before],
+          [200, True])
+    status, body = _post("/api/boards/b_never/touch", {})
+    check("I6 · touching a board that does not exist is 404", status, 404)
+    status, body = _post("/api/pin", {"board_id": "b_never", "item_type": "story",
+                                      "payload": {"story_id": "x"}})
+    check("I6 · pinning to a board that does not exist is 404 with the reason",
+          [status, "no such board" in (body or {}).get("detail", "")], [404, True])
+
+    answer = list(R.ask("police", None))[-1]["answer"]
+    first, _b = _post("/api/background", {"answer_id": answer["answer_id"]})
+    status, body = _post("/api/background", {"answer_id": answer["answer_id"]})
+    check("I6 · Background twice: the second is 400 with K3's message",
+          [first, status, (body or {}).get("detail")],
+          [200, 400, "that answer already has a background line"])
+
+    url = PS.KNOBS["embed_url"]
+    PS.KNOBS["embed_url"] = "http://127.0.0.1:9"
+    try:
+        status, _h, raw = _get("/api/search", b"q=police")
+        check("I6 · meaning search off: /api/search says fts_only",
+              [status, json.loads(raw).get("mode")], [200, "fts_only"])
+        story = R.get_digest("latest")["stories"][0]
+        hashes = [r["text_hash"] for r in story["coverage"]["rows"]] + ["k1-i6-no-cache"]
+        spent = R.cost_today()["spent_usd"]
+        status, got = _post("/api/suggest", {"story_id": story["story_id"],
+                                             "text_hashes": hashes})
+        check("I6 · and /api/suggest says fts_only, with nothing suggested and nothing spent",
+              [status, got.get("mode"), got.get("suggestions"), got.get("cost_usd"),
+               R.cost_today()["spent_usd"] == spent],
+              [200, "fts_only", [], 0.0, True])
+        words = _jsc(r"""
+APP.S.estimates = {};
+print(JSON.stringify(textOf(APP.suggestionsBox({story_id: "s"}, DATA))));
+""", got)
+        check("I6 · and the page's box for that very answer says meaning search isn't running",
+              words.startswith("Can't look for related stories right now"), True)
+    finally:
+        PS.KNOBS["embed_url"] = url
 
 
 def one_page():
@@ -4517,7 +4838,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, js_logic, contrast, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, js_logic, contrast, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
