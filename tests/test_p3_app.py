@@ -4991,6 +4991,55 @@ async function main() {
   await press(nodesOf(turns()[2], "button").filter(function (b) {
     return textOf(b) === "Ask all papers instead"; })[0]);
   OUT.off_all = [sent('/api/ask').length, sent('/api/reask').length];
+  // --- K-6 · after "Ask all papers instead", offer to follow
+  fresh();
+  ST.flags.followup_rewrite = true;
+  var STORY = function () { return {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}}; };
+  function widened(oldId, newId) {
+    var conv = JSON.parse(JSON.stringify(CONV));
+    var old = conv.turns.filter(function (t) { return t.answer.answer_id === oldId; })[0];
+    var a = JSON.parse(JSON.stringify(old.answer));
+    a.answer_id = newId; a.replaces_answer_id = oldId; a.topic = "new_topic";
+    a.scope = {story_id: null, text_hashes: [], filters: {}};
+    conv.turns.push({kind: "answer", answer: a});
+    REPLIES['/api/conversation'] = [200, conv];
+    STREAMS['/api/reask'] = [{type: "done", answer: a}];
+  }
+  function offers() {
+    return turns().map(function (t) { return byClass(t, "topic-line").map(textOf)
+      .filter(function (x) { return x.indexOf("Next question") === 0; }); });
+  }
+  ST.scope = STORY();
+  widened("f7", "r_f7");
+  await APP.reaskInPlace("f7", {scope: APP.ALL_SCOPE});
+  OUT.w_set = ST.widened;
+  OUT.w_lines = offers();
+  CALLS = [];
+  await press(byClass(pane(), "topic-act").filter(function (b) {
+    return textOf(b) === "Switch to all papers"; })[0]);
+  OUT.w_press = [ST.scope.story_id, ST.widened, sent('/api/reask').length + sent('/api/ask').length,
+                 offers().filter(function (x) { return x.length; }).length];
+  fresh(); ST.scope = STORY();
+  widened("f3", "r_f3");
+  await APP.reaskInPlace("f3", {scope: APP.ALL_SCOPE});
+  OUT.w_middle = offers().filter(function (x) { return x.length; }).length;
+  fresh(); ST.scope = STORY(); widened("f7", "r_f7");
+  await APP.reaskInPlace("f7", {mode: "carry"});
+  OUT.w_mode = ST.widened;
+  fresh(); ST.scope = STORY(); widened("f7", "r_f7");
+  await APP.reaskInPlace("f7", {scope: STORY()});
+  OUT.w_story = ST.widened;
+  fresh(); ST.scope = STORY(); widened("f7", "r_f7");
+  await APP.reaskInPlace("f7", {scope: APP.ALL_SCOPE});
+  ST.scope = {story_id: null, text_hashes: [], filters: {}};
+  OUT.w_nochip = offers().filter(function (x) { return x.length; }).length;
+  ST.scope = STORY();
+  ST.flags.followup_rewrite = false;
+  OUT.w_off = offers().filter(function (x) { return x.length; }).length;
+  ST.flags.followup_rewrite = true;
+  await APP.askNow("and then?");
+  OUT.w_after_ask = ST.widened;
+  ST.flags.followup_rewrite = false;
   OUT.earlier = [APP.earlierWords("What did the EPFO change about pension payouts?"),
                  APP.earlierWords("EPFO rule?"), APP.earlierWords(""), APP.earlierWords(null)];
 }
@@ -5070,6 +5119,20 @@ main().then(function () { print(JSON.stringify(OUT)); },
     check("[page] I8 · flag off: 'Ask all papers instead' asks anew, as before",
           got["off_all"], [1, 0])
     I8_COUNTS.append(got["off_pressed"])
+    check("[page] K-6 · after 'Ask all papers instead' the widened answer is remembered",
+          got["w_set"], "r_f7")
+    check("[page] K-6 · one grey line under it, at the last turn: next question goes to the "
+          "story, offer to switch", got["w_lines"],
+          [[]] * 6 + [["Next question: this story · Switch to all papers"]])
+    check("[page] K-6 · the switch takes the story off the chip, ends the offer, asks nothing",
+          got["w_press"], [None, None, 0, 0])
+    check("[page] K-6 · no offer under a widened answer that is not the last",
+          got["w_middle"], 0)
+    check("[page] K-6 · no offer after a topic correction or a story correction",
+          [got["w_mode"], got["w_story"]], [None, None])
+    check("[page] K-6 · no offer when the chip no longer names a story, or with the flag off",
+          [got["w_nochip"], got["w_off"]], [0, 0])
+    check("[page] K-6 · the next question ends the offer", got["w_after_ask"], None)
 
 
 I8_COUNTS = []

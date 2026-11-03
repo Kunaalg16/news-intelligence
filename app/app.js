@@ -35,6 +35,7 @@ const S = {
   suggesting: {},                /* story_id -> true while its suggest call runs (K-3) */
   backgroundBusy: {},            /* answer_id -> true while its background call runs */
   backgroundError: {},           /* answer_id -> {message} from a refused background */
+  widened: null,                 /* answer_id just re-asked of all papers (K-6), until the next question */
   seeAlsoOpen: {},               /* story_id -> true while D1's fold is open; not a pref */
   userLinks: {},                 /* story_id -> the links the reader made out of it */
   pinnedStories: new Set(),      /* so a dark pin is dark again after a reload */
@@ -2194,12 +2195,16 @@ function answerById(answerId) {
    as a new turn -- a new turn, not a rewrite of this one, because the two answers are
    about different things and the narrow one is still the answer to what was asked.
    `askNow` builds its scope from `S.scope`, so clearing that first is the whole job. */
-async function askAllPapers(question) {
+function clearScope() {
   S.scope.story_id = null;
   S.scope.headline = null;
   S.scope.text_hashes = [];
   S.scope.filters = {};
   S.scopeLabel = null;
+}
+
+async function askAllPapers(question) {
+  clearScope();
   renderAssistant();
   await askNow(question);
 }
@@ -2382,6 +2387,8 @@ function answerTurn(answer, opts) {
   if (back) body.append(back);
   const topic = topicLine(answer, o.first);
   if (topic) body.append(topic);
+  const widen = widenLine(answer);
+  if (widen) body.append(widen);
   body.append(answerInfo(answer));
   body.append(actionsRow(answer));
   const refused = S.backgroundError[answer.answer_id];
@@ -2524,6 +2531,7 @@ function takeLiveEvent(event) {
 async function askNow(question, options) {
   const o = options || {};
   if (!question || !question.trim()) return;
+  S.widened = null;              /* the next question has been asked: the offer is spent */
   const scope = { story_id: S.scope.story_id, text_hashes: S.scope.text_hashes || [],
                   filters: S.scope.filters || {} };
   const divider = o.body ? null
@@ -2680,6 +2688,28 @@ function topicLine(answer, first) {
        words.act(earlier)));
 }
 
+/* K-6 (Kunaal, 4 Nov, option c) · a scope correction re-asks one answer and leaves the
+   chip alone (T-40), so after "Ask all papers instead" the NEXT question still goes to
+   the story. One grey line, in the same pattern as the corrections, says so and offers
+   to follow: tapping it takes the story off the chip and asks nothing. Only on the answer
+   just widened, only while it is the last answer and a story is still on the chip; the
+   next question, a new conversation or a reload ends it (in memory only). */
+const WIDEN_WORDS = { said: 'Next question: this story', act: 'Switch to all papers' };
+
+function widenLine(answer) {
+  if (!S.flags.followup_rewrite || !S.widened || answer.answer_id !== S.widened) return null;
+  if (!S.scope.story_id) return null;
+  const answers = paneTurns(S.conversation)
+    .filter((t) => t.kind === 'answer' && !t.answer.parent_answer_id);
+  const last = answers.length ? answers[answers.length - 1].answer : null;
+  if (!last || last.answer_id !== answer.answer_id) return null;
+  return el('p', { class: 'topic-line' }, WIDEN_WORDS.said + ' · ',
+    el('button', { class: 'reset topic-act', type: 'button',
+                   onclick: () => { S.widened = null; clearScope(); renderAssistant();
+                                    focusComposer(); } },
+       WIDEN_WORDS.act));
+}
+
 /* The order the pane draws: an answer that names the one it replaces takes that one's
    place (contract: same position), whatever order the conversation lists them in, and a
    chain of re-asks ends at the newest. With K3 hiding the old turn this changes nothing;
@@ -2722,6 +2752,9 @@ async function reaskInPlace(answerId, change) {
   const live = S.live;
   if (!keepLiveAfterStream(live)) S.live = null;
   if (live && live.answer && live.results) S.results[live.answer.answer_id] = live.results;
+  /* K-6: widened to all papers while the chip still names a story -> offer to follow. */
+  S.widened = live && live.answer && change.scope && !change.scope.story_id
+    ? live.answer.answer_id : null;
   await refreshConversation();
   S.cost = await api.cost();
   renderAssistant();
@@ -2884,6 +2917,7 @@ async function startNewConversation() {
   S.folded = {};
   S.live = null;                 /* a kept error from the old conversation goes with it */
   S.reloadDivider = null;
+  S.widened = null;
   renderAssistant();
   focusComposer();
 }
@@ -3799,7 +3833,7 @@ const EXPORTS = {
   showCapConfirm,
   TOPIC_WORDS, EARLIER_WORDS, ALL_SCOPE, TURN_REMOVED, REMOVE_TOAST_SECONDS, earlierWords,
   earlierQuestion, topicLine, paneTurns, reaskInPlace, removeButton, removeTurn,
-  resultGroups, takeLiveEvent, toast,
+  resultGroups, takeLiveEvent, toast, widenLine, WIDEN_WORDS, clearScope,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */
