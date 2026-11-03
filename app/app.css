@@ -970,7 +970,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   padding: 4px 14px 14px;
 }
 
-.pane-turn { margin: 0 0 22px; }
+.pane-turn { position: relative; margin: 0 0 22px; }
 
 /* I7 · the turn layout: a 22 px column of markers, Q beside the question and A beside
    the answer. `baseline` puts each marker on its row's FIRST text line, whatever that
@@ -1070,6 +1070,41 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   font-size: var(--s115);
   color: var(--text-muted);
 }
+
+/* I8 · flag `followup_rewrite`. The grey line after an answer says what was done with
+   it; its one correction is an ochre underlined text button, not a bordered one. */
+.topic-line {
+  margin: 8px 0 0;
+  font-size: var(--s115);
+  color: var(--text-muted);
+}
+.topic-act {
+  color: var(--ochre);
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.topic-act:hover { color: var(--ink); }
+/* Remove sits at the turn's top right, on the pane's ground so it covers a long
+   question's end cleanly; seen on hover and on keyboard focus. Opacity, not display,
+   so it stays in the tab order. `.pane-turn` is `position: relative` for it. */
+.turn-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 0 0 8px;
+  background: var(--assistant-ground);
+  font-size: var(--s115);
+  color: var(--text-muted);
+  text-decoration: underline;
+  opacity: 0;
+}
+.pane-turn:hover .turn-remove,
+.turn-remove:focus,
+.turn-remove:focus-visible { opacity: 1; }
+.turn-remove:hover { color: var(--red); }
+/* Two searches: one heading per search above its rows. */
+.result-group { margin: 10px 0 2px; }
 
 /* I7 · buttons by kind of action, in the ask pane only (the left panel and the main
    page keep `.action`). One shape for all three roles; the colour says the role. Order

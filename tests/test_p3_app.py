@@ -667,7 +667,7 @@ def routes():
         f = A.flags()
         # B1 added one flag to v0's ten; B5 adds five more (§8.6). The count is checked
         # outright so a flag cannot be added without saying what it removes.
-        check("all nineteen feature flags are sent to the page", len(f["flags"]), 19)
+        check("all twenty feature flags are sent to the page", len(f["flags"]), 20)
         check("the theme bar strip is off, its data not being in the JSON (R9)",
               f["flags"]["theme_bar_strip"], False)
         check("the cost header is on", f["flags"]["cost_display"], True)
@@ -2739,8 +2739,8 @@ def look_i7():
           [_rule(css, ".answer-text p").get(k) for k in ("font-family", "font-size",
                                                          "line-height")],
           ["var(--serif)", "var(--s17)", "1.55"])
-    check("[page] I7 · about 22 px between turns", _rule(css, ".pane-turn"),
-          {"margin": "0 0 22px"})
+    check("[page] I7 · about 22 px between turns", _rule(css, ".pane-turn").get("margin"),
+          "0 0 22px")
     legend = _rule(css, ".cheat-marks dt")
     check("[page] I7 · legend: the marks' cells lose the key boxes and centre their mark",
           [legend.get(k) for k in ("border", "background", "padding", "display",
@@ -4276,7 +4276,7 @@ def asgi():
         check("[fixture] and a 400 as 400", status, 400)
         status, _h, chunks = asyncio.run(request("GET", "/api/flags"))
         check("[fixture] the flags the page boots from come over the wire",
-              [status, len(json.loads(b"".join(chunks))["flags"])], [200, 19])
+              [status, len(json.loads(b"".join(chunks))["flags"])], [200, 20])
 
 
 def _get(path, query=b""):
@@ -4305,10 +4305,14 @@ def _http(method, path, query=b"", payload=b""):
                  "raw_path": path.encode(), "query_string": query, "root_path": "",
                  "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8765),
                  "headers": headers}
-        sent, done = [], asyncio.Event()
+        sent, done, calls = [], asyncio.Event(), {"n": 0}
 
+        # (I8) Count the calls, as `asgi()`'s helper does. "Nothing sent yet" was the old
+        # test, and a streaming route sends nothing before its first event, so Starlette's
+        # disconnect listener got the body again and again and spun forever.
         async def receive():
-            if not sent:
+            calls["n"] += 1
+            if calls["n"] == 1:
                 return {"type": "http.request", "body": payload, "more_body": False}
             await done.wait()
             return {"type": "http.disconnect"}
@@ -4748,6 +4752,389 @@ print(JSON.stringify(textOf(APP.suggestionsBox({story_id: "s"}, DATA))));
         PS.KNOBS["embed_url"] = url
 
 
+I8_HARNESS = r"""
+if (typeof TextDecoder === "undefined") {
+  globalThis.TextDecoder = function () {
+    this.decode = function (v) { return v === undefined ? "" : String(v); };
+  };
+}
+var DELAYS = [];
+globalThis.setTimeout = function (fn, ms) { DELAYS.push(ms); return 0; };
+function streamReply(lines) {
+  var i = 0;
+  return {ok: true, status: 200, json: async function () { return {}; },
+          body: {getReader: function () { return {read: async function () {
+            if (i < lines.length) return {done: false, value: JSON.stringify(lines[i++]) + "\n"};
+            return {done: true}; }}; }}};
+}
+var STREAMS = {};
+var baseFetch = globalThis.fetch;
+globalThis.fetch = function (url, opts) {
+  var path = String(url).split('?')[0];
+  if (STREAMS[path] && !GATES[path]) {
+    CALLS.push([opts && opts.method || 'GET', path, opts && opts.body ? JSON.parse(opts.body) : null]);
+    return Promise.resolve(streamReply(STREAMS[path]));
+  }
+  return baseFetch(url, opts);
+};
+function gateStream(path) {
+  var open;
+  GATES[path] = new Promise(function (res) { open = res; });
+  return function (lines) { delete GATES[path]; open(streamReply(lines)); };
+}
+function byClass(node, cls, found) {
+  found = found || [];
+  if (node && (" " + (node.className || "") + " ").indexOf(" " + cls + " ") >= 0) found.push(node);
+  for (var i = 0; i < ((node && node.children) || []).length; i++) byClass(node.children[i], cls, found);
+  return found;
+}
+async function press(node) {
+  await Promise.all(((node && node.handlers) || {}).click.map(function (fn) { return fn({}); }));
+  for (var i = 0; i < 40; i++) await null;
+}
+var CONV = DATA.conversation;
+function fresh() {
+  ST.conversation = JSON.parse(JSON.stringify(CONV));
+  ST.results = {}; ST.live = null; ST.folded = {};
+  ST.scope = {story_id: null, text_hashes: [], filters: {}};
+  REPLIES['/api/conversation'] = [200, JSON.parse(JSON.stringify(CONV))];
+  CALLS = [];
+}
+function pane() { APP.renderAssistant(); return document.byId.assistant; }
+function turns() { return byClass(pane(), "pane-turn"); }
+function questions() {
+  return turns().map(function (t) { var q = byClass(t, "pane-you")[0]; return q ? textOf(q) : null; });
+}
+ST.flags = {assistant: true, think_harder: true, background_on_request: true,
+            background_line: true, followup_rewrite: true};
+ST.estimates = {ask: 0.0008, think_harder: 0.02, background: 0.0004, suggest: 0.0006};
+ST.cost = {spent_usd: 0.01, cap_usd: 0.5, override_usd: 0};
+var DONE = {type: "done", answer: null};
+STREAMS['/api/ask'] = [{type: "error", code: "model_error", reason: "other", retryable: true}];
+STREAMS['/api/think_harder'] = STREAMS['/api/ask'];
+"""
+
+
+def i8_page():
+    """I8 · the follow-up display (brief §4.5) on the stub's chosen turns, flag on and off.
+
+    Pass lines, written before the run:
+    - Flag on, a conversation read back with nothing in memory (= after a reload): the
+      first answer and an answer with no `topic` draw no grey line; each other `topic`
+      draws its line word for word (follow_up, new_topic, two_searches, one_search, and a
+      re-asked follow_up naming what was done), with "[earlier]" = the earlier question's
+      first 4 words in quotes.
+    - Two searches: one heading per search, in `search_query` order (not the rows'
+      order), "For <search> · N stories", each row under its own search.
+    - Each line's action sends exactly one /api/reask with that answer's id and the mode
+      the brief names (as_typed, carry, one_search, none); no /api/ask.
+    - Re-ask in place: while it streams the live turn sits at the old answer's position
+      and the old answer is not drawn; a second press sends nothing; after it, the new
+      answer stands where the old one was even when the conversation lists it last.
+    - A failed re-ask keeps the old answer and puts the error right after it; its Retry
+      re-sends the same /api/reask, never /api/ask.
+    - Remove: one per turn, labelled; pressing sends one /api/hide_turn for that answer,
+      the turn leaves the pane, the toast says "Removed from this conversation" with no
+      Undo for 5 s. A 404 says "Not removed · <reason>" and re-reads nothing; nothing
+      answering says the app isn't running.
+    - Scope: "Ask all papers instead" re-asks in place with an all-papers scope;
+      "Ask in this story instead" appears on every unscoped answer while a story is open
+      and re-asks with that story. The pane's own scope chip is left as it was.
+    - Flag off: none of the lines, actions, Remove, the story button or group headings is
+      drawn; pressing every button in the pane, and calling the two functions directly,
+      sends no /api/reask and no /api/hide_turn; "Ask all papers instead" asks anew.
+    What would pass while broken: a line drawn from S.results rather than the stored
+    answer -> the run starts with S.results empty; a re-ask "in place" that the
+    conversation's own order puts right -> the reply lists the new answer LAST; a guard
+    on drawing but not on calling -> the functions are called directly with the flag off.
+    """
+    S.reset()
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+async function main() {
+  // --- the grey lines, read back with nothing in memory
+  fresh();
+  OUT.lines = turns().map(function (t) {
+    var l = byClass(t, "topic-line")[0]; return l ? textOf(l) : null; });
+  var f4 = turns()[3];
+  OUT.groups = byClass(f4, "result-group").map(textOf);
+  OUT.group_rows = nodesOf(byClass(f4, "pane-results")[0], "h4").map(textOf);
+
+  // --- each line's action
+  OUT.modes = [];
+  for (var i = 0; i < 7; i++) {
+    fresh();
+    STREAMS['/api/reask'] = [DONE];
+    var act = byClass(turns()[i], "topic-act")[0];
+    if (!act) { OUT.modes.push(null); continue; }
+    await press(act);
+    OUT.modes.push(sent('/api/reask').map(function (c) { return c[2]; }));
+  }
+  OUT.modes_ask = sent('/api/ask').length;
+
+  // --- in place
+  fresh();
+  delete STREAMS['/api/reask'];
+  var open = gateStream('/api/reask');
+  var running = APP.reaskInPlace("f2", {mode: "as_typed"});
+  var during = turns();
+  OUT.during = [during.length, byClass(during[1], "answer-caret").length,
+                byClass(during[1], "answer-text").length,
+                textOf(during[1]).indexOf("A stub sentence.") >= 0];
+  await APP.reaskInPlace("f3", {mode: "carry"});
+  OUT.during_calls = sent('/api/reask').length;
+  var after = JSON.parse(JSON.stringify(CONV));
+  var newer = JSON.parse(JSON.stringify(after.turns[1]));
+  newer.answer.answer_id = "r_f2"; newer.answer.question = "re-asked f2";
+  newer.answer.replaces_answer_id = "f2"; newer.answer.topic = "new_topic";
+  after.turns.push(newer);
+  REPLIES['/api/conversation'] = [200, after];
+  open([{type: "results", search: {stories: [], total_stories: 0}},
+        {type: "sentence", text: "Again.", cites: []},
+        {type: "done", answer: newer.answer}]);
+  await running;
+  for (var j = 0; j < 40; j++) await null;
+  OUT.after = questions();
+  OUT.paneturns = [
+    APP.paneTurns({turns: [{kind: "answer", answer: {answer_id: "X"}},
+                           {kind: "answer", answer: {answer_id: "A", replaces_answer_id: "X"}},
+                           {kind: "answer", answer: {answer_id: "B", replaces_answer_id: "A"}}]}),
+    APP.paneTurns({turns: [{kind: "answer", answer: {answer_id: "A", replaces_answer_id: "X"}},
+                           {kind: "answer", answer: {answer_id: "X"}},
+                           {kind: "answer", answer: {answer_id: "Y"}}]}),
+    APP.paneTurns({turns: [{kind: "answer", answer: {answer_id: "Y"}},
+                           {kind: "answer", answer: {answer_id: "A", replaces_answer_id: "X"}}]}),
+    APP.paneTurns({turns: [{kind: "answer", answer: {answer_id: "X"}},
+                           {kind: "divider", story_id: "s", headline: "H"},
+                           {kind: "answer", answer: {answer_id: "A", replaces_answer_id: "X"}}]})
+  ].map(function (list) { return list.map(function (t) {
+    return t.kind === "divider" ? "D" : t.answer.answer_id; }); });
+
+  // --- a failed re-ask
+  fresh();
+  REPLIES['/api/reask'] = 'down';
+  await APP.reaskInPlace("f2", {mode: "as_typed"});
+  var t = turns();
+  OUT.failed = [t.length, questions().slice(0, 3),
+                byClass(t[1], "pane-error").length, byClass(t[2], "pane-error").length];
+  var retry = nodesOf(byClass(t[2], "pane-error")[0], "button")[0];
+  OUT.retry_label = textOf(retry);
+  await press(retry);
+  OUT.retry = [sent('/api/reask').map(function (c) { return c[2]; }), sent('/api/ask').length];
+  delete REPLIES['/api/reask'];
+
+  // --- Remove
+  fresh();
+  ST.live = null;
+  var removes = byClass(pane(), "turn-remove");
+  OUT.removes = removes.map(function (b) { return [textOf(b), b.attrs["aria-label"]]; });
+  var less = JSON.parse(JSON.stringify(CONV));
+  less.turns = less.turns.filter(function (x) { return x.answer.answer_id !== "f3"; });
+  REPLIES['/api/conversation'] = [200, less];
+  REPLIES['/api/hide_turn'] = [200, {hidden: "f3"}];
+  DELAYS = [];
+  await press(byClass(turns()[2], "turn-remove")[0]);
+  OUT.removed = [sent('/api/hide_turn').map(function (c) { return c[2]; }), questions().length,
+                 questions().indexOf("police firing in Manipur"),
+                 textOf(document.byId.toast), nodesOf(document.byId.toast, "button").length,
+                 DELAYS[DELAYS.length - 1]];
+  var reads = sent('/api/conversation').length;
+  REPLIES['/api/hide_turn'] = [404, {detail: "no such answer: 'f9'"}];
+  await APP.removeTurn("f9");
+  OUT.remove_404 = [textOf(document.byId.toast), sent('/api/conversation').length - reads];
+  REPLIES['/api/hide_turn'] = 'down';
+  await APP.removeTurn("f2");
+  OUT.remove_down = textOf(document.byId.toast);
+  delete REPLIES['/api/hide_turn'];
+
+  // --- the scope corrections
+  fresh();
+  STREAMS['/api/reask'] = [DONE];
+  ST.scope = {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}};
+  OUT.in_story = turns().map(function (x) {
+    return nodesOf(x, "button").filter(function (b) {
+      return textOf(b) === "Ask in this story instead"; }).length; });
+  var allBtn = nodesOf(turns()[2], "button").filter(function (b) {
+    return textOf(b) === "Ask all papers instead"; })[0];
+  await press(allBtn);
+  OUT.all_papers = [sent('/api/reask').map(function (c) { return c[2]; }),
+                    sent('/api/ask').length, ST.scope.story_id];
+  CALLS = [];
+  ST.conversation = JSON.parse(JSON.stringify(CONV));
+  var storyBtn = nodesOf(turns()[1], "button").filter(function (b) {
+    return textOf(b) === "Ask in this story instead"; })[0];
+  await press(storyBtn);
+  OUT.this_story = sent('/api/reask').map(function (c) { return c[2]; });
+
+  // --- flag off
+  fresh();
+  ST.flags.followup_rewrite = false;
+  ST.scope = {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}};
+  OUT.off_classes = classesOf(pane()).filter(function (c) {
+    return /topic-line|topic-act|turn-remove|ask-in-story|result-group/.test(c); });
+  var all = nodesOf(pane(), "button").filter(function (b) { return b.attrs.type !== "submit"; });
+  OUT.off_pressed = all.length;
+  var thrown = 0;
+  for (var k = 0; k < all.length; k++) {
+    ST.conversation = JSON.parse(JSON.stringify(CONV)); ST.live = null;
+    try { await press(all[k]); } catch (e) { thrown += 1; }
+  }
+  await APP.reaskInPlace("f2", {mode: "carry"});
+  await APP.removeTurn("f2");
+  OUT.off_calls = [sent('/api/reask').length, sent('/api/hide_turn').length, thrown];
+  CALLS = [];
+  ST.conversation = JSON.parse(JSON.stringify(CONV)); ST.live = null;
+  ST.pane = "open";      // the sweep pressed Collapse too
+  ST.scope = {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}};
+  await press(nodesOf(turns()[2], "button").filter(function (b) {
+    return textOf(b) === "Ask all papers instead"; })[0]);
+  OUT.off_all = [sent('/api/ask').length, sent('/api/reask').length];
+  OUT.earlier = [APP.earlierWords("What did the EPFO change about pension payouts?"),
+                 APP.earlierWords("EPFO rule?"), APP.earlierWords(""), APP.earlierWords(null)];
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": S.FOLLOWUP_CONVERSATION})
+    check("I8 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    E = "“What did the EPFO…”"
+    check("[page] I8 · grey lines: none on the first answer or a missing topic; each topic "
+          "word for word (read back with nothing in memory, as after a reload)",
+          got["lines"],
+          [None,
+           f"Follow-up of your {E} question · Treat as new topic",
+           f"New topic · Ask in the {E} topic instead",
+           "Two searches · Search as one question",
+           "One search · Search as two topics",
+           f"Asked in the {E} topic · Treat as new topic",
+           None])
+    check("[page] I8 · [earlier] is the first 4 words in quotes; short ones whole; none "
+          "reads 'earlier'", got["earlier"],
+          [E, "“EPFO rule”", "earlier", "earlier"])
+    check("[page] I8 · two searches: one heading per search, in search_query order",
+          got["groups"], ["For GST rate cut · 2 stories", "For RBI repo decision · 1 story"])
+    check("[page] I8 · and each row sits under its own search",
+          got["group_rows"], ["GST Council cuts rates", "States split on GST compensation",
+                              "RBI holds repo rate"])
+    check("[page] I8 · each correction sends one /api/reask with the brief's mode",
+          got["modes"],
+          [None,
+           [{"answer_id": "f2", "mode": "as_typed"}],
+           [{"answer_id": "f3", "mode": "carry"}],
+           [{"answer_id": "f4", "mode": "one_search"}],
+           [{"answer_id": "f5", "mode": None}],
+           [{"answer_id": "f6", "mode": "as_typed"}],
+           None])
+    check("[page] I8 · and no correction asks anew", got["modes_ask"], 0)
+    check("[page] I8 · while it streams the live turn is at the old answer's place, the old "
+          "answer not drawn", got["during"], [7, 1, 1, False])
+    check("[page] I8 · a second press while one runs sends nothing", got["during_calls"], 1)
+    q = [a["question"] for a in S.FOLLOWUP_TURNS]
+    check("[page] I8 · after it the new answer stands where the old one was, even listed last",
+          got["after"], [q[0], "re-asked f2"] + q[2:])
+    check("[page] I8 · paneTurns: a chain ends at the newest; order of listing does not "
+          "matter; a replacer whose old turn is gone keeps its own place; dividers stay",
+          got["paneturns"], [["B"], ["A", "Y"], ["Y", "A"], ["A", "D"]])
+    check("[page] I8 · a failed re-ask keeps the old answer and puts the error right after it",
+          got["failed"], [8, [q[0], q[1], q[1]], 0, 1])
+    check("[page] I8 · its Retry is paid and re-sends the same re-ask, never a new question",
+          [got["retry_label"].startswith("Retry · ≈"), got["retry"]],
+          [True, [[{"answer_id": "f2", "mode": "as_typed"}] * 2, 0]])
+    check("[page] I8 · Remove on each turn, labelled for a screen reader",
+          got["removes"], [["Remove", "Remove this turn"]] * 7)
+    check("[page] I8 · Remove: one hide_turn, the turn leaves, a 5 s toast with no Undo",
+          got["removed"], [[{"answer_id": "f3"}], 6, -1, "Removed from this conversation",
+                           0, 5000])
+    check("[page] I8 · a refused Remove says why and re-reads nothing",
+          got["remove_404"], ["Not removed · no such answer: 'f9'", 0])
+    check("[page] I8 · Remove with nothing answering says the app isn't running",
+          got["remove_down"], "The app isn't running. Click the News Intelligence icon.")
+    check("[page] I8 · 'Ask in this story instead' on every unscoped answer while a story "
+          "is open, not on the scoped one", got["in_story"], [1, 1, 0, 1, 1, 1, 1])
+    check("[page] I8 · 'Ask all papers instead' re-asks in place with all papers; the pane's "
+          "scope chip stays", got["all_papers"],
+          [[{"answer_id": "f3", "scope": {"story_id": None, "text_hashes": [],
+                                          "filters": {}}}], 0, "s_open"])
+    check("[page] I8 · 'Ask in this story instead' re-asks with the open story",
+          got["this_story"], [{"answer_id": "f2", "scope": {"story_id": "s_open",
+                                                            "text_hashes": ["h_o1"],
+                                                            "filters": {}}}])
+    check("[page] I8 · flag off: no line, action, Remove, story button or group heading",
+          got["off_classes"], [])
+    check("[page] I8 · flag off: every button pressed and both functions called, and "
+          "nothing reaches reask or hide_turn", [got["off_pressed"] > 20, got["off_calls"][:2]],
+          [True, [0, 0]])
+    check("[page] I8 · flag off: 'Ask all papers instead' asks anew, as before",
+          got["off_all"], [1, 0])
+    I8_COUNTS.append(got["off_pressed"])
+
+
+I8_COUNTS = []
+
+
+def i8_routes():
+    """I8 · /api/reask and /api/hide_turn through the ASGI app.
+
+    Pass lines, written before the run:
+    - On the stub: a re-ask streams results, a sentence and done; the new answer names
+      the one it replaces; the mode and the scope reach the data layer unchanged; an
+      unknown answer is 404 and an unknown mode 400, before any event; no answer_id is 400.
+    - hide_turn: 200 {hidden}; the turn is gone from /api/conversation, which still
+      carries every other answer's topic and search_query (they survive a reload); an
+      unknown answer is 404.
+    - On the real reader, while K3's final pass has not landed: both routes answer 501
+      naming K3, never 500. (Once it lands this is skipped, and says so.)
+    - The flag ships off.
+    """
+    import p3_app as A
+    check("[page] I8 · followup_rewrite ships off until K3's final pass",
+          A.FLAGS["followup_rewrite"], False)
+    A.data = S
+    S.reset()
+    status, _h, raw = _http("POST", "/api/reask", b"",
+                            json.dumps({"answer_id": "f2", "mode": "as_typed"}).encode())
+    events = [json.loads(line) for line in raw.decode().splitlines() if line]
+    check("[fixture] I8 · /api/reask streams results, a sentence, done",
+          [status, [e["type"] for e in events]], [200, ["results", "sentence", "done"]])
+    check("[fixture] I8 · the new answer names the one it replaces",
+          events[-1]["answer"]["replaces_answer_id"], "f2")
+    scope = {"story_id": None, "text_hashes": [], "filters": {}}
+    _http("POST", "/api/reask", b"", json.dumps({"answer_id": "f3", "scope": scope}).encode())
+    check("[fixture] I8 · mode and scope reach the data layer unchanged",
+          list(S.CALLS), [("reask", "f2", "as_typed", None), ("reask", "f3", None, scope)])
+    status, body = _post("/api/reask", {"answer_id": "f99", "mode": "carry"})
+    check("[fixture] I8 · an unknown answer is 404", [status, body["detail"]],
+          [404, "no such answer: 'f99'"])
+    status, body = _post("/api/reask", {"answer_id": "f2", "mode": "twice"})
+    check("[fixture] I8 · an unknown mode is 400", [status, body["detail"]],
+          [400, "unknown mode: 'twice'"])
+    status, _b = _post("/api/reask", {"mode": "carry"})
+    check("[fixture] I8 · no answer_id is 400", status, 400)
+    status, body = _post("/api/hide_turn", {"answer_id": "f3"})
+    check("[fixture] I8 · hide_turn answers what it hid", [status, body], [200, {"hidden": "f3"}])
+    status, _h, raw = _get("/api/conversation")
+    turns = [t["answer"] for t in json.loads(raw)["turns"]]
+    check("[fixture] I8 · the hidden turn is gone from the conversation",
+          [a["answer_id"] for a in turns], ["f1", "f2", "f4", "f5", "f6", "f7"])
+    check("[fixture] I8 · topic and search_query come back with the conversation",
+          [[a.get("topic"), a["search_query"]] for a in turns if a["answer_id"] in ("f2", "f4")],
+          [["follow_up", "EPFO pension payout change unions reaction"],
+           ["two_searches", ["GST rate cut", "RBI repo decision"]]])
+    status, _b = _post("/api/hide_turn", {"answer_id": "f99"})
+    check("[fixture] I8 · hiding an unknown answer is 404", status, 404)
+    S.reset()
+    A.data = R
+    if hasattr(R, "reask") or hasattr(R, "hide_turn"):
+        skip("I8 · the real reader answers 501", "K3's reask / hide_turn exist now: flip "
+             "followup_rewrite and run the follow-up checks on the real reader")
+        return
+    a, body_a = _post("/api/reask", {"answer_id": "x", "mode": "carry"})
+    b, body_b = _post("/api/hide_turn", {"answer_id": "x"})
+    check("I8 · on the real reader, before K3's final pass, both routes say 501 naming K3",
+          [a, b, "K3's final pass" in body_a["detail"], "K3's final pass" in body_b["detail"]],
+          [501, 501, True, True])
+
+
 def one_page():
     """I4 · `/api/page` cuts ONE page out of an archive PDF, and refuses everything else.
 
@@ -4940,7 +5327,7 @@ def page_contract():
     # stay as handles only (the flag map's selectors, the suite's), as `background-button`
     # already was. `turn-q` needs nothing beyond `.turn-row`; `turn-a` styles its marker.
     HOOKS = {"reset", "background-button", "think-harder", "ask-all-papers", "cap-allow",
-             "turn-q"}
+             "turn-q", "ask-in-story"}
     check("[page] every class the page draws is styled", sorted(drawn - styled - HOOKS),
           [])
     check("[page] and the sweep really saw the whole page", len(drawn) > 140, True)
@@ -5043,7 +5430,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, i8_page, i8_routes, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -5058,6 +5445,8 @@ def main():
     print(f"search ran with {'/'.join(SEARCH_MODE) or 'unknown'}: results that depend on "
           f"meaning search (verdicts, suggestions) were seen in this mode")
     print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
+    for n in I8_COUNTS:
+        print(f"I8 flag off: {n} pane buttons pressed, none reached reask or hide_turn")
     for was, now, cites, n in CHIPS_RELOAD:
         print(f"I5 chips after a reload, {n} stored answers: {was}/{cites} cites resolved "
               f"before the passage sets, {now}/{cites} after")

@@ -179,6 +179,7 @@ const api = {
     postJSON('/api/conversation/divider', { conversation_id: conversationId,
                                             story_id: storyId, headline: headline }),
   background: (answerId) => postOrError('/api/background', { answer_id: answerId }),
+  hideTurn: (answerId) => postOrError('/api/hide_turn', { answer_id: answerId }),
   suggest: (storyId, hashes) =>
     postOrError('/api/suggest', { story_id: storyId, text_hashes: hashes }),
   raiseCap: () => postJSON('/api/cap/raise', {}),
@@ -816,7 +817,7 @@ function fillPinMenu(menu, itemType, what, close, after) {
 const UNDO_SECONDS = 6;     /* long enough to notice the toast, short enough to ignore */
 let toastTimer = null;
 
-function toast(text, undo) {
+function toast(text, undo, seconds) {
   const node = document.getElementById('toast');
   clear(node);
   node.append(el('span', { text: text }));
@@ -826,7 +827,7 @@ function toast(text, undo) {
   }
   node.hidden = false;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(hideToast, UNDO_SECONDS * 1000);
+  toastTimer = setTimeout(hideToast, (seconds || UNDO_SECONDS) * 1000);
 }
 
 function hideToast() {
@@ -1739,6 +1740,7 @@ const FLAG_ELEMENTS = {
      takes it out of the layout, which is what "no empty gap" asks for */
   cost_display: '#cost-header:not([hidden])',
   agency_copy: '.agency-copy',
+  followup_rewrite: '.topic-line, .turn-remove, .ask-in-story, .result-group',
 };
 
 
@@ -2066,7 +2068,19 @@ function resultsList(answerId, result, answer) {
   }
   head.append(switcher);
   section.append(head);
-  for (const story of shown) section.append(resultRow(story, answer));
+  const groups = resultGroups(result, answer);
+  if (groups) {
+    for (const group of groups) {
+      if (group.query) {
+        section.append(el('p', { class: 'block-label result-group',
+                                 text: 'For ' + group.query + ' · '
+                                       + count(group.total, 'story') }));
+      }
+      for (const story of group.shown) section.append(resultRow(story, answer));
+    }
+  } else {
+    for (const story of shown) section.append(resultRow(story, answer));
+  }
 
   if (result.total_stories > shown.length) {
     section.append(paneButton('free', {
@@ -2074,6 +2088,29 @@ function resultsList(answerId, result, answer) {
     }, 'Show all ' + result.total_stories + ' in Explore'));
   }
   return section;
+}
+
+/* I8 · a question about two things was searched twice (`topic: "two_searches"`), and
+   each row says which search found it (`group`). The rows are drawn under one heading
+   per search, in the order of `search_query`, then any search a row names that it does
+   not. N counts the rows the answer holds for that search (a stored answer keeps the
+   rows the pane showed plus every cited story, D12), not every hit. The pane still shows
+   PANE_RESULTS_SHOWN rows in all. Flag off, or no row grouped: null, the plain list. */
+function resultGroups(result, answer) {
+  if (!S.flags.followup_rewrite) return null;
+  const stories = (result && result.stories) || [];
+  if (!stories.some((s) => s.group)) return null;
+  const order = Array.isArray(answer && answer.search_query) ? answer.search_query.slice() : [];
+  for (const s of stories) if (s.group && order.indexOf(s.group) < 0) order.push(s.group);
+  const shown = stories.slice(0, PANE_RESULTS_SHOWN);
+  const groups = order.map((query) => ({
+    query: query,
+    total: stories.filter((s) => s.group === query).length,
+    shown: shown.filter((s) => s.group === query),
+  })).filter((g) => g.total);
+  const loose = shown.filter((s) => !s.group);
+  if (loose.length) groups.push({ query: null, total: loose.length, shown: loose });
+  return groups;
 }
 
 async function resortResults(answerId, sort, from) {
@@ -2232,8 +2269,21 @@ function actionsRow(answer) {
      answer there is nothing to widen to. */
   if ((none || answer.verdict === 'thin') && scopeIsNarrowed(answer.scope)) {
     row.append(paneButton('free', { class: 'ask-all-papers',
-      onclick: () => askAllPapers(answer.question),
+      onclick: () => (S.flags.followup_rewrite
+        /* A Think harder answer has no question of its own: its parent is re-asked. */
+        ? reaskInPlace(answer.parent_answer_id || answer.answer_id, { scope: ALL_SCOPE })
+        : askAllPapers(answer.question)),
     }, 'Ask all papers instead'));
+  }
+
+  /* I8 · the other way: asked of all papers while a story is open. Flag only. */
+  if (S.flags.followup_rewrite && !answer.parent_answer_id
+      && !(answer.scope || {}).story_id && S.scope.story_id) {
+    row.append(paneButton('free', { class: 'ask-in-story',
+      onclick: () => reaskInPlace(answer.answer_id, { scope: {
+        story_id: S.scope.story_id, text_hashes: S.scope.text_hashes || [],
+        filters: (answer.scope || {}).filters || {} } }),
+    }, 'Ask in this story instead'));
   }
 
   row.append(answerPinButton(answer));
@@ -2279,6 +2329,8 @@ function answerTurn(answer, opts) {
   const o = opts || {};
   const byHash = paneHashes();
   const block = el('div', { class: 'pane-turn' });
+  const remove = removeButton(answer);
+  if (remove) block.append(remove);
   if (!o.noQuestion) block.append(questionRow(answer.question));
   const body = el('div', { class: 'turn-body' });
   block.append(turnRow('A', body));
@@ -2328,6 +2380,8 @@ function answerTurn(answer, opts) {
 
   const back = backgroundBlock(answer);
   if (back) body.append(back);
+  const topic = topicLine(answer, o.first);
+  if (topic) body.append(topic);
   body.append(answerInfo(answer));
   body.append(actionsRow(answer));
   const refused = S.backgroundError[answer.answer_id];
@@ -2435,7 +2489,8 @@ function liveTurn() {
       el('p', { class: 'error-first', text: words.first }),
       el('p', { class: 'error-hint', text: words.hint }));
     if (words.retry) {
-      box.append(paneButton('paid', { onclick: () => askNow(live.question) },
+      box.append(paneButton('paid', {
+        onclick: () => (live.retry ? live.retry() : askNow(live.question)) },
                             'Retry · ', costTag(S.estimates.ask)));
     }
     body.append(box);
@@ -2457,6 +2512,15 @@ function liveTurn() {
   return block;
 }
 
+function takeLiveEvent(event) {
+  if (!S.live) return;
+  if (event.type === 'results') { S.live.results = event.search; }
+  else if (event.type === 'sentence') { S.live.sentences.push(event); }
+  else if (event.type === 'error') { S.live.error = event; }
+  else if (event.type === 'done') { S.live.answer = event.answer; }
+  renderAssistant();
+}
+
 async function askNow(question, options) {
   const o = options || {};
   if (!question || !question.trim()) return;
@@ -2474,14 +2538,7 @@ async function askNow(question, options) {
   await streamAnswer(o.url || '/api/ask',
                      o.body || { question: question, scope: scope,
                                  conversation_id: conversationId() },
-                     (event) => {
-    if (!S.live) return;
-    if (event.type === 'results') { S.live.results = event.search; }
-    else if (event.type === 'sentence') { S.live.sentences.push(event); }
-    else if (event.type === 'error') { S.live.error = event; }
-    else if (event.type === 'done') { S.live.answer = event.answer; }
-    renderAssistant();
-  });
+                     takeLiveEvent);
 
   const live = S.live;
   if (!keepLiveAfterStream(live)) S.live = null;
@@ -2558,6 +2615,139 @@ function showCapConfirm(actions) {
   actions.append(paneButton('free', { onclick: () => renderAssistant() }, 'Cancel'));
 }
 
+/* ======================================================= I8 · follow-ups (brief §4.5)
+
+   Behind flag `followup_rewrite`, off until K3's final pass (contract v2.4 §11.2) lands
+   `reask`, `hide_turn` and the answer's `topic`. Each answer after a conversation's first
+   says in one grey line what was done with it -- carried the earlier topic, searched it
+   alone, searched twice, searched once -- and offers the one opposite, which re-asks it
+   in place. `topic` missing or unknown: no line (§6 rule 6: nothing to say honestly). */
+
+const TOPIC_WORDS = {
+  follow_up: { said: (e) => 'Follow-up of your ' + e + ' question',
+               redone: (e) => 'Asked in the ' + e + ' topic',
+               act: () => 'Treat as new topic', mode: 'as_typed' },
+  new_topic: { said: () => 'New topic', redone: () => 'Asked as a new topic',
+               act: (e) => 'Ask in the ' + e + ' topic instead', mode: 'carry' },
+  two_searches: { said: () => 'Two searches', redone: () => 'Searched as two topics',
+                  act: () => 'Search as one question', mode: 'one_search' },
+  /* No mode asks for two searches; none at all hands the choice back to the rewriter,
+     which is what "and back" can honestly promise (T-35). */
+  one_search: { said: () => 'One search', redone: () => 'Searched as one question',
+                act: () => 'Search as two topics', mode: null },
+};
+
+const EARLIER_WORDS = 4;
+const ALL_SCOPE = { story_id: null, text_hashes: [], filters: {} };
+const TURN_REMOVED = 'Removed from this conversation';
+const REMOVE_TOAST_SECONDS = 5;
+
+/* "[earlier]": the earlier question, cut to its first four words, in quotes so it reads
+   as the reader's own words inside the sentence. No question found: the word "earlier". */
+function earlierWords(question) {
+  const words = String(question || '').replace(/[?.!\s]+$/, '').split(/\s+/).filter(Boolean);
+  if (!words.length) return 'earlier';
+  const cut = words.slice(0, EARLIER_WORDS).join(' ');
+  return '“' + cut + (words.length > EARLIER_WORDS ? '…' : '') + '”';
+}
+
+/* The question whose topic was carried (`carried_from`), or, with none named or that
+   one gone, the answer just before this one: the topic a carry would take. If that one
+   was itself a follow-up, its own topic's question names the topic better ("the EPFO
+   topic", not "the and-what-did-the-unions-say topic"). */
+function earlierQuestion(answer) {
+  const carried = answer.carried_from ? answerById(answer.carried_from) : null;
+  if (carried) return carried.question;
+  let before = null;
+  for (const turn of ((S.conversation && S.conversation.turns) || [])) {
+    if (turn.kind !== 'answer') continue;
+    if (turn.answer.answer_id === answer.answer_id) break;
+    if (!turn.answer.parent_answer_id) before = turn.answer;
+  }
+  const root = before && before.carried_from ? answerById(before.carried_from) : null;
+  return (root || before || {}).question || null;
+}
+
+function topicLine(answer, first) {
+  if (!S.flags.followup_rewrite || first || answer.parent_answer_id) return null;
+  const words = TOPIC_WORDS[answer.topic];
+  if (!words) return null;
+  const earlier = earlierWords(earlierQuestion(answer));
+  return el('p', { class: 'topic-line' },
+    (answer.replaces_answer_id ? words.redone(earlier) : words.said(earlier)) + ' · ',
+    el('button', { class: 'reset topic-act', type: 'button',
+                   onclick: () => reaskInPlace(answer.answer_id, { mode: words.mode }) },
+       words.act(earlier)));
+}
+
+/* The order the pane draws: an answer that names the one it replaces takes that one's
+   place (contract: same position), whatever order the conversation lists them in, and a
+   chain of re-asks ends at the newest. With K3 hiding the old turn this changes nothing;
+   it is the page's own guard for "same position". */
+function paneTurns(conversation) {
+  const turns = (conversation && conversation.turns) || [];
+  const ids = new Set(turns.filter((t) => t.kind === 'answer').map((t) => t.answer.answer_id));
+  const by = {};
+  for (const t of turns) {
+    const old = t.kind === 'answer' && t.answer.replaces_answer_id;
+    if (old && ids.has(old)) by[old] = t;
+  }
+  const out = [];
+  for (const t of turns) {
+    if (t.kind !== 'answer') { out.push(t); continue; }
+    if (ids.has(t.answer.replaces_answer_id)) continue;
+    let shown = t;
+    const seen = new Set();
+    while (by[shown.answer.answer_id] && !seen.has(shown)) {
+      seen.add(shown);
+      shown = by[shown.answer.answer_id];
+    }
+    out.push(shown);
+  }
+  return out;
+}
+
+/* Re-ask in place: the same stream as a question, drawn where the answer was. One at a
+   time, so a second press cannot pay twice; a kept error from earlier does not block. */
+async function reaskInPlace(answerId, change) {
+  if (!S.flags.followup_rewrite) return;
+  if (S.live && !S.live.error) return;
+  const old = answerById(answerId);
+  S.live = { question: old ? old.question : '', sentences: [], results: null,
+             error: null, replaces: answerId,
+             retry: () => reaskInPlace(answerId, change) };
+  renderAssistant();
+  await streamAnswer('/api/reask', Object.assign({ answer_id: answerId }, change),
+                     takeLiveEvent);
+  const live = S.live;
+  if (!keepLiveAfterStream(live)) S.live = null;
+  if (live && live.answer && live.results) S.results[live.answer.answer_id] = live.results;
+  await refreshConversation();
+  S.cost = await api.cost();
+  renderAssistant();
+}
+
+/* Remove: shown on hover and on keyboard focus (CSS). The contract has no way to show a
+   hidden turn again, so the toast confirms and offers no Undo (T-36). */
+function removeButton(answer) {
+  if (!S.flags.followup_rewrite) return null;
+  return el('button', { class: 'reset turn-remove', type: 'button',
+                        'aria-label': 'Remove this turn',
+                        onclick: () => removeTurn(answer.answer_id) }, 'Remove');
+}
+
+async function removeTurn(answerId) {
+  if (!S.flags.followup_rewrite) return;
+  const got = await api.hideTurn(answerId);
+  if (got && got.error) {
+    toast(got.error.status === 0 ? NOT_RUNNING : 'Not removed · ' + got.error.message);
+    return;
+  }
+  await refreshConversation();
+  renderAssistant();
+  toast(TURN_REMOVED, null, REMOVE_TOAST_SECONDS);
+}
+
 /* ------------------------------------------------------------------ the whole pane */
 
 function paneWidth() {
@@ -2623,22 +2813,34 @@ function renderAssistant() {
     body.append(el('p', { class: 'pane-divider',
                           text: 'Conversation from ' + S.reloadDivider }));
   }
-  for (const turn of ((S.conversation && S.conversation.turns) || [])) {
+  /* I8 · a re-ask streams where its answer was: the old answer gives way to the live
+     turn, or, if the re-ask failed, stays and the error follows it. */
+  const inPlace = S.live && S.live.replaces;
+  let placed = false;
+  let firstSeen = false;
+  for (const turn of paneTurns(S.conversation)) {
     if (turn.kind === 'divider') {
       body.append(el('p', { class: 'pane-divider ask-divider',
                             text: 'Now asking about · ' + turn.headline }));
     } else if (turn.kind === 'answer') {
       const answer = turn.answer;
+      const here = inPlace && answer.answer_id === inPlace;
+      if (here) placed = true;
       if (answer.parent_answer_id) {
         body.append(el('p', { class: 'block-label sonnet-label',
                               text: sonnetLabel(answer) }));
         body.append(answerTurn(answer, { noQuestion: true, noResults: true }));
       } else {
-        body.append(answerTurn(answer, { folded: Boolean(S.folded[answer.answer_id]) }));
+        if (!here || S.live.error) {
+          body.append(answerTurn(answer, { folded: Boolean(S.folded[answer.answer_id]),
+                                           first: !firstSeen }));
+        }
+        firstSeen = true;
+        if (here) { const live = liveTurn(); if (live) body.append(live); }
       }
     }
   }
-  const live = liveTurn();
+  const live = placed ? null : liveTurn();
   if (live) body.append(live);
   shell.append(body);
 
@@ -3595,6 +3797,9 @@ const EXPORTS = {
   scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
   actionsRow, askAllPapers, paneButton, PANE_BUTTON, answerInfo, turnRow, questionRow,
   showCapConfirm,
+  TOPIC_WORDS, EARLIER_WORDS, ALL_SCOPE, TURN_REMOVED, REMOVE_TOAST_SECONDS, earlierWords,
+  earlierQuestion, topicLine, paneTurns, reaskInPlace, removeButton, removeTurn,
+  resultGroups, takeLiveEvent, toast,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */

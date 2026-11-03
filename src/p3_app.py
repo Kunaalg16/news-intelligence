@@ -123,6 +123,13 @@ FLAGS = {
     "suggest_connections": True,   # the Suggest connections button and its box
     "user_links": True,            # off hides the + icon AND the user thread entries
     "explore": True,               # the EXPLORE nav item and its screen
+
+    # --- K1 integration, brief §4.5 ------------------------------------------
+    # The grey "what was done" line after an answer with its one correction, re-ask in
+    # place, the scope undo and Remove. OFF until K3's final pass lands `reask`,
+    # `hide_turn` and the answer's `topic`; until then /api/reask and /api/hide_turn
+    # answer 501. The Q/A turn layout does not hang on it (brief: always).
+    "followup_rewrite": False,
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,
@@ -690,6 +697,41 @@ def think_harder(payload: dict = Body(...)):
         events = data.think_harder(answer_id)
         first = next(events)
     return _stream(itertools.chain([first], events))
+
+
+def _not_built(name):
+    """(I8) K3's final pass adds `reask` and `hide_turn`; until it lands the data layer has
+    neither, and the route says so as a 501 rather than a 500 from an AttributeError."""
+    fn = getattr(data, name, None)
+    if fn is None:
+        raise HTTPException(status_code=501,
+                            detail=f"{name} is not built yet: it waits on K3's final pass")
+    return fn
+
+
+@app.post("/api/reask")
+def reask(payload: dict = Body(...)):
+    """(I8) Ask an answer's question again, in its place: another topic `mode`
+    (`as_typed` / `carry` / `one_search`, or none to let the assistant decide) or another
+    `scope`. Same stream as /api/ask; the data layer hides the old turn. An unknown answer
+    is a 404 and a mode it refuses a 400, both raised before the first event."""
+    (answer_id,) = _need(payload, "answer_id")
+    run = _not_built("reask")
+    with _mapped():
+        events = run(answer_id, mode=payload.get("mode"), scope=payload.get("scope"))
+        first = next(events)
+    return _stream(itertools.chain([first], events))
+
+
+@app.post("/api/hide_turn")
+def hide_turn(payload: dict = Body(...)):
+    """(I8) Take one answer out of the conversation and out of the model's memory. The
+    row stays in intel.db, marked hidden; the contract has no way back (no Undo)."""
+    (answer_id,) = _need(payload, "answer_id")
+    run = _not_built("hide_turn")
+    with _mapped():
+        run(answer_id)
+    return {"hidden": answer_id}
 
 
 @app.post("/api/background")
