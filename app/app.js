@@ -900,8 +900,7 @@ function viewsLine(story) {
       const opener = match
         ? el('button', { class: 'reset link-like', type: 'button',
                          onclick: () => openArticle(match.text_hash) }, v.headline)
-        : el('a', { href: pdfHref(v.page_link), target: '_blank',
-                    rel: 'noopener' }, v.headline);
+        : pageLink(v.page_link, v.headline);
       return el('li', {}, label + ' — ', opener);
     })));
 }
@@ -922,6 +921,41 @@ function pdfHref(link) {
   const bits = link.pdf.split('/');            /* archive/<date>/<file> */
   return '/pdf/' + encodeURIComponent(bits[1]) + '/' + encodeURIComponent(bits[2])
          + '#page=' + link.pdf_page;
+}
+
+/* I4 (integration brief §4.2) — a page link opens THAT page: the server cuts the one
+   page out of the paper (`/api/page`), so the reader is not left scrolling a 22-page PDF
+   that a viewer may or may not open at `#page=N`. The whole paper stays one small link
+   away, beside it. The label is unchanged ("TH PDF p2"). */
+function onePageHref(link) {
+  if (!link || !link.pdf || !link.pdf_page) return '#';
+  return '/api/page?pdf=' + encodeURIComponent(link.pdf)
+         + '&page=' + encodeURIComponent(link.pdf_page);
+}
+
+function pageLink(link, text) {
+  if (!link || !link.pdf) return text || null;
+  return el('span', { class: 'page-link' },
+    el('a', { href: onePageHref(link), target: '_blank', rel: 'noopener' }, text),
+    ' ',
+    el('a', { class: 'whole-paper', href: pdfHref(link), target: '_blank', rel: 'noopener',
+              'aria-label': 'Whole paper at ' + text }, 'whole paper'));
+}
+
+/* `page_links_more` (contract R5): the 0-2 other pages the same printed piece runs on,
+   already in reading order, each with its reason. A reason this page does not know is
+   still shown, as "also on pN", rather than dropped (brief §6 rule 6). */
+const MORE_WORDS = { joined_from: 'joined from p', continues_to: 'continues on p' };
+
+function moreLinks(row) {
+  const out = [];
+  for (const link of ((row && row.page_links_more) || [])) {
+    if (!link || !link.pdf || !link.pdf_page) continue;
+    out.push(' · ', el('a', { class: 'page-more', href: onePageHref(link), target: '_blank',
+                              rel: 'noopener' },
+                       (MORE_WORDS[link.reason] || 'also on p') + link.pdf_page));
+  }
+  return out;
 }
 
 /* Q1 B (Kunaal, 2 Nov) — the printed "see also" pointers, one muted line above Coverage.
@@ -997,8 +1031,7 @@ function seeAlso(story) {
   const bits = [];
   plan.pages.forEach((page, i) => {
     if (i) bits.push(' · ');
-    bits.push(el('a', { href: pdfHref(page.link), target: '_blank', rel: 'noopener' },
-                 page.text));
+    bits.push(pageLink(page.link, page.text));
   });
   if (plan.tail) {
     bits.push(' · ');
@@ -1021,8 +1054,8 @@ function coverage(story) {
       el('td', {}, newHashes.has(r.text_hash)
           ? el('span', { class: 'row-new-dot', title: 'New since you read it',
                          text: '● ' }) : null, r.paper),
-      el('td', {}, el('a', { href: pdfHref(r.page_link), target: '_blank',
-                             rel: 'noopener' }, r.page_link ? r.page_link.label : '')),
+      el('td', {}, pageLink(r.page_link, r.page_link ? r.page_link.label : ''),
+         moreLinks(r)),
       el('td', { text: r.words === null || r.words === undefined ? '' : String(r.words) }),
       el('td', { text: r.kind || '' }),
       el('td', { text: r.byline || '' })))));
@@ -1158,11 +1191,9 @@ function timelineView(thread) {
       el('div', { class: 'entry-body' },
         el('p', { class: 'entry-papers' },
           word ? el('span', { class: 'entry-kind', text: word + ' · ' }) : null,
-          count(entry.articles, 'article')
-            + (entry.pages && entry.pages.length
-                ? ' · ' + entry.pages.map((p) => paperCode(p.paper) + ' p'
-                    + p.pdf_page).join(' · ')
-                : '')),
+          count(entry.articles, 'article'),
+          (entry.pages || []).flatMap((p) => [' · ',
+            pageLink(p, paperCode(p.paper) + ' p' + p.pdf_page)])),
         el('h4', { class: 'entry-headline' },
           entry.link_type === 'user'
             ? el('span', { class: 'added-by-you', text: 'Added by you' }) : null,
@@ -1351,14 +1382,23 @@ async function openArticle(textHash) {
   pane.append(el('p', { class: 'article-meta' }, bits,
     article.byline ? ' · ' + article.byline : ''));
 
-  pane.append(el('div', { class: 'article-body' },
-    (article.paragraphs || []).map((p) => el('p', { text: p }))));
+  pane.append(articleBody(article));
 
   pane.append(el('p', { class: 'article-actions' },
-    el('a', { href: pdfHref(article.page_link), target: '_blank', rel: 'noopener' },
-      'Open page'),
+    pageLink(article.page_link, 'Open page'),
     articlePinButton(article)));
   pane.scrollTop = 0;
+}
+
+/* I4 · the `dateline` ("New Delhi:") leads the first paragraph, once. The server has
+   already taken it off the front of the body where the body began with it. */
+function articleBody(article) {
+  const paras = (article.paragraphs || []).slice();
+  const lead = article.dateline
+    ? el('span', { class: 'dateline', text: article.dateline }) : null;
+  return el('div', { class: 'article-body' },
+    lead && !paras.length ? el('p', {}, lead) : null,
+    paras.map((p, i) => el('p', {}, i === 0 && lead ? [lead, ' '] : null, p)));
 }
 
 /* Scrolling to a day of the thread is A5; until then the chip is inert but real. */
@@ -2787,10 +2827,10 @@ function exploreRow(story, article) {
         onclick: () => (article ? openArticle(best.text_hash)
                                 : openStory(story.story_id)),
       }, el('h4', { text: article ? best.headline : story.headline })),
-      best ? el('p', { class: 'explore-best',
-                       text: paperCode(best.paper) + ' '
-                             + (best.page_link ? best.page_link.label : '')
-                             + ' · ' + best.snippet }) : null,
+      best ? el('p', { class: 'explore-best' },
+                paperCode(best.paper) + ' ',
+                pageLink(best.page_link, best.page_link ? best.page_link.label : ''),
+                ' · ' + best.snippet) : null,
       el('p', { class: 'explore-meta',
                 text: dateShort(article ? best.date : when) + ' · '
                       + count(story.papers, 'paper') + ' · '
@@ -3250,7 +3290,8 @@ async function boot() {
 */
 const EXPORTS = {
   windowText, paperCode, money, count, timeOfDay, dateWithDay, dateShort, dayName,
-  paperFromPdf, seeAlsoPlan,
+  paperFromPdf, seeAlsoPlan, pdfHref, onePageHref, pageLink, moreLinks, MORE_WORDS,
+  articleBody, coverage, viewsLine,
   moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,

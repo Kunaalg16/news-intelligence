@@ -492,6 +492,12 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .coverage-table td:first-child { color: var(--ink); white-space: nowrap; }
 .row-new-dot { color: var(--red); font-size: var(--s14); line-height: 1; }
 
+/* I4 · a page link opens that one page; "whole paper" beside it is the full PDF at that
+   page, small and muted, because it is the second choice. */
+.page-link { white-space: nowrap; }
+.whole-paper { font-size: var(--s11); color: var(--text-muted); }
+.page-more { white-space: nowrap; color: var(--text-secondary); }
+
 .page-footer {
   margin: 28px 0 0;
   padding-top: 12px;
@@ -509,6 +515,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .article-meta { margin: 0 0 18px; font-size: var(--s125); color: var(--text-muted); }
 .article-body p { margin: 0 0 16px; font-family: var(--serif); font-size: var(--s19);
                   line-height: 1.62; }
+.dateline { font-weight: 600; }
 
 /* A button that reads as a link: used where the thing opened is a view in this pane,
    not a page of its own, so an <a href> would be a lie about what happens. */

@@ -138,6 +138,7 @@ import re
 import shutil
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1205,9 +1206,10 @@ APP.S.seeAlsoOpen = {};
 function seeAlsoNode() { return APP.seeAlso(manyOnOnePage); }
 function seeAlsoControls() { return controlsOf(seeAlsoNode()); }
 
-eq("[page] D1 · the line still names the printed page it points at, as a real link",
+eq("[page] D1 · the line still names the printed page it points at, as a real link "
+   + "(I4: that one page, with the whole paper beside it)",
    seeAlsoControls().filter(function (c) { return c.tag === "A"; })
-     .map(function (c) { return c.label; }), ["TH PDF p1"]);
+     .map(function (c) { return c.label; }), ["TH PDF p1", "whole paper"]);
 eq("[page] D1 · and the count is a button, not a tooltip",
    seeAlsoControls().filter(function (c) { return c.tag === "BUTTON"; })
      .map(function (c) { return c.label; }), ["3 stories on the same page"]);
@@ -1225,7 +1227,7 @@ eq("[page] D1 · open, all three headlines are there, one per line",
      return textOf(seeAlsoNode()).indexOf("Headline " + i) < 0; }), []);
 eq("[page] D1 · each as plain text, so no new link is offered for a story that "
    + "cannot be opened yet",
-   seeAlsoControls().filter(function (c) { return c.tag === "A"; }).length, 1);
+   seeAlsoControls().filter(function (c) { return c.tag === "A"; }).length, 2);
 eq("[page] D1 · and aria-expanded is now true",
    attrsOf(seeAlsoNode(), "aria-expanded"), ["true"]);
 eq("[page] D1 · the headlines are a block of their own, under the line",
@@ -2155,7 +2157,7 @@ eq("[page] §8.5 · and Stories keeps one row per story",
 
 var storyRow = APP.exploreRow(exResult.stories[0], null);
 eq("[page] §8.5 · a row names its best article's page and snippet",
-   textOf(storyRow).indexOf("Mint PDF p3 · First article") > 0, true);
+   textOf(storyRow).indexOf("Mint PDF p3 whole paper · First article") > 0, true);
 eq("[page] §8.5 · and the day, the papers and how many matched",
    textOf(storyRow).indexOf("11 Oct · 2 papers · 2 matching articles") > 0, true);
 eq("[page] §8.5 · with a checkbox that says what it chooses",
@@ -2234,6 +2236,65 @@ PS.facets = null;
 // that silently hides nothing (acceptance check 7)
 eq("every flag names the element it removes",
    Object.keys(APP.FLAG_ELEMENTS).sort(), FLAGS_FROM_SERVER.sort());
+
+// I4 · page links open that one page; the whole paper sits beside it
+var i4link = {pdf: "archive/2026-11-03/2026-11-03_The Hindu.pdf", pdf_page: 3,
+              label: "PDF p3", paper: "The Hindu"};
+eq("[page] I4 · a page link asks the server for that one page",
+   APP.onePageHref(i4link),
+   "/api/page?pdf=archive%2F2026-11-03%2F2026-11-03_The%20Hindu.pdf&page=3");
+var i4node = APP.pageLink(i4link, "TH PDF p3");
+eq("[page] I4 · it draws the one-page link, then 'whole paper', both in a new tab",
+   controlsOf(i4node).map(function (c) { return [c.label, c.href]; }),
+   [["TH PDF p3", APP.onePageHref(i4link)],
+    ["whole paper", "/pdf/2026-11-03/2026-11-03_The%20Hindu.pdf#page=3"]]);
+eq("[page] I4 · and both open in a new tab",
+   attrsOf(i4node, "target"), ["_blank", "_blank"]);
+eq("[page] I4 · the label is unchanged: the PDF page number",
+   textOf(i4node), "TH PDF p3 whole paper");
+eq("[page] I4 · no link at all leaves the label as plain text, not a dead link",
+   APP.pageLink(null, "PDF p2"), "PDF p2");
+eq("[page] I4 · page_links_more shows each extra page with its reason, in the given order",
+   APP.moreLinks({page_links_more: [
+     {pdf: "archive/d/x.pdf", pdf_page: 4, label: "PDF p4", reason: "joined_from"},
+     {pdf: "archive/d/x.pdf", pdf_page: 9, label: "PDF p9", reason: "continues_to"}]})
+     .filter(function (n) { return typeof n !== "string"; }).map(textOf),
+   ["joined from p4", "continues on p9"]);
+eq("[page] I4 · each extra opens its own one page",
+   APP.moreLinks({page_links_more: [
+     {pdf: "archive/d/x.pdf", pdf_page: 9, label: "PDF p9", reason: "continues_to"}]})
+     .filter(function (n) { return typeof n !== "string"; })
+     .map(function (n) { return n.attrs.href; }),
+   ["/api/page?pdf=archive%2Fd%2Fx.pdf&page=9"]);
+eq("[page] I4 · a reason the page does not know is still shown, honestly",
+   APP.moreLinks({page_links_more: [{pdf: "archive/d/x.pdf", pdf_page: 7,
+                                     reason: "somewhere_else"}]})
+     .filter(function (n) { return typeof n !== "string"; }).map(textOf),
+   ["also on p7"]);
+eq("[page] I4 · a row with none (every stored digest today) adds nothing",
+   [APP.moreLinks({}), APP.moreLinks({page_links_more: []})], [[], []]);
+APP.S.newSince = APP.S.newSince || {};
+var i4cov = APP.coverage({story_id: "i4", coverage: {articles: 1, papers: 1, rows: [
+  {text_hash: "h", paper: "The Hindu", words: 400, kind: "news", byline: "",
+   page_link: {pdf: "archive/d/x.pdf", pdf_page: 5, label: "PDF p5"},
+   page_links_more: [{pdf: "archive/d/x.pdf", pdf_page: 4, reason: "joined_from"},
+                     {pdf: "archive/d/x.pdf", pdf_page: 9, reason: "continues_to"}]}]}});
+eq("[page] I4 · a coverage row: its page, the whole paper, then the extras in order",
+   controlsOf(i4cov).filter(function (c) { return c.tag === "A"; })
+     .map(function (c) { return c.label; }),
+   ["PDF p5", "whole paper", "joined from p4", "continues on p9"]);
+var i4body = APP.articleBody({dateline: "Bengaluru:",
+                              paragraphs: ["TCS's revenue rose.", "Second."]});
+eq("[page] I4 · the dateline leads the first paragraph, once",
+   nodesOf(i4body, "p").map(textOf), ["Bengaluru: TCS's revenue rose.", "Second."]);
+eq("[page] I4 · and is marked as a dateline",
+   classesOf(i4body).filter(function (c) { return c === "dateline"; }).length, 1);
+eq("[page] I4 · no dateline leaves the body as it was",
+   nodesOf(APP.articleBody({dateline: null, paragraphs: ["A.", "B."]}), "p").map(textOf),
+   ["A.", "B."]);
+eq("[page] I4 · a dateline with no body is still shown",
+   nodesOf(APP.articleBody({dateline: "Mumbai:", paragraphs: []}), "p").map(textOf),
+   ["Mumbai:"]);
 
 /* The names of the passing checks travel back too, not only the failures: the report
    counts how many checks are `behaviour` (K3 must pass them) and how many are
@@ -3951,6 +4012,174 @@ def asgi():
               [status, len(json.loads(b"".join(chunks))["flags"])], [200, 19])
 
 
+def _get(path, query=b""):
+    """One GET through the ASGI app (rule 2: a route function is not a request).
+    Returns (status, headers, body bytes)."""
+    import asyncio
+    import p3_app as A
+
+    async def go():
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "GET", "scheme": "http", "path": path,
+                 "raw_path": path.encode(), "query_string": query, "root_path": "",
+                 "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8765),
+                 "headers": [(b"host", b"127.0.0.1:8765")]}
+        sent, done = [], asyncio.Event()
+
+        async def receive():
+            if not sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await done.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                done.set()
+
+        await A.app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        return (start["status"], {k.decode(): v.decode() for k, v in start["headers"]},
+                b"".join(m.get("body", b"") for m in sent
+                         if m["type"] == "http.response.body"))
+    return asyncio.run(go())
+
+
+def one_page():
+    """I4 · `/api/page` cuts ONE page out of an archive PDF, and refuses everything else.
+
+    Pass lines, written before the run:
+    - A real page link from the live digest answers 200, application/pdf, a PDF of
+      exactly one page whose text is that page's text (not page 1's).
+    - Three real pages each answer in under 300 ms (else a cache is due; brief §4.2).
+    - Against a planted archive (a real 3-page PDF inside, a real PDF outside, a symlink
+      out): a `../` escape, an absolute path, the symlink, a non-PDF, a directory named
+      .pdf, page 0, a non-number and no path at all are 404 WITHOUT the PDF library
+      opening anything; a page past the end is 404 (that one needs the page count).
+    - The article route takes a leading dateline off the body, and only then.
+    What would pass while broken: a route that returns the WHOLE file passes the 200
+    check -- guarded by the one-page count and the text match; a guard that opens the
+    file first and refuses after passes every 404 -- guarded by the open counter.
+    """
+    import time
+    import pymupdf
+    import p3_app as A
+
+    # --- real archive ----------------------------------------------------------
+    live = R.get_digest("latest")
+    links = [r["page_link"] for s in live["stories"] for r in s["coverage"]["rows"]
+             if r.get("page_link") and r["page_link"].get("pdf")]
+    picked = [links[0], links[len(links) // 2], links[-1]]
+    times, ok = [], []
+    for link in picked:
+        query = urllib.parse.urlencode({"pdf": link["pdf"], "page": link["pdf_page"]})
+        t = time.perf_counter()
+        status, headers, body = _get("/api/page", query.encode())
+        times.append((time.perf_counter() - t) * 1000)
+        with pymupdf.open(stream=body, filetype="pdf") as cut, \
+                pymupdf.open(ROOT / link["pdf"]) as whole:
+            ok.append([status, headers.get("content-type"), cut.page_count,
+                       cut[0].get_text() == whole[link["pdf_page"] - 1].get_text()])
+    check("I4 · three real page links each answer one PDF page, the page they name",
+          ok, [[200, "application/pdf", 1, True]] * 3)
+    PAGE_MS.extend(round(t) for t in times)
+    check("I4 · and each is cut in under 300 ms, so no cache is needed",
+          [t < 300 for t in times], [True] * 3)
+
+    # --- planted archive, hostile requests -------------------------------------
+    real_archive, real_lib = A.ARCHIVE, A.pymupdf
+    opened = []
+
+    class Counting:
+        """The PDF library, counting what the route opens."""
+        def __getattr__(self, name):
+            return getattr(pymupdf, name)
+
+        def open(self, *args, **kwargs):
+            if args:
+                opened.append(str(args[0]))
+            return pymupdf.open(*args, **kwargs)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            day = tmp / "archive" / "2026-10-09"
+            day.mkdir(parents=True)
+            with pymupdf.open() as doc:
+                for word in ("one", "two", "three"):
+                    doc.new_page().insert_text((72, 72), f"page {word}")
+                doc.save(day / "2026-10-09_Mint.pdf")
+                (tmp / "outside").mkdir()
+                doc.save(tmp / "outside" / "secret.pdf")
+            (day / "2026-10-09_Sneaky.pdf").symlink_to(tmp / "outside" / "secret.pdf")
+            (day / "notes.txt").write_text("not a pdf")
+            (day / "folder.pdf").mkdir()
+            A.ARCHIVE = tmp / "archive"
+            A.pymupdf = Counting()
+
+            def ask(pdf, page):
+                opened.clear()
+                status, _h, body = _get("/api/page", urllib.parse.urlencode(
+                    {k: v for k, v in (("pdf", pdf), ("page", page)) if v is not None}
+                ).encode())
+                return status, len(opened), body
+
+            good = "archive/2026-10-09/2026-10-09_Mint.pdf"
+            status, n, body = ask(good, "2")
+            with pymupdf.open(stream=body, filetype="pdf") as cut:
+                check("I4 guard · the legitimate page is served, and it is page 2",
+                      [status, cut.page_count, "page two" in cut[0].get_text()],
+                      [200, 1, True])
+            refused = {
+                "a ../ escape to a real PDF outside": (
+                    "archive/2026-10-09/../../outside/secret.pdf", "1"),
+                "an absolute path to it": (str(tmp / "outside" / "secret.pdf"), "1"),
+                "a symlink in the archive pointing out": (
+                    "archive/2026-10-09/2026-10-09_Sneaky.pdf", "1"),
+                "a file that is not a PDF": ("archive/2026-10-09/notes.txt", "1"),
+                "a directory named .pdf": ("archive/2026-10-09/folder.pdf", "1"),
+                "a PDF that is not there": ("archive/2026-10-09/2026-10-09_Nope.pdf", "1"),
+                "no path at all": (None, "1"),
+                "page 0": (good, "0"),
+                "a negative page": (good, "-1"),
+                "a page that is not a number": (good, "two"),
+                "a page with a decimal point": (good, "2.0"),
+                "no page at all": (good, None),
+            }
+            for what, (pdf, page) in refused.items():
+                status, n, _b = ask(pdf, page)
+                check(f"I4 guard · {what} is 404 and the file is never opened",
+                      [status, n], [404, 0])
+            status, n, _b = ask(good, "4")
+            check("I4 guard · a page past the end is 404 (the one case that must count "
+                  "the pages)", [status, n], [404, 1])
+    finally:
+        A.ARCHIVE, A.pymupdf = real_archive, real_lib
+
+    # --- the dateline, taken off the body only where the body starts with it ---
+    hashes = [r["text_hash"] for s in live["stories"] for r in s["coverage"]["rows"]]
+    datelined = [h for h in hashes if (R.article(h) or {}).get("dateline")]
+    check("I4 · the live digest has datelined articles to check against",
+          len(datelined) > 0, True)
+    wrong = []
+    for h in datelined:
+        raw = R.article(h)
+        served = A.article(h)
+        words = " ".join(served["paragraphs"]).split()
+        body = raw["body"].lstrip()
+        # By characters, not words: "Stockholm:US academics ..." has no space after it.
+        if body.startswith(raw["dateline"]):
+            body = body[len(raw["dateline"]):]
+        want = body.split()
+        if words != want:
+            wrong.append(h)
+    check("I4 · the served paragraphs are the body minus a leading dateline, every "
+          "other word kept", wrong, [])
+
+
+PAGE_MS = []
+
+
 def page_contract():
     """B8 · the page against the server, which the rest of this file cannot see.
 
@@ -4107,7 +4336,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, js_logic, contrast, markup, script_guard,
+                    v01_states, pdf_guard, one_page, js_logic, contrast, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -4121,6 +4350,7 @@ def main():
                     for t, v in tags.items()) + f"  untagged {untagged}")
     print(f"search ran with {'/'.join(SEARCH_MODE) or 'unknown'}: results that depend on "
           f"meaning search (verdicts, suggestions) were seen in this mode")
+    print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
     print(f"{len(SKIPS)} checks skipped on real data, each with its reason "
           f"(`--skips` lists them)")
     if "--skips" in sys.argv:

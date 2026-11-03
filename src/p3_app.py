@@ -40,6 +40,7 @@ ROUTES (brief §5; all JSON unless noted)
   GET|POST /api/dev/fixtures   K1's own: flips the §8.7 fixture switches, so the states
                                that no real data can produce can be SEEN, not just tested
   GET  /pdf/{date}/{name}      the archive PDF, guarded as above
+  GET  /api/page?pdf=&page=    ONE page of an archive PDF, cut out on demand (I4)
 
   Every route function is a plain `def`, not `async def`, for a reason: the sandbox this
   was built in refuses to bind a local port, so the tests call these functions directly.
@@ -63,7 +64,8 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               PlainTextResponse, StreamingResponse)
+                               PlainTextResponse, Response, StreamingResponse)
+import pymupdf                        # cuts one page out of a PDF (I4); in .venv, 1.28.2
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / "app"
@@ -256,11 +258,22 @@ def digests():
 
 @app.get("/api/article/{text_hash}")
 def article(text_hash: str):
+    """One article, with `paragraphs`.
+
+    The page draws the `dateline` ("New Delhi:") once, before the body (I4). In 7 of the
+    8 datelined articles of the two stored digests the body ALREADY starts with it, so
+    it is taken off the front of the body here before the paragraphs are made; otherwise
+    the reader would see "Bengaluru: Bengaluru: TCS's ...". A body that does not start
+    with it keeps every word."""
     got = data.article(text_hash)
     if got is None:
         raise HTTPException(status_code=404, detail="no such article")
     got = dict(got)
-    got["paragraphs"] = paragraphs(got.get("body"))
+    body = got.get("body") or ""
+    line = got.get("dateline")
+    if line and body.lstrip().startswith(line):
+        body = body.lstrip()[len(line):]
+    got["paragraphs"] = paragraphs(body)
     return got
 
 
@@ -489,6 +502,55 @@ def pdf(date: str, name: str):
         raise HTTPException(status_code=404, detail="no such PDF")
     return FileResponse(target, media_type="application/pdf",
                         filename=target.name, content_disposition_type="inline")
+
+
+def _archive_pdf(rel):
+    """The archive PDF a page link names, or None. Nothing is opened here.
+
+    `rel` is a page link's own `pdf` value, "archive/<date>/<paper>.pdf", read from the
+    project folder. The path is made canonical FIRST (`resolve()` folds `..` away and
+    follows symlinks), and only then compared with the archive, so a `../` climb, an
+    absolute path and a symlink pointing out of `archive/` all land outside it. Every
+    refusal is the same None (-> 404): the route says no more about the disk than that.
+    """
+    if not isinstance(rel, str) or not rel or Path(rel).is_absolute():
+        return None
+    archive = ARCHIVE.resolve()
+    try:
+        target = (ARCHIVE.parent / rel).resolve()
+    except (OSError, ValueError, RuntimeError):     # a NUL byte, a symlink loop
+        return None
+    if not target.is_relative_to(archive) or target.suffix.lower() != ".pdf":
+        return None
+    return target if target.is_file() else None
+
+
+@app.get("/api/page")
+def one_page(pdf: str = "", page: str = ""):
+    """ONE page of an archive PDF, cut out on demand, so a page link opens that page
+    and nothing else (integration brief §4.2).
+
+    Nothing is stored: cutting a page measured 3-24 ms on three real papers (3 Nov,
+    page 1 of a 26 MB Mint, p5 of Business Standard, p12 of The Hindu), far under the
+    brief's ~300 ms line for adding a cache. The path is checked and the page number
+    must be a plain positive number BEFORE the file is opened; the one thing that needs
+    the file open is "is there a page N", since only the PDF knows how many pages it
+    has. Every refusal is a 404."""
+    target = _archive_pdf(pdf)
+    if target is None:
+        raise HTTPException(status_code=404, detail="no such PDF")
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", page or ""):
+        raise HTTPException(status_code=404, detail="no such page")
+    number = int(page)
+    with pymupdf.open(target) as doc:
+        if number > doc.page_count:
+            raise HTTPException(status_code=404, detail="no such page")
+        with pymupdf.open() as out:
+            out.insert_pdf(doc, from_page=number - 1, to_page=number - 1)
+            body = out.tobytes()
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", target.stem) + f"_p{number}.pdf"
+    return Response(body, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{name}"'})
 
 
 def port_is_free():
