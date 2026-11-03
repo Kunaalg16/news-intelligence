@@ -4330,15 +4330,18 @@ def _http(method, path, query=b"", payload=b""):
     return asyncio.run(go())
 
 
-def _jsc(body, data):
+def _jsc(body, data, app_js=None):
     """Run app.js under the DOM shim with `DATA` set to `data`, and return the JSON the
     body prints last. For checks that need the page's logic on REAL rows, which the
-    static JS_TEST block cannot carry."""
+    static JS_TEST block cannot carry. (I9) `app_js` loads another copy of the page's
+    script instead, for the sweep's tracked copy."""
     import subprocess
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "run.js"
-        script.write_text('var ROOT = "%s";\nvar DATA = %s;\n%s\nload(ROOT + "/app/app.js");\n%s'
-                          % (ROOT, json.dumps(data), JS_DOM, body))
+        script.write_text('var ROOT = "%s";\nvar DATA = %s;\n%s\nload(%s);\n%s'
+                          % (ROOT, json.dumps(data), JS_DOM,
+                             json.dumps(str(app_js)) if app_js else 'ROOT + "/app/app.js"',
+                             body))
         done = subprocess.run([JSC, str(script)], capture_output=True, text=True, timeout=60)
     out = (done.stdout or "").strip().splitlines()
     if done.returncode != 0 or not out:
@@ -5135,6 +5138,804 @@ def i8_routes():
           [501, 501, True, True])
 
 
+# ------------------------------------------------------------- I9 · every button pressed
+# Brief §4.6. (A) boots the whole page under jsc against the real server's own answers,
+# walks it through each of its states and presses every button it draws, once each, from
+# a freshly rebuilt state; (B) presses the buttons that spend money or change data and
+# says exactly what each one sent.
+
+# A press that draws more new buttons than this has moved to another screen (a story,
+# Explore, a board); that screen is swept as a state of its own, so its buttons are not
+# pressed a second time inside the press that reached it. Menus, confirms, the "Why?"
+# fields and the toast's Undo draw 1-6. GUESSED; the summary prints how many presses
+# were counted as moves, and a menu that grew past it would show up there.
+I9_CRAWL_MAX = 8
+
+# The prices the sweep's page is given (not the server's): fixed, so the label check is
+# about the page printing the estimate it was handed, not about K3's knob of the day.
+I9_ESTIMATES = {"ask": 0.0008, "think_harder": 0.0213, "background": 0.0004,
+                "suggest": 0.0006}
+
+
+# Buttons that reach a paid route (ask, think_harder, background, suggest, reask) with no
+# price printed on them, as the sweep found them on 4 Nov. Each is named so a new one
+# cannot slip in unseen. The composer's Ask: the price is the question's, shown nowhere
+# (unchanged since build 1). "Ask all papers instead": a free button whose question costs
+# as usual (T-28). The follow-up corrections re-ask at the ask price (brief §4.5 gives
+# them no price; T-44). Suggest's refusal "Retry": T-28 kept it outside the pane's
+# priced buttons; it spends a suggest call (finding, T-46).
+I9_UNPRICED_PAID = ["Ask", "Ask all papers instead", "Ask in this story instead",
+                    "Ask in the “What did the EPFO…” topic instead",
+                    "Ask in the “what about the floods” topic instead",
+                    "Search as one question", "Search as two topics", "Treat as new topic",
+                    "Retry"]
+
+
+def _tracked_app_js(tmp):
+    """A copy of app.js in which every `async function` reports a rejection.
+
+    jsc has no unhandled-rejection hook (checked: a rejected promise nobody awaits is
+    silent and the exit code is 0), so a click whose async work fails would pass unseen.
+    Each `async function NAME(` becomes a plain `NAME` that calls the async body and
+    hands its promise to `__track`, which records a rejection and returns the promise
+    unchanged. app.js never catches a rejection of its own functions (its try/catch
+    blocks wrap `fetch` and `json()` only), so every rejection recorded here is one
+    nobody handles. Returns the path and the names wrapped."""
+    src = (ROOT / "app" / "app.js").read_text()
+    names = re.findall(r"^async function (\w+)\(", src, flags=re.M)
+    out = re.sub(r"^async function (\w+)\(",
+                 lambda m: (f"function {m[1]}() {{ return __track('{m[1]}', "
+                            f"__async_{m[1]}.apply(this, arguments)); }}\n"
+                            f"async function __async_{m[1]}("), src, flags=re.M)
+    path = Path(tmp) / "app_tracked.js"
+    path.write_text(out)
+    return path, names
+
+
+def _i9_server():
+    """What the real app answers to every GET the page sends while it boots, opens a
+    story, an article and Explore: read once through the ASGI app on the section's copy.
+    Writes are answered by the harness (canned), so a press never changes the copy."""
+    def get(path, query=b""):
+        status, _h, raw = _get(path, query)
+        return [status, json.loads(raw) if raw else None]
+    out = {"get": {p: get(p, q) for p, q in [
+        ("/api/flags", b""), ("/api/status", b""), ("/api/cost", b""),
+        ("/api/digest", b"ref=latest"), ("/api/digests", b""), ("/api/follows", b""),
+        ("/api/keep_unread", b""), ("/api/feedback", b""), ("/api/facets", b"")]}}
+    digest = out["get"]["/api/digest"][1]
+    out["threads"] = {s["story_id"]: get("/api/thread/" + s["story_id"])
+                      for s in digest["stories"]}
+    out["since"] = {s["story_id"]: get("/api/new_since/" + s["story_id"], b"ref=latest")
+                    for s in digest["stories"]}
+    out["articles"] = {}
+    for s in digest["stories"][:3]:
+        for h in story_hashes(s)[:2]:
+            out["articles"][h] = get("/api/article/" + h)
+    url = PS.KNOBS["embed_url"]
+    PS.KNOBS["embed_url"] = "http://127.0.0.1:9"      # T-10: same answer whatever runs
+    try:
+        out["search"] = get("/api/search", b"q=GST&sort=relevance&limit=200")
+    finally:
+        PS.KNOBS["embed_url"] = url
+    return out
+
+
+def _i9_world():
+    """The real server's answers plus the canned cases the sweep needs on top: a board
+    with one pin of each item type, two suggestions (one already pinned, one already
+    linked), the stub's follow-up conversation. Returns (data for jsc, the story with a
+    thread or None)."""
+    server = _i9_server()
+    digest = server["get"]["/api/digest"][1]
+    stories = digest["stories"]
+    threaded = next((s for s in stories
+                     if (server["threads"][s["story_id"]][1] or {}).get("entries")), None)
+    home = threaded or stories[0]
+    other = next(s for s in stories if s["story_id"] != home["story_id"])
+    first_hash = story_hashes(stories[0])[0]
+    suggestions = {"story_id": home["story_id"], "verdict": "enough", "cost_usd": 0.0006,
+                   "suggestions": [
+                       {"story_id": other["story_id"], "headline": other["headline"]["text"],
+                        "dates": [digest["window"]["to"]],
+                        "articles": [{"text_hash": h, "paper": "Mint"}
+                                     for h in story_hashes(other)],
+                        "why": "Covers a related development."},
+                       {"story_id": "s_i9_archive", "headline": "An older story",
+                        "dates": ["2026-10-01"],
+                        "articles": [{"text_hash": "h_i9_old", "paper": "Mint"}],
+                        "why": "Same people, a month earlier."}]}
+    pins = [{"pin_id": "p1", "item_type": "story",
+             "payload": {"story_id": other["story_id"], "headline": "Pinned story",
+                         "text_hashes": story_hashes(other)}, "source": {}},
+            {"pin_id": "p2", "item_type": "article",
+             "payload": {"text_hash": first_hash, "headline": "Pinned article"},
+             "source": {"paper": "Mint", "date": digest["window"]["to"]}},
+            {"pin_id": "p3", "item_type": "answer",
+             "payload": {"answer_id": "f1", "question": "Pinned answer", "sentences": [],
+                         "cited": [], "model": "haiku"}, "source": {}}]
+    links = [{"link_id": "L1", "target_story_id": "s_i9_archive",
+              "target_text_hashes": ["h_i9_old"], "at": "2026-11-04T09:00:00"}]
+    world = {**server, "home": home["story_id"], "suggestions": suggestions,
+             "boards": [{"board_id": "b1", "name": "Work", "pin_count": 3,
+                         "last_used_at": "2026-11-04T09:00:00"}],
+             "pins": pins, "links": links, "estimates": I9_ESTIMATES,
+             "conversation": S.FOLLOWUP_CONVERSATION, "crawl_max": I9_CRAWL_MAX}
+    return world, threaded
+
+
+# The page, booted for real: a router over the server's answers, the shim pieces a full
+# sweep needs that the 80-line DOM lacks, and the page's states as functions that build
+# each one from nothing.
+I9_HARNESS = r"""
+var REJECTED = [];
+function __track(name, p) {
+  p.then(null, function (e) { REJECTED.push(name + ': ' + ((e && e.message) || e)); });
+  return p;
+}
+function clone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+
+/* --- shim pieces: real lookups by id and by simple selectors, remove(), click(),
+   classList, CSS.escape, window. Without them the ? sheet could never open (the I6
+   getElementById makes a node for any id, so the sheet looks open already) and a press
+   would "fail" for the shim's sake, not the page's. */
+function kidsOf(n) { return (n && n.children) || []; }
+function roots() {
+  var out = [];
+  for (var k in document.byId) out.push(document.byId[k]);
+  out.push(document.body);
+  return out;
+}
+function walk(n, fn, up) {
+  up = up || [];
+  if (!n || typeof n !== 'object') return;
+  fn(n, up);
+  var next = up.concat([n]);
+  kidsOf(n).forEach(function (c) { walk(c, fn, next); });
+}
+function findId(id) {
+  if (document.byId[id]) return document.byId[id];
+  var hit = null;
+  roots().forEach(function (r) { walk(r, function (n) {
+    if (!hit && n.attrs && n.attrs.id === id) hit = n; }); });
+  return hit;
+}
+document.getElementById = findId;
+function camel(s) { return s.replace(/-([a-z])/g, function (_, c) { return c.toUpperCase(); }); }
+function simpleMatch(n, sel) {
+  var m = /^([a-zA-Z]*)((?:\.[\w-]+)*)(?:\[([\w-]+)="([^"]*)"\])?$/.exec(sel);
+  if (!m || !n.tagName) return false;
+  if (m[1] && n.tagName !== m[1].toUpperCase()) return false;
+  var cls = ' ' + (n.className || '') + ' ';
+  var want = m[2] ? m[2].split('.').slice(1) : [];
+  for (var i = 0; i < want.length; i++) if (cls.indexOf(' ' + want[i] + ' ') < 0) return false;
+  if (m[3]) {
+    var v = (n.attrs || {})[m[3]];
+    if (v === undefined && m[3].indexOf('data-') === 0) v = (n.dataset || {})[camel(m[3].slice(5))];
+    if (String(v) !== m[4]) return false;
+  }
+  return true;
+}
+function qsa(starts, sel, self) {
+  var parts = sel.trim().split(/\s+/), found = [];
+  starts.forEach(function (r) { walk(r, function (n, up) {
+    if (!self && n === r) return;
+    if (!simpleMatch(n, parts[parts.length - 1])) return;
+    var j = parts.length - 2;
+    for (var a = up.length - 1; a >= 0 && j >= 0; a--) if (simpleMatch(up[a], parts[j])) j--;
+    if (j < 0 && found.indexOf(n) < 0) found.push(n);
+  }); });
+  return found;
+}
+Node.prototype.querySelectorAll = function (sel) { return qsa([this], sel, false); };
+Node.prototype.querySelector = function (sel) { return qsa([this], sel, false)[0] || null; };
+document.querySelectorAll = function (sel) { return qsa(roots(), sel, true); };
+document.querySelector = function (sel) { return qsa(roots(), sel, true)[0] || null; };
+Node.prototype.remove = function () {
+  var me = this;
+  roots().forEach(function (r) { walk(r, function (n) {
+    if (n.children && n.children.indexOf(me) >= 0) n.removeChild(me); }); });
+};
+Node.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+Node.prototype.prepend = function (kid) { this.children.unshift(kid); };
+Node.prototype.click = function () {
+  var me = this;
+  ((me.handlers || {}).click || []).forEach(function (fn) { fn(EVT(me)); });
+};
+Object.defineProperty(Node.prototype, 'classList', { get: function () {
+  var n = this;
+  return { add: function (c) { n.className = ((n.className || '') + ' ' + c).trim(); },
+           remove: function (c) { n.className = (' ' + n.className + ' ')
+                                    .replace(' ' + c + ' ', ' ').trim(); },
+           contains: function (c) { return (' ' + n.className + ' ').indexOf(' ' + c + ' ') >= 0; },
+           toggle: function () {} };
+}});
+globalThis.CSS = { escape: function (s) { return String(s); } };
+globalThis.window = { addEventListener: function () {}, open: function () {} };
+var DOC_HANDLERS = {};
+document.addEventListener = function (kind, fn) { (DOC_HANDLERS[kind] = DOC_HANDLERS[kind] || []).push(fn); };
+function EVT(node) {
+  return { target: node, currentTarget: node, key: undefined,
+           preventDefault: function () {}, stopPropagation: function () {} };
+}
+
+/* --- the server: the real app's GET answers (DATA), canned writes, streams */
+var W = null;
+function newWorld() {
+  return { flags: clone(DATA.get['/api/flags'][1]), conv: {conversation_id: 'c_i9',
+           started_at: '2026-11-04T09:00:00', turns: []},
+           cost: clone(DATA.get['/api/cost'][1]), stream: null, down: false };
+}
+function answerLike(id, question) {
+  var a = clone(DATA.conversation.turns[0].answer);
+  a.answer_id = id; a.question = question; a.topic = 'first';
+  return a;
+}
+function route(method, url, body) {
+  var path = url.split('?')[0], query = url.split('?')[1] || '';
+  if (method === 'GET') {
+    if (path === '/api/flags') return [200, W.flags];
+    if (path === '/api/cost') return [200, W.cost];
+    if (path === '/api/estimate') {
+      var kind = (/kind=([a-z_]+)/.exec(query) || [])[1];
+      return [200, {kind: kind, cost_usd: DATA.estimates[kind]}];
+    }
+    if (path === '/api/conversation') return [200, clone(W.conv)];
+    if (path === '/api/boards') return [200, {boards: clone(DATA.boards)}];
+    if (path === '/api/boards/b1/pins') return [200, {pins: clone(DATA.pins)}];
+    if (path === '/api/user_links') return [200, {user_links: clone(DATA.links)}];
+    if (path === '/api/search') return DATA.search;
+    var tail = decodeURIComponent(path.split('/').slice(3).join('/'));
+    if (path.indexOf('/api/article/') === 0)
+      return DATA.articles[tail] || [404, {detail: 'no such article'}];
+    if (path.indexOf('/api/thread/') === 0) return DATA.threads[tail] || [200, {entries: []}];
+    if (path.indexOf('/api/new_since/') === 0)
+      return DATA.since[tail] || [200, {new_since_read: []}];
+    if (path.indexOf('/api/pref/') === 0) return [200, {key: tail, value: null}];
+    if (path.indexOf('/api/passages/') === 0) return [404, {detail: 'no such passage set'}];
+    if (DATA.get[path]) return DATA.get[path];
+    MISSING.push(path);
+    return [404, {detail: 'not in the I9 server: ' + path}];
+  }
+  if (path === '/api/read' || path === '/api/read_state' || path === '/api/keep_unread')
+    return [200, {read: {}}];
+  if (path === '/api/follow') return [200, {follows: []}];
+  if (path === '/api/boards')
+    return [200, {board_id: 'b2', boards: clone(DATA.boards).concat(
+      [{board_id: 'b2', name: body.name, pin_count: 0}])}];
+  if (path === '/api/pin') return [200, {pin_id: 'p9'}];
+  if (path.indexOf('/api/pin/') === 0) return [200, {deleted: true}];
+  if (path === '/api/suggest') return [200, clone(DATA.suggestions)];
+  if (path === '/api/cap/raise')
+    return [200, {spent_usd: W.cost.spent_usd, cap_usd: W.cost.cap_usd + 1, override_usd: 1}];
+  if (path === '/api/user_link') return [200, {link_id: 'L9'}];
+  if (path.indexOf('/api/user_link/') === 0) return [200, {removed: true}];
+  if (path === '/api/hide_turn') return [200, {hidden: body.answer_id}];
+  if (path === '/api/visit') return [200, {last_visit: null}];
+  if (path === '/api/conversation/new') return [200, {conversation_id: 'c_new'}];
+  return [200, {}];
+}
+var STREAMED = {'/api/ask': 1, '/api/think_harder': 1, '/api/reask': 1};
+var MISSING = [];
+globalThis.fetch = function (url, opts) {
+  var method = (opts && opts.method) || 'GET', u = String(url), path = u.split('?')[0];
+  var body = opts && opts.body ? JSON.parse(opts.body) : null;
+  CALLS.push([method, path, body]);
+  if (W.down) return Promise.reject(new TypeError('Load failed'));
+  if (STREAMED[path]) {
+    var done = answerLike('a_' + CALLS.length, (body && body.question) || 're-asked');
+    return Promise.resolve(streamReply(W.stream || [
+      {type: 'results', search: {stories: [], total_stories: 0}},
+      {type: 'sentence', text: 'A stub sentence.', cites: []},
+      {type: 'done', answer: done}]));
+  }
+  var r = route(method, u, body);
+  return Promise.resolve(reply(r[0], r[1]));
+};
+
+/* --- a clean page per press */
+var PRISTINE = {};
+for (var k0 in APP.S) {
+  var v0 = APP.S[k0];
+  PRISTINE[k0] = v0 instanceof Set ? {__set: Array.from(v0)} : clone(v0 === undefined ? null : v0);
+}
+function restoreS() {
+  for (var k in APP.S) delete APP.S[k];
+  for (var k2 in PRISTINE) {
+    var v = PRISTINE[k2];
+    APP.S[k2] = v && v.__set ? new Set(v.__set) : clone(v);
+  }
+}
+var PAGE_IDS = ['window-text', 'today-date', 'unread-count', 'cost-header', 'status-line',
+                'drawer', 'reading', 'assistant', 'toast'];
+function freshDom() {
+  document.byId = {};
+  document.body = new Node('body');
+  PAGE_IDS.forEach(function (id) { var n = new Node('div'); n.attrs.id = id; document.byId[id] = n; });
+  var nav = new Node('nav');
+  ['today', 'explore', 'boards', 'past'].forEach(function (s) {
+    var b = new Node('button'); b.className = 'reset nav-item'; b.attrs.type = 'button';
+    b.dataset.screen = s; b.textContent = 'nav ' + s; nav.append(b);
+  });
+  document.byId.nav = nav;
+  DOC_HANDLERS = {};
+}
+async function settle() { for (var i = 0; i < 60; i++) await null; }
+async function enter(state) {
+  freshDom(); restoreS(); W = newWorld(); CALLS = []; REJECTED = [];
+  if (state.world) state.world(W);
+  await boot();
+  if (state.then) await state.then();
+  await settle();
+}
+async function navTo(screen) {
+  var b = document.byId.nav.children.filter(function (n) { return n.dataset.screen === screen; })[0];
+  await Promise.all(b.handlers.click.map(function (fn) { return fn(EVT(b)); }));
+}
+function allFlagsOn(w) { for (var f in w.flags.flags) w.flags.flags[f] = true; }
+function home() { return APP.S.digest.stories.filter(function (s) {
+  return s.story_id === DATA.home; })[0]; }
+
+/* --- reading buttons back */
+function isHidden(n) { return n.hidden === true || (n.attrs && n.attrs.hidden !== undefined); }
+function buttons() {
+  var out = [];
+  for (var key in document.byId) collectFrom(document.byId[key], key, out);
+  collectFrom(document.body, 'body', out);
+  return out;
+}
+function collectFrom(root, name, out) {
+  (function go(n, form) {
+    if (!n || typeof n !== 'object' || isHidden(n)) return;
+    if (n.tagName === 'FORM') form = n;
+    if (n.tagName === 'BUTTON') {
+      var label = (textOf(n).trim() || (n.attrs['aria-label'] || '') || (n.attrs.title || ''));
+      out.push({node: n, root: name, form: form, label: label,
+                sig: name + '|' + n.className + '|' + label,
+                disabled: n.attrs.disabled !== undefined || n.disabled === true});
+    }
+    kidsOf(n).forEach(function (c) { go(c, form); });
+  })(root, null);
+}
+function byLabel(list, start, root) {
+  return list.filter(function (b) { return b.label.indexOf(start) === 0
+                                    && (!root || b.root === root); });
+}
+var PAID = ['/api/ask', '/api/think_harder', '/api/background', '/api/suggest', '/api/reask'];
+async function pressB(b) {
+  if (!b) return {errs: ['no such button'], handlers: 0, paid: []};
+  var errs = [], before = REJECTED.length, from = CALLS.length;
+  var fns = ((b.node.handlers || {}).click || []).slice();
+  if (b.node.attrs.type === 'submit' && b.form) {
+    walk(b.form, function (n) {
+      if (n.tagName === 'INPUT' && !n.value) n.value = 'GST';
+      if (n.tagName === 'TEXTAREA' && !n.value) n.value = 'what changed?';
+    });
+    fns = fns.concat(((b.form.handlers || {}).submit || []));
+  }
+  for (var i = 0; i < fns.length; i++) {
+    try {
+      var r = fns[i](EVT(b.node));
+      if (r && typeof r.then === 'function') {
+        try { await r; } catch (e) { errs.push('rejected: ' + ((e && e.message) || e)); }
+      }
+    } catch (e) { errs.push('threw: ' + ((e && e.message) || e)); }
+  }
+  await settle();
+  REJECTED.slice(before).forEach(function (r) { errs.push('unhandled: ' + r); });
+  var paid = CALLS.slice(from).filter(function (c) { return PAID.indexOf(c[1]) >= 0; })
+                  .map(function (c) { return c[1]; });
+  return {errs: errs, handlers: fns.length, paid: paid};
+}
+"""
+
+
+# The page's states (brief §4.6: Today, story, ask pane states, Explore, suggest box,
+# boards, ? sheet), each built from nothing by `enter()`.
+I9_STATES = r"""
+function convWith(extra) {
+  var c = clone(DATA.conversation);
+  (extra || []).forEach(function (t) { c.turns.push(t); });
+  return c;
+}
+var EXTRA_TURNS = [
+  {kind: 'answer', answer: Object.assign(answerLike('t1', ''), {
+    parent_answer_id: 'f1', model: 'sonnet', question: DATA.conversation.turns[0].answer.question,
+    topic: undefined})},
+  {kind: 'answer', answer: Object.assign(answerLike('e1', 'what about the floods in Assam'), {
+    verdict: 'empty', sentences: [], topic: 'new_topic', background: 'A background line.',
+    scope: {story_id: DATA.home, text_hashes: [], filters: {}}})},
+  {kind: 'divider', story_id: DATA.home, headline: 'Earlier story'}];
+var STATES = [
+  {name: 'Today'},
+  {name: 'story · thread, suggestions, links', world: allFlagsOn, then: async function () {
+    await APP.openStory(DATA.home);
+    APP.S.suggestions[DATA.home] = clone(DATA.suggestions);
+    await loadPinnedStories(); await loadUserLinks(home());
+    APP.S.seeAlsoOpen[DATA.home] = true;
+    APP.render(); }},
+  {name: 'story · read, suggestions refused', world: allFlagsOn, then: async function () {
+    await APP.openStory(DATA.home);
+    APP.storyHashes(home()).forEach(function (h) { APP.S.read[h] = '2026-11-04T09:00:00'; });
+    APP.S.suggestions[DATA.home] = {error: {status: 400, message: 'the model service is busy'}};
+    APP.render(); }},
+  {name: 'story · suggest box empty, meaning search off', world: allFlagsOn,
+   then: async function () {
+    APP.S.suggestions[DATA.home] = {story_id: DATA.home, suggestions: [], verdict: 'empty',
+                                    cost_usd: 0, mode: 'fts_only'};
+    await APP.openStory(DATA.home); }},
+  {name: 'article view', world: allFlagsOn, then: async function () {
+    await APP.openArticle(Object.keys(DATA.articles)[0]); }},
+  {name: 'ask · conversation, flags as served', world: function (w) {
+    w.conv = convWith(EXTRA_TURNS); }, then: async function () {
+    APP.S.results.f1 = clone(DATA.search[1]); APP.renderAssistant(); }},
+  {name: 'ask · conversation, every flag on', world: function (w) {
+    allFlagsOn(w); w.conv = convWith(EXTRA_TURNS); }, then: async function () {
+    APP.S.results.f1 = clone(DATA.search[1]); APP.S.folded.f1 = true; APP.renderAssistant(); }},
+  {name: 'ask · failed, retryable', world: function (w) {
+    allFlagsOn(w); w.stream = [{type: 'error', code: 'model_error', reason: 'model_busy',
+                                retryable: true}]; },
+   then: async function () { await APP.askNow('what changed?'); }},
+  {name: 'ask · failed, not retryable', world: function (w) {
+    allFlagsOn(w); w.stream = [{type: 'error', code: 'model_error', reason: 'key_rejected',
+                                retryable: false}]; },
+   then: async function () { await APP.askNow('what changed?'); }},
+  {name: 'ask · at the cap', world: function (w) {
+    allFlagsOn(w); w.conv = convWith([]);
+    w.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0}; }},
+  {name: 'ask · collapsed', then: async function () {
+    APP.S.pane = 'collapsed'; APP.renderAssistant(); }},
+  {name: 'Explore', world: allFlagsOn, then: async function () {
+    await navTo('explore');
+    var row = (APP.S.explore.result && APP.S.explore.result.stories || [])[0];
+    if (row) APP.S.explore.selected.add(row.story_id);
+    APP.render(); }},
+  {name: 'boards', world: allFlagsOn, then: async function () { await navTo('boards'); }},
+  {name: 'a board, open', world: allFlagsOn, then: async function () {
+    await navTo('boards'); await APP.openBoard(clone(DATA.boards[0])); }},
+  {name: 'past digests', world: allFlagsOn, then: async function () { await navTo('past'); }},
+  {name: '? sheet', then: async function () {
+    (DOC_HANDLERS.keydown || []).forEach(function (fn) {
+      fn({key: '?', target: document.body, preventDefault: function () {}}); }); }},
+];
+"""
+
+
+def i9_every_button():
+    """I9 (A) · every button the page builds, pressed once (brief §4.6).
+
+    Pass lines, written before the run:
+    - Each state named in the brief (Today, story, ask pane states, Explore, suggest box,
+      boards, the ? sheet) draws at least one button, and the run lists every state.
+    - Every enabled, visible button is pressed once from a freshly built state, and each
+      button a press reveals in place (a menu, a confirm, a "Why?" field, the toast's
+      Undo) is pressed once after it; disabled buttons are counted, never pressed.
+    - No press throws, returns a rejection, or leaves an async function of the page
+      rejected with nobody to catch it (the tracked copy, `_tracked_app_js`).
+    - Building a state throws nothing either, and every GET the page sends has an
+      answer in the server's list (a 404 the sweep made up would hide a failure).
+    - Rebuilding a state gives the same buttons in the same order (else a press would
+      hit the wrong one).
+    What would pass while broken: a sweep that finds no buttons -> each state's count is
+    checked; a press that is never awaited -> the press waits on its promise and the
+    tracked copy reports rejections it never saw; a tracker that wraps nothing -> the
+    number of wrapped functions is compared with app.js's own `async function` count,
+    and a planted throw is caught (mutation).
+    """
+    world, threaded = _i9_world()
+    if threaded is None:
+        skip("I9 · the thread state", "no story in the live digest has a thread")
+    with tempfile.TemporaryDirectory() as tmp:
+        tracked, names = _tracked_app_js(tmp)
+        got = _jsc(I6_HARNESS + I8_HARNESS + I9_HARNESS + I9_STATES + r"""
+async function main() {
+  OUT.states = []; OUT.presses = []; OUT.errors = []; OUT.mismatch = [];
+  OUT.moves = 0; OUT.disabled = 0; OUT.nohandler = [];
+  for (var s = 0; s < STATES.length; s++) {
+    var st = STATES[s];
+    try { await enter(st); } catch (e) {
+      OUT.errors.push([st.name, '(building the state)', 'threw: ' + e]); continue; }
+    if (REJECTED.length) OUT.errors.push([st.name, '(building the state)', REJECTED.join('; ')]);
+    var base = buttons();
+    OUT.states.push([st.name, base.length]);
+    for (var i = 0; i < base.length; i++) {
+      if (base[i].disabled) { OUT.disabled += 1; continue; }
+      await enter(st);
+      var now = buttons();
+      if (!now[i] || now[i].sig !== base[i].sig) { OUT.mismatch.push([st.name, base[i].label]); continue; }
+      var res = await pressB(now[i]);
+      OUT.presses.push([st.name, now[i].label, res.paid]);
+      if (!res.handlers) OUT.nohandler.push([st.name, now[i].label]);
+      res.errs.forEach(function (e) { OUT.errors.push([st.name, now[i].label, e]); });
+      var after = buttons(), left = {};
+      now.forEach(function (b) { left[b.sig] = (left[b.sig] || 0) + 1; });
+      var shown = [];
+      after.forEach(function (b, j) {
+        if (left[b.sig]) { left[b.sig] -= 1; return; }
+        if (b.root === now[i].root || b.root === 'toast' || b.root === 'body') shown.push(j);
+      });
+      if (shown.length > DATA.crawl_max) { OUT.moves += 1; continue; }
+      for (var k = 0; k < shown.length; k++) {
+        await enter(st);
+        var again = buttons();
+        await pressB(again[i]);
+        var revealed = buttons()[shown[k]];
+        if (!revealed || revealed.sig !== after[shown[k]].sig) {
+          OUT.mismatch.push([st.name, now[i].label + ' › ' + after[shown[k]].label]); continue; }
+        if (revealed.disabled) { OUT.disabled += 1; continue; }
+        var res2 = await pressB(revealed);
+        OUT.presses.push([st.name, now[i].label + ' › ' + revealed.label, res2.paid]);
+        res2.errs.forEach(function (e) {
+          OUT.errors.push([st.name, now[i].label + ' › ' + revealed.label, e]); });
+      }
+    }
+  }
+  OUT.missing = MISSING.filter(function (p, i) { return MISSING.indexOf(p) === i; });
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", world, app_js=tracked)
+    check("I9 · the sweep ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    src = (ROOT / "app" / "app.js").read_text()
+    check("I9 · the tracked copy wraps every async function app.js declares",
+          [len(names) > 0, len(names)], [True, src.count("\nasync function ")])
+    counts = dict(got["states"])
+    named = ["Today", "story · thread, suggestions, links", "story · read, suggestions refused",
+             "story · suggest box empty, meaning search off", "article view",
+             "ask · conversation, flags as served", "ask · conversation, every flag on",
+             "ask · failed, retryable", "ask · failed, not retryable", "ask · at the cap",
+             "ask · collapsed", "Explore", "boards", "a board, open", "past digests", "? sheet"]
+    check("[page] I9 A · every state was built, and each draws at least one button",
+          [[n, counts.get(n, 0) > 0] for n in named], [[n, True] for n in named])
+    check("[page] I9 A · no press throws or leaves a rejection nobody catches",
+          got["errors"], [])
+    check("[page] I9 A · a rebuilt state draws the same buttons in the same order",
+          got["mismatch"], [])
+    check("[page] I9 A · every GET the page sent has an answer in the server's list",
+          got["missing"], [])
+    check("[page] I9 A · every button pressed has a click (or its form's submit) handler",
+          got["nohandler"], [])
+    unpriced = sorted({p[1].split(" › ")[-1] for p in got["presses"]
+                       if p[2] and "≈" not in p[1].split(" › ")[-1]})
+    check("[page] I9 A · a button that reaches a paid route prints its price, or is one "
+          "of the unpriced ones named in I9_UNPRICED_PAID", unpriced, sorted(I9_UNPRICED_PAID))
+    found = sum(counts.values())
+    I9_COUNTS.append((len(got["presses"]), len({p[1] for p in got["presses"]}), found,
+                      got["disabled"], got["moves"], len(counts)))
+
+
+I9_COUNTS = []
+
+
+def i9_paid_and_saved():
+    """I9 (B) · the buttons that spend money or change data, pressed on the booted page
+    and each one's request read back at `fetch` (brief §4.6).
+
+    Pass lines, written before the run:
+    - Think harder: its label carries the think_harder estimate ("≈ 2.1¢" for $0.0213);
+      one press sends exactly one /api/think_harder for that answer and no other paid call.
+    - Allow $1 more today: the first press only asks ("Raise today's cap to $1.50?",
+      "Yes, allow +$1", "Cancel") and sends nothing; Cancel sends nothing and the offer is
+      back; Yes sends exactly one /api/cap/raise, and the band leaves with the new cap.
+    - Retry: drawn after a failed question whose event says `retryable: true`, and its
+      press re-sends the same question once (one /api/ask after the press); drawn nowhere when `retryable` is false or
+      missing, while the error itself is still shown.
+    - + on a suggestion sends one POST /api/user_link (this story, its hashes, the
+      suggestion's story and hashes); Remove sends one DELETE /api/user_link/<its link>.
+    - Pin: the story page pins item_type "story" (the open story), an answer "answer"
+      (its answer_id), the article view "article" (its text_hash), a suggestion "story"
+      (the suggestion's story), Explore's Pin selected "story" (the ticked row).
+    - Keep unread sends /api/keep_unread on:true for the open story and its hashes; a
+      second press sends on:false; on a read story "Mark unread" sends on:true.
+    - Remove a turn sends one /api/hide_turn for that turn's answer.
+    - Each follow-up correction sends one /api/reask with the brief's mode, and the two
+      scope corrections the right scope; none asks anew.
+    - K-3 (reused from I6): one press of Suggest connections = one /api/suggest.
+    Each press is from a freshly built page and reads only the requests sent after it.
+    What would pass while broken: a request counted but with the wrong body -> bodies are
+    compared whole; "no Retry" because nothing was drawn -> the error box is counted; a
+    menu press that pins whatever board -> the board id is in the body.
+    """
+    world, _threaded = _i9_world()
+    digest = world["get"]["/api/digest"][1]
+    first = digest["stories"][0]
+    home = next(s for s in digest["stories"] if s["story_id"] == world["home"])
+    other = world["suggestions"]["suggestions"][0]
+    with tempfile.TemporaryDirectory() as tmp:
+        tracked, _names = _tracked_app_js(tmp)
+        got = _jsc(I6_HARNESS + I8_HARNESS + I9_HARNESS + I9_STATES + r"""
+function inTurn(answerId) {
+  var q = DATA.conversation.turns.filter(function (t) {
+    return t.answer.answer_id === answerId; })[0].answer.question;
+  var turn = byClass(document.byId.assistant, 'pane-turn').filter(function (t) {
+    var y = byClass(t, 'pane-you')[0]; return y && textOf(y) === q; })[0];
+  var out = []; collectFrom(turn, 'assistant', out); return out;
+}
+function writes() {
+  return CALLS.filter(function (c) { return c[0] !== 'GET'; })
+              .map(function (c) { return [c[0], c[1], c[2]]; });
+}
+function bodies(path) { return sent(path).map(function (c) { return c[2]; }); }
+async function pressFresh(state, pick) {
+  await enter(state); CALLS = [];
+  var b = pick();
+  if (!b) return null;
+  await pressB(b);
+  return b;
+}
+var CONV = {world: function (w) { allFlagsOn(w); w.conv = clone(DATA.conversation); }};
+var TODAY = {world: allFlagsOn};
+var SUGG = STATES[1], READ = STATES[2], ARTICLE = STATES[4], EXPLORE = STATES[11];
+function fail(reason, retryable) {
+  return {world: function (w) { allFlagsOn(w); w.stream = [{type: 'error',
+          code: 'model_error', reason: reason, retryable: retryable}]; },
+          then: async function () { await APP.askNow('what changed?'); }};
+}
+async function main() {
+  // --- Think harder
+  var th = await pressFresh(CONV, function () { return byLabel(inTurn('f1'), 'Think harder')[0]; });
+  OUT.th = [th.label, bodies('/api/think_harder'),
+            CALLS.filter(function (c) { return PAID.indexOf(c[1]) >= 0; }).length];
+
+  // --- Allow $1 more today
+  var CAP = {world: function (w) { allFlagsOn(w);
+                                   w.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0}; }};
+  await pressFresh(CAP, function () {
+    return byLabel(buttons(), 'Allow $1 more today', 'assistant')[0]; });
+  var band = byClass(document.byId.assistant, 'cap-band')[0];
+  var inBand = []; collectFrom(band, 'assistant', inBand);
+  OUT.cap_ask = [sent('/api/cap/raise').length, textOf(band).indexOf("Raise today's cap to $1.50?") >= 0,
+                 inBand.map(function (b) { return b.label; })];
+  await pressB(byLabel(buttons(), 'Cancel', 'assistant')[0]);
+  OUT.cap_cancel = [sent('/api/cap/raise').length,
+                    byLabel(buttons(), 'Allow $1 more today', 'assistant').length];
+  await pressB(byLabel(buttons(), 'Allow $1 more today', 'assistant')[0]);
+  await pressB(byLabel(buttons(), 'Yes, allow', 'assistant')[0]);
+  OUT.cap_yes = [bodies('/api/cap/raise'), byClass(document.byId.assistant, 'cap-band').length,
+                 APP.S.cost.cap_usd];
+
+  // --- Retry, only when retryable
+  var r = await pressFresh(fail('model_busy', true), function () {
+    return byLabel(buttons(), 'Retry', 'assistant')[0]; });
+  OUT.retry = [r && r.label, bodies('/api/ask').map(function (b) { return b.question; })];
+  OUT.no_retry = [];
+  var cases = [['key_rejected', false], ['checks_failed', false], ['timeout', undefined]];
+  for (var i = 0; i < cases.length; i++) {
+    await enter(fail(cases[i][0], cases[i][1]));
+    OUT.no_retry.push([cases[i][0], byClass(document.byId.assistant, 'pane-error').length,
+                       byLabel(buttons(), 'Retry').length]);
+  }
+
+  // --- + / Remove on suggestions
+  await pressFresh(SUGG, function () { return byLabel(buttons(), 'Add to thread', 'reading')[0]; });
+  OUT.add = writes();
+  await pressFresh(SUGG, function () {
+    return byLabel(buttons(), 'Remove from the thread', 'reading')[0]; });
+  OUT.drop = writes();
+
+  // --- Pin, by item type: press the pin, then the board in its menu
+  async function pinVia(state, pick) {
+    var b = await pressFresh(state, pick);
+    CALLS = [];
+    var board = byLabel(buttons(), 'Work', b.root)[0];
+    await pressB(board);
+    return bodies('/api/pin').map(function (x) {
+      return [x.board_id, x.item_type, x.payload.story_id || x.payload.answer_id
+                                       || x.payload.text_hash]; });
+  }
+  function actionPin() { return byLabel(buttons(), 'Pin to board', 'reading').filter(function (b) {
+    return b.node.className.indexOf('icon-button') < 0; })[0]; }
+  OUT.pins = [
+    await pinVia(TODAY, actionPin),
+    await pinVia(CONV, function () { return byLabel(inTurn('f1'), 'Pin to board')[0]; }),
+    await pinVia(ARTICLE, actionPin),
+    await pinVia(SUGG, function () { return byLabel(buttons(), 'Pin to board', 'reading')
+      .filter(function (b) { return b.node.className.indexOf('icon-button') >= 0; })[0]; })];
+  await pressFresh(EXPLORE, function () { return byLabel(buttons(), 'Pin selected', 'reading')[0]; });
+  OUT.pin_explore = [bodies('/api/pin').map(function (x) {
+    return [x.board_id, x.item_type, x.payload.story_id]; }),
+    APP.S.explore.result.stories[0].story_id];
+
+  // --- Keep unread
+  await pressFresh(TODAY, function () { return byLabel(buttons(), 'Keep unread', 'reading')[0]; });
+  var keep1 = writes();
+  CALLS = [];
+  await pressB(byLabel(buttons(), 'Keep unread', 'reading')[0]);
+  OUT.keep = [keep1, writes()];
+  await pressFresh(READ, function () { return byLabel(buttons(), 'Mark unread', 'reading')[0]; });
+  OUT.mark = writes();
+
+  // --- Remove a turn
+  await pressFresh(CONV, function () { return byLabel(inTurn('f3'), 'Remove')[0]; });
+  OUT.hide = writes();
+
+  // --- each follow-up correction, and the two scope corrections
+  OUT.reask = [];
+  var ids = ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7'];
+  for (var j = 0; j < ids.length; j++) {
+    await enter(CONV); CALLS = [];
+    var turn = inTurn(ids[j]).filter(function (b) {
+      return b.node.className.indexOf('topic-act') >= 0; })[0];
+    if (!turn) { OUT.reask.push(null); continue; }
+    await pressB(turn);
+    OUT.reask.push([bodies('/api/reask'), sent('/api/ask').length]);
+  }
+  await pressFresh(CONV, function () { return byLabel(inTurn('f3'), 'Ask all papers instead')[0]; });
+  OUT.scope_all = [bodies('/api/reask'), sent('/api/ask').length];
+  await pressFresh(CONV, function () { return byLabel(inTurn('f2'), 'Ask in this story instead')[0]; });
+  OUT.scope_story = [bodies('/api/reask'), sent('/api/ask').length];
+
+  // --- K-3, reused: one press = one suggest call
+  await pressFresh(TODAY, function () {
+    return byLabel(buttons(), 'Suggest connections', 'reading')[0]; });
+  OUT.suggest = bodies('/api/suggest');
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", world, app_js=tracked)
+    check("I9 B · the presses ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    check("[page] I9 B · Think harder shows its estimate and sends one think_harder, "
+          "nothing else paid", got["th"],
+          ["Think harder · ≈ 2.1¢", [{"answer_id": "f1"}], 1])
+    check("[page] I9 B · Allow $1 more today asks first and sends nothing",
+          got["cap_ask"], [0, True, ["Yes, allow +$1", "Cancel"]])
+    check("[page] I9 B · Cancel sends nothing and the offer is back", got["cap_cancel"], [0, 1])
+    check("[page] I9 B · Yes sends one raise_cap_today; the band leaves with the new cap",
+          got["cap_yes"], [[{}], 0, 1.5])
+    check("[page] I9 B · Retry after a retryable failure re-sends the same question once",
+          got["retry"], ["Retry · ≈ 0.08¢", ["what changed?"]])
+    check("[page] I9 B · no Retry when retryable is false or missing; the error still shows",
+          got["no_retry"], [["key_rejected", 1, 0], ["checks_failed", 1, 0],
+                            ["timeout", 1, 0]])
+    check("[page] I9 B · + on a suggestion makes one user link to that story",
+          got["add"], [["POST", "/api/user_link",
+                        {"story_id": home["story_id"], "text_hashes": story_hashes(home),
+                         "target_story_id": other["story_id"],
+                         "target_text_hashes": [a["text_hash"] for a in other["articles"]]}]])
+    check("[page] I9 B · Remove on a linked suggestion deletes that link only",
+          got["drop"], [["DELETE", "/api/user_link/L1", None]])
+    first_hash = next(iter(world["articles"]))
+    check("[page] I9 B · Pin sends the right item_type: story page, answer, article view, "
+          "suggestion", got["pins"],
+          [[["b1", "story", first["story_id"]]], [["b1", "answer", "f1"]],
+           [["b1", "article", first_hash]], [["b1", "story", "s_i9_archive"]]])
+    check("[page] I9 B · Explore's Pin selected pins the ticked story as a story",
+          got["pin_explore"][0], [["b1", "story", got["pin_explore"][1]]])
+    keep = lambda on: [["POST", "/api/keep_unread", {"story_id": first["story_id"],
+                                                     "text_hashes": story_hashes(first),
+                                                     "on": on}]]
+    check("[page] I9 B · Keep unread sends set_keep_unread on, then off on a second press",
+          got["keep"], [keep(True), keep(False)])
+    check("[page] I9 B · on a read story 'Mark unread' sends set_keep_unread on",
+          got["mark"], [["POST", "/api/keep_unread", {"story_id": home["story_id"],
+                                                       "text_hashes": story_hashes(home),
+                                                       "on": True}]])
+    check("[page] I9 B · Remove a turn sends one hide_turn for that answer",
+          got["hide"], [["POST", "/api/hide_turn", {"answer_id": "f3"}]])
+    check("[page] I9 B · each follow-up correction sends one reask with the brief's mode",
+          got["reask"],
+          [None, [[{"answer_id": "f2", "mode": "as_typed"}], 0],
+           [[{"answer_id": "f3", "mode": "carry"}], 0],
+           [[{"answer_id": "f4", "mode": "one_search"}], 0],
+           [[{"answer_id": "f5", "mode": None}], 0],
+           [[{"answer_id": "f6", "mode": "as_typed"}], 0], None])
+    check("[page] I9 B · 'Ask all papers instead' re-asks with the all-papers scope",
+          got["scope_all"], [[{"answer_id": "f3", "scope": {"story_id": None,
+                                                            "text_hashes": [],
+                                                            "filters": {}}}], 0])
+    check("[page] I9 B · 'Ask in this story instead' re-asks with the open story",
+          got["scope_story"], [[{"answer_id": "f2", "scope": {
+              "story_id": first["story_id"], "text_hashes": story_hashes(first),
+              "filters": {}}}], 0])
+    check("[page] I9 B · K-3 · one press of Suggest connections = one suggest call",
+          got["suggest"], [{"story_id": first["story_id"],
+                            "text_hashes": story_hashes(first)}])
+
+
 def one_page():
     """I4 · `/api/page` cuts ONE page out of an archive PDF, and refuses everything else.
 
@@ -5430,7 +6231,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, i8_page, i8_routes, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, i8_page, i8_routes, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -5447,6 +6248,11 @@ def main():
     print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
     for n in I8_COUNTS:
         print(f"I8 flag off: {n} pane buttons pressed, none reached reask or hide_turn")
+    for pressed, distinct, found, disabled, moves, states in I9_COUNTS:
+        print(f"I9 every button: {pressed} presses ({distinct} different labels or "
+              f"menu paths) over "
+              f"{states} states; {found} drawn at first, {disabled} disabled (not pressed), "
+              f"{moves} presses moved to another screen (not crawled)")
     for was, now, cites, n in CHIPS_RELOAD:
         print(f"I5 chips after a reload, {n} stored answers: {was}/{cites} cites resolved "
               f"before the passage sets, {now}/{cites} after")
