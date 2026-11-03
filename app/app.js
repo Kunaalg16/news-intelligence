@@ -2587,9 +2587,11 @@ function liveTurn() {
       el('p', { class: 'error-first', text: words.first }),
       el('p', { class: 'error-hint', text: words.hint }));
     if (words.retry) {
+      /* L-11 · a failed Think harder retries Think harder, at its own price */
       box.append(paneButton('paid', {
         onclick: () => (live.retry ? live.retry() : askNow(live.question)) },
-                            'Retry · ', costTag(S.estimates.ask)));
+                            'Retry · ', costTag(live.parentOf ? S.estimates.think_harder
+                                                              : S.estimates.ask)));
     }
     body.append(box);
   } else {
@@ -2657,7 +2659,8 @@ async function askNow(question, options) {
 async function runThinkHarder(answerId) {
   const parent = answerById(answerId);
   S.live = { question: (parent ? parent.question : ''), sentences: [], results: null,
-             error: null, parentOf: answerId };
+             error: null, parentOf: answerId,
+             retry: () => runThinkHarder(answerId) };    /* L-11 · not a new question */
   delete S.folded[answerId];     /* L-2 · folds on the press (foldState), whatever was chosen */
   renderAssistant();
   await streamAnswer('/api/think_harder', { answer_id: answerId }, (event) => {

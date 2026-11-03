@@ -6084,6 +6084,14 @@ async function main() {
                        byLabel(buttons(), 'Retry').length]);
   }
 
+  // --- L-11 · Retry after a failed Think harder re-runs Think harder, at its price
+  var thFail = {world: function (w) { allFlagsOn(w); w.conv = clone(DATA.conversation);
+    w.stream = [{type: 'error', code: 'model_error', reason: 'model_busy', retryable: true}]; },
+    then: async function () { await pressB(byLabel(inTurn('f1'), 'Think harder')[0]); }};
+  var tr = await pressFresh(thFail, function () {
+    return byLabel(buttons(), 'Retry', 'assistant')[0]; });
+  OUT.th_retry = [tr && tr.label, bodies('/api/think_harder'), sent('/api/ask').length];
+
   // --- + / Remove on suggestions
   await pressFresh(SUGG, function () { return byLabel(buttons(), 'Add to thread', 'reading')[0]; });
   OUT.add = writes();
@@ -6164,6 +6172,9 @@ main().then(function () { print(JSON.stringify(OUT)); },
           got["cap_yes"], [[{}], 0, 1.5])
     check("[page] I9 B · Retry after a retryable failure re-sends the same question once",
           got["retry"], ["Retry · ≈ 0.08¢", ["what changed?"]])
+    check("[page] I9 B · L-11 · Retry after a failed Think harder re-runs Think harder "
+          "once, priced as Think harder, and asks nothing anew",
+          got["th_retry"], ["Retry · ≈ 2.1¢", [{"answer_id": "f1"}], 0])
     check("[page] I9 B · no Retry when retryable is false or missing; the error still shows",
           got["no_retry"], [["key_rejected", 1, 0], ["checks_failed", 1, 0],
                             ["timeout", 1, 0]])
