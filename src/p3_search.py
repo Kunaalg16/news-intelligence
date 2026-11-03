@@ -1026,7 +1026,8 @@ def _reason_of(exc):
 
 def _error_event(reason):
     return {"type": "error", "code": "model_error", "reason": reason,
-            "retryable": ERROR_RETRYABLE[reason], "message": ERROR_MESSAGES[reason]}
+            "retryable": ERROR_RETRYABLE[reason], "message": ERROR_MESSAGES[reason],
+            "fixture": False}
 
 
 def price(model_id, in_tokens, out_tokens):
@@ -1076,7 +1077,7 @@ def _cap_blocks(kind):
 
 
 def _cap_event(cost):
-    return {"type": "error", "code": "cap_reached", "retryable": False,
+    return {"type": "error", "code": "cap_reached", "retryable": False, "fixture": False,
             "message": (f"Daily cap ${cost['cap_usd']:.2f} reached · spent "
                         f"${cost['spent_usd']:.2f} today")}
 
@@ -1442,6 +1443,7 @@ def ask(question, scope=None, conversation_id=None):
                                     cited + [story_of[h] for h in cited],
                                     KNOBS["pane_results_shown"]),
         "results_total": result["total_stories"],
+        "fixture": False,
     }
     _add_turn(cid, "answer", answer)
     for s in sentences:
@@ -1516,7 +1518,7 @@ def ask_background(answer_id):
     _add_turn(cid, "background", {"answer_id": answer_id, "text": text, "cost_usd": cost,
                                   "at": R._now()})
     return {"answer_id": answer_id, "text": text, "model": "haiku",
-            "model_id": MODEL_IDS["haiku"], "cost_usd": cost}
+            "model_id": MODEL_IDS["haiku"], "cost_usd": cost, "fixture": False}
 
 
 # ================================================================ SUGGEST CONNECTIONS (§8)
@@ -1570,7 +1572,8 @@ def suggest_connections(story_id, text_hashes=None):
     row, top, query = _story_seed(story_id)
     hashes = sorted(text_hashes or row["seat_of_hash"])
     key = ST.fingerprint(hashes)
-    out = {"story_id": story_id, "model": "haiku", "model_id": MODEL_IDS["haiku"]}
+    out = {"story_id": story_id, "model": "haiku", "model_id": MODEL_IDS["haiku"],
+           "fixture": False}
     hit = R._intel_ro().execute(
         "SELECT suggestions, verdict FROM suggest_cache WHERE fingerprint = ? AND "
         "model = ? AND prompt_version = ?",

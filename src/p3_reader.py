@@ -69,6 +69,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -224,12 +225,16 @@ def _json_or(text, default):
 # least privilege, not neatness: `news.db` is the extraction's output and Phase 3 has no
 # business being able to write a byte of it (CLAUDE.md §2.4).
 
+# Keyed by THREAD as well as file: SQLite binds a connection to the thread that opened
+# it, and FastAPI runs sync routes in a thread pool, so one process-wide connection made
+# every route served off the first thread fail (found by wave 5, 3 Nov: K1's asgi and
+# v01_routes sections, and p3_mcp.py's tool threads).
 _CONS = {}
 
 
 def _news():
     path = _news_path()
-    key = ("news", str(path))
+    key = ("news", str(path), threading.get_ident())
     if key not in _CONS:
         if not path.exists():
             raise LookupError(f"missing {path}")
@@ -239,7 +244,7 @@ def _news():
 
 def _intel_ro():
     path = _intel_path()
-    key = ("intel_ro", str(path))
+    key = ("intel_ro", str(path), threading.get_ident())
     if key not in _CONS:
         _CONS[key] = S.open_intel_ro(path)
     return _CONS[key]
@@ -248,7 +253,7 @@ def _intel_ro():
 def _intel_w():
     """The one writable connection, and the only writer of K3's tables."""
     path = _intel_path()
-    key = ("intel_w", str(path))
+    key = ("intel_w", str(path), threading.get_ident())
     if key not in _CONS:
         _CONS[key] = S.open_intel(path, quiet=True)
     return _CONS[key]
@@ -580,6 +585,16 @@ def _user_entries(story_hashes):
         latest = max(s["date"] for s in seats)
         on_latest = [s for s in seats if s["date"] == latest]
         top = max(on_latest, key=lambda s: (s["words"] or 0))
+        # The headline is the TARGET STORY's own, by the digest's rule -- the one the
+        # reader saw when choosing it -- not the longest piece of its last day, which
+        # can differ (found by wave 5, K1 rule 14). The longest piece still gives the
+        # one-liner, as a thread day's does.
+        shape = D.paper_day_shape(seats)
+        for s in seats:
+            s["points"], s["points_why"] = D.seat_points(s, shape)
+        own = D.load_stories(_intel_ro(), seats)
+        headline = (D.pick_headline(own[0], {}).get("text") if len(own) == 1
+                    else None) or top["headline"]
         papers = sorted({s["publisher"] for s in seats})
         out.append({"entry_id": f"user:{link['link_id']}",
                     "link_id": link["link_id"],
@@ -588,7 +603,7 @@ def _user_entries(story_hashes):
                     "added_by": "you",
                     "parent_id": None,
                     "story_id": link["target_story_id"],
-                    "headline": top["headline"],
+                    "headline": headline,
                     "one_liner": top.get("summary"),
                     "articles": len({s["text_hash"] for s in seats}),
                     "papers": len(papers),

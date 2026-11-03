@@ -604,7 +604,8 @@ def ask_mock(tmp):
               "conversation_id", "parent_answer_id", "question", "scope", "model",
               "model_id", "verdict", "found_count", "sentences", "background", "cited",
               "found", "closest", "passage_set_id", "cost_usd", "attempts", "drops",
-              "at", "searched_days", "passage_count", "results", "results_total"]))
+              "at", "searched_days", "passage_count", "results", "results_total",
+              "fixture"]))
     check("[ask] no background line inside ask()", a1["background"], None)
     check("[ask] the writer saw at most 8 passages, at most 2 per article",
           (a1["passage_count"] <= 8,
@@ -897,7 +898,8 @@ def suggest_mock(tmp):
     check("[suggest] its own thread is excluded (g4 hangs off g1)",
           {"g1", "g4"} & set(ids), set())
     check("[suggest] the response shape", sorted(got),
-          sorted(["story_id", "suggestions", "verdict", "model", "model_id", "cost_usd"]))
+          sorted(["story_id", "suggestions", "verdict", "model", "model_id", "cost_usd",
+                  "fixture"]))
     check("[suggest] 1-3 search article rows each",
           all(1 <= len(s["articles"]) <= 3 for s in got["suggestions"]), True)
     check("[suggest] Haiku-priced and logged as 'suggest'",
