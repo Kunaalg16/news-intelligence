@@ -104,9 +104,13 @@ KNOBS = {
 
     # WHICH NUMBER THE VERDICT READS. Brief §3 rule 7 says the top story's FUSED score;
     # the Q17 run shows that number cannot carry the decision (see Q17_EVIDENCE
-    # "why_not_fused"), so the default is the top passage's SIMILARITY instead.
-    # `"fused_score"` is still implemented and selectable -- this knob is the whole of
-    # the deviation, and flipping it back is one word. NEEDS KUNAAL'S YES.
+    # "why_not_fused"), so this reads the top passage's SIMILARITY instead.
+    # CLOSED by Kunaal, 3 Nov 2026: keep the cosine. The brief's rule 7 and the design
+    # note's Q11 are superseded on this point, and `_docs/` records the old rule until
+    # the Project is updated -- so a later reader who finds them disagreeing with this
+    # line should trust this line and the measurement behind it, not the documents.
+    # `"fused_score"` is still implemented and selectable, for the record and in case a
+    # near-miss question set ever changes the picture.
     "verdict_signal": "top_similarity",          # "top_similarity" | "fused_score"
 
     # Below this cosine the top passage is not about the question at all -> verdict
