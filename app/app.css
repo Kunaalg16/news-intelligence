@@ -49,6 +49,14 @@
      artboard is drawn at them and Kunaal chose it over D14's mapping (11, 16). */
   --s115: 11.5px;               /* the cost on a paid button; the information line */
   --s17: 17px;                  /* the answer's prose */
+  /* Kunaal, 4 Nov: the Q/A boxes are centred on the CAPITALS of their row's first line.
+     Cap height as a share of the font size, measured in the page (canvas, 'H'): Plex is
+     0.698 at every weight used, Newsreader 0.676. --mark-mid is where an 18 px box's own
+     centre sits above its row's baseline under `align-items: baseline` (measured: the box
+     runs 13 px above the baseline and 5 px below it). */
+  --cap-sans: 0.698;
+  --cap-serif: 0.676;
+  --mark-mid: 4px;
 
   /* I7 · buttons by kind of action, in the ask pane. One shape, three roles: paid
      (spends money, the cost is on the button), free (changes what is shown or asked),
@@ -979,6 +987,8 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
   align-items: baseline;
+  --first-size: var(--s14);
+  --first-cap: var(--cap-sans);
 }
 .turn-row + .turn-row { margin-top: 8px; }
 .turn-mark {
@@ -992,6 +1002,21 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   font-weight: 700;
   line-height: 1;
   color: var(--ink);
+  transform: translateY(calc(var(--mark-mid) - var(--first-size) * var(--first-cap) / 2));
+}
+/* Centred on the capitals (Kunaal, 4 Nov, option 2 of three drawn): baseline alignment
+   alone centred the box on the small letters, so it hung 5 px below a line with no
+   descenders and looked low. Each row names the size and face of its first line; the box
+   is lifted by half that line's cap height less --mark-mid (the transform on .turn-mark;
+   .turn-row's default is the pane's 14 px sans: "Not in your papers", an error). `:has()`
+   reads the first line whatever builds it (a stored answer, a live one, a fold). */
+.turn-q { --first-size: var(--s16); }
+.turn-row:has(> .turn-body > .answer-text:first-child) {
+  --first-size: var(--s17);
+  --first-cap: var(--cap-serif);
+}
+.turn-row:has(> .turn-body > :is(.answer-weak, .answer-folded):first-child) {
+  --first-size: var(--s125);
 }
 .turn-a .turn-mark {
   background: var(--chip-ground);

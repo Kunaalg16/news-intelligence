@@ -2732,6 +2732,26 @@ def look_i7():
     check("[page] I7 · a 22 px marker column, markers on the first text line",
           [_rule(css, ".turn-row").get(k) for k in ("grid-template-columns", "align-items")],
           ["22px minmax(0, 1fr)", "baseline"])
+    # Kunaal, 4 Nov: the boxes are centred on the capitals of their row's first line (the
+    # run check measured 0.00 px off centre on eight kinds of first line; this reads the
+    # rules, not the layout). What would pass while broken: a first line of a kind not
+    # named here falls back to 14 px sans (under a pixel off); a font with another cap
+    # height needs its own share.
+    root = re.search(r":root\s*\{(.*?)\n\}", css, re.S).group(1)
+    check("[page] I9 · the boxes are lifted by half their first line's cap height",
+          [mark.get("transform"), [_rule(css, ".turn-row").get(k) for k in
+                                   ("--first-size", "--first-cap")], _rule(css, ".turn-q")],
+          ["translateY(calc(var(--mark-mid) - var(--first-size) * var(--first-cap) / 2))",
+           ["var(--s14)", "var(--cap-sans)"], {"--first-size": "var(--s16)"}])
+    check("[page] I9 · the measured cap heights and the box's own centre are tokens",
+          re.findall(r"(--cap-sans|--cap-serif|--mark-mid):\s*([\w.]+);", root),
+          [("--cap-sans", "0.698"), ("--cap-serif", "0.676"), ("--mark-mid", "4px")])
+    check("[page] I9 · a serif answer's row uses 17 px Newsreader, a weak or folded line "
+          "12.5 px", [_rule(css, ".turn-row:has(> .turn-body > .answer-text:first-child)"),
+                      _rule(css, ".turn-row:has(> .turn-body > :is(.answer-weak, "
+                                 ".answer-folded):first-child)")],
+          [{"--first-size": "var(--s17)", "--first-cap": "var(--cap-serif)"},
+           {"--first-size": "var(--s125)"}])
     check("[page] I7 · the question: Plex 16 px 600, line-height 1.4",
           [_rule(css, ".pane-you").get(k) for k in ("font-size", "font-weight", "line-height")],
           ["var(--s16)", "600", "1.4"])
@@ -6189,9 +6209,9 @@ def page_contract():
     # needs, drawn on top of `.action`, and styling it again would say nothing.
     # I7 moved the look of the pane's buttons onto `.btn-paid/free/save`; these classes
     # stay as handles only (the flag map's selectors, the suite's), as `background-button`
-    # already was. `turn-q` needs nothing beyond `.turn-row`; `turn-a` styles its marker.
+    # already was. (`turn-q` left this list on 4 Nov: it now names its first line's size.)
     HOOKS = {"reset", "background-button", "think-harder", "ask-all-papers", "cap-allow",
-             "turn-q", "ask-in-story"}
+             "ask-in-story"}
     check("[page] every class the page draws is styled", sorted(drawn - styled - HOOKS),
           [])
     check("[page] and the sweep really saw the whole page", len(drawn) > 140, True)
