@@ -80,6 +80,10 @@ def project(tmp, with_open_batch=False):
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE batches (batch_id TEXT, model TEXT, prompt_version TEXT, "
                 "submitted_at TEXT, requests INTEGER, status TEXT, collected_at TEXT)")
+    # A normal morning: yesterday's papers are extracted, today's folder is waiting.
+    con.execute("CREATE TABLE placements (date TEXT, publisher TEXT, source_file TEXT)")
+    con.execute("INSERT INTO placements VALUES ('2026-11-01', 'Mint', "
+                "'2026-11-01/2026-11-01_Mint.json')")
     if with_open_batch:
         con.execute("INSERT INTO batches VALUES "
                     "('batch_abc','haiku-5.5','v1.3','2026-11-03T05:00:00',312,'submitted',NULL)")
@@ -191,7 +195,7 @@ def dry(root):
     check("dry run prints the steps in order",
           out.index("1. archive") < out.index("3. tag") < out.index("9. judge"), True)
     check("dry run prints the paid estimate per step and the total",
-          ("PAID ≈ $0.30" in out, "estimated total ≈ $0.35" in out), (True, True))
+          ("PAID ≈ $0.20" in out, "estimated total ≈ $0.35" in out), (True, True))
     check("dry run names which steps are paid",
           "Paid steps: archive, extract, tag" in out, True)
     check("dry run prints the exact commands",
@@ -285,6 +289,46 @@ def failure(root):
     check("and nothing after it runs", len(stub.ran("src/")), 1)
 
 
+# ------------------------------- 4a. a catch-up: several days filed at once (3 Nov bug)
+
+def catch_up(tmp):
+    """Found 3 Nov on the real run: step 1 filed 28 Oct - 3 Nov, extract followed only
+    the newest folder, and six days were archived but never read. Every day without
+    articles must be extracted, oldest first; a day BEFORE the archive's first day is not;
+    a core paper missing on an extracted day is named, never run silently."""
+    root = project(Path(tmp) / "catchup")
+    P.LOCK = root / "_work" / "daily.lock"
+    for d in ("2026-10-28", "2026-10-30", "2026-09-15"):
+        (root / "archive" / d).mkdir(parents=True, exist_ok=True)
+    (root / "archive" / "2026-11-01" / "2026-11-01_The Hindu.pdf").write_bytes(b"%PDF")
+    (root / "archive" / "2026-11-01" / "2026-11-01_Mint_International.pdf").write_bytes(b"%PDF")
+    con = sqlite3.connect(root / "data" / "news.db")
+    con.execute("INSERT INTO placements VALUES ('2026-11-01', 'The Hindu', "
+                "'2026-11-01/2026-11-01_Other.json')")
+    con.commit()
+    con.close()
+    stub = FilingStub(root, "2026-11-04")
+    code, out = go(root, stub)
+    extracted = [c.split("archive/")[1].split()[0] for c in stub.ran("p2_extract.py")]
+    check("[catch-up] every unextracted day is extracted, oldest first",
+          extracted, ["2026-10-28", "2026-10-30", DAY, "2026-11-04"])
+    check("[catch-up] a folder before first_paper_day (15 Sep) is not extracted",
+          "2026-09-15" in " ".join(extracted), False)
+    check("[catch-up] an already-extracted day is not extracted again",
+          "2026-11-01" in extracted, False)
+    check("[catch-up] the plan says how many days are waiting before anything runs",
+          "waiting to be extracted now: 3 day(s)" in out.split("[1/9]")[0], True)
+    check("[catch-up] a CORE paper never extracted on an extracted day is named",
+          "2026-11-01_The Hindu.pdf was never extracted" in out, True)
+    check("[catch-up] a non-core edition (International) is not reported",
+          "Mint_International" in out, False)
+    check("[catch-up] the run finishes", code, 0)
+    stub = FilingStub(root, "2026-11-05", fail_on="archive/2026-10-30")
+    code, out = go(root, stub)
+    check("[catch-up] a failing day stops the run and is named",
+          (code, "failed on 2026-10-30" in out), (1, True))
+
+
 # --------------------------------------- 4b. the day the archive step has just filed
 
 class FilingStub(Stub):
@@ -316,12 +360,12 @@ def after_filing(tmp):
 
     check("the plan was drawn with the newest folder that existed then",
           f"archive/{DAY} --pipeline" in out.split("[1/9]")[0], True)
-    check("extract then ran on the day step 1 filed",
-          "src/p2_extract.py archive/2026-11-04 --pipeline" in stub.ran("p2_extract.py")[0],
-          True)
-    check("and the change is said out loud, with both days",
-          ("papers just filed" in out, "now 2026-11-04" in out, f"was {DAY}" in out),
-          (True, True, True))
+    extracted = [c.split("archive/")[1].split()[0] for c in stub.ran("p2_extract.py")]
+    check("extract ran on EVERY waiting day, the filed one included, oldest first",
+          extracted, [DAY, "2026-11-04"])
+    check("and the catch-up is said out loud, with the days",
+          ("2 day(s) to extract, oldest first" in out, f"{DAY}, 2026-11-04" in out),
+          (True, True))
     check("the run still finishes", code, 0)
 
     # a named --date is Kunaal's instruction and is never overridden
@@ -354,14 +398,18 @@ def batch(tmp):
           "--model haiku-5.5" in stub.ran("p2_tag.py collect")[0], True)
     check("a batch that is back is not waited for", stub.slept, [])
 
-    # (b) a batch already out: NOT re-submitted. `p2_tag.py` would refuse anyway, but a
-    # resumed morning should be quiet and deliberate, not an error on step 3.
+    # (b) a batch already out: COLLECTED FIRST, then one submit for this run's new texts.
+    # Submitting first would be refused by p2_tag; not submitting at all left a catch-up's
+    # days extracted and untagged (3 Nov). p2_tag skips tagged texts, so nothing re-pays.
     root = project(Path(tmp) / "resume", with_open_batch=True)
     P.LOCK = root / "_work" / "daily.lock"
     stub = Stub()
     code, out = go(root, stub)
-    check("a batch already out is not re-submitted", stub.ran("p2_tag.py submit"), [])
-    check("it is collected instead", len(stub.ran("p2_tag.py collect")), 1)
+    tag_calls = [c.split("p2_tag.py ")[1].split()[0] for c in stub.ran("p2_tag.py")]
+    check("a batch already out is collected BEFORE any submit",
+          tag_calls.index("collect") < tag_calls.index("submit"), True)
+    check("then exactly one submit runs, for the texts this run extracted",
+          tag_calls.count("submit"), 1)
     check("and the resume says nothing was re-paid", "nothing re-paid" in out, True)
     check("the rest of the run still happens", code, 0)
     check("open_batch reads the id from news.db read-only", P.open_batch(root), "batch_abc")
@@ -408,6 +456,7 @@ def main():
             dry(root)
             lock(root)
             failure(root)
+            catch_up(tmp)
             after_filing(tmp)
             batch(tmp)
     finally:

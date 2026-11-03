@@ -34,12 +34,15 @@ WHY ONE COMMAND, AND WHY IT WAITS BY ITSELF
   exists and the page shows the last finished digest with a note instead of blocking
   (stale-while-processing).
 
-  The paper-day follows the papers. The plan is printed before step 1 runs, so on a
-  normal morning -- PDFs still in ~/Downloads -- the newest dated folder is YESTERDAY's.
-  Once the archive step has filed today's papers the run re-reads the newest folder and
-  extract follows it, saying so in one line. A `--date` given by hand is never
-  overridden. Without this the one-command run would re-extract yesterday every morning
-  and today's paper would never be read.
+  EVERY day waiting is extracted, not only the newest (fixed 3 Nov). The plan is
+  printed before step 1 runs and lists the archived days that have no articles yet;
+  once step 1 has filed new papers -- one day on a normal morning, a week of them after
+  a gap -- the run recomputes that list and extracts each day, oldest first, saying so
+  in one line. Following only the newest folder left 25 Oct - 2 Nov archived and unread.
+  Days before `first_paper_day` are left alone; a core paper missing on a day that WAS
+  extracted is named in the plan, never run silently. A `--date` given by hand extracts
+  exactly that day. If a tag batch is already out, it is collected first and the new
+  texts are then submitted -- resuming without submitting left new days untagged.
 
   If the batch has not come back within `batch_wait_hours`, the run STOPS CLEANLY rather
   than waiting forever, and says the one command that resumes it. Nothing is re-paid:
@@ -136,11 +139,19 @@ KNOBS = {
         # 1-2 model calls per PDF (date, and a second front-page question when the first
         # page is a wrap ad), ~4 papers a day. Guess, from the call pattern.
         "archive": 0.02,
-        # The Business Line referee, ≈ $0.01 per page re-run (design §7, guess).
-        "extract": 0.03,
-        # ≈ $0.60 per ≈ 500 texts measured (STATUS 25 Oct), ≈ half on Batch (Q9b).
-        "tag": 0.30,
+        # PER PAPER-DAY. MEASURED 3 Nov: the Business Line referee on one day, 16 pages,
+        # $0.1330 (the old guess, $0.03, was a quarter of that).
+        "extract": 0.13,
+        # PER PAPER-DAY. MEASURED 3 Nov: 197 texts estimated $0.11 on Batch, ≈ $0.00056 a
+        # text; a normal day is ≈ 350 texts. Was a flat $0.30 per run, which a catch-up of
+        # several days made meaningless.
+        "tag": 0.20,
     },
+
+    # The archive's first paper-day. Folders before it are not extracted by this run.
+    # 16 Sep is where news.db starts; archive/2026-09-15 holds one stray Economic Times
+    # PDF, a title the pipeline does not otherwise read (3 Nov). Kunaal's call to change.
+    "first_paper_day": "2026-09-16",
 
     # A lock older than this whose process is gone is treated as a crash and taken over.
     # It only has to be longer than the gap between writing the file and the first step.
@@ -162,6 +173,60 @@ def paper_days(root=ROOT):
                   reverse=True)
 
 
+def _stored(root):
+    """(dates with articles, extracted source stems, publishers) from news.db, read-only."""
+    db = Path(root) / "data" / "news.db"
+    if not db.exists():
+        return set(), set(), set()
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT DISTINCT date, source_file, publisher FROM placements").fetchall()
+    except sqlite3.OperationalError:
+        rows = []                     # no placements table yet: nothing has been extracted
+    finally:
+        con.close()
+    return ({d for d, _f, _p in rows}, {(f or "").rsplit(".", 1)[0] for _d, f, _p in rows},
+            {p for _d, _f, p in rows if p})
+
+
+def unextracted_days(root=ROOT):
+    """Every archived paper-day with NO articles in news.db, OLDEST first.
+
+    Not just the newest folder: a morning that files several days at once (papers
+    collected over a week) must extract all of them, or every day but the last is
+    archived and silently never read. Found 3 Nov: 25 Oct - 2 Nov were filed and only
+    3 Nov extracted. Grouping copes with days arriving out of order (p3_group's `track`
+    re-tracks every date whose window changed), so oldest-first is for readability of
+    the log, not for correctness of the links.
+    """
+    have, _stems, _pubs = _stored(root)
+    return sorted(d for d in paper_days(root)
+                  if d >= KNOBS["first_paper_day"] and d not in have)
+
+
+def missing_core_papers(root=ROOT):
+    """(day, pdf) for a CORE paper's PDF that was never extracted on a day that was.
+
+    Core = a publisher news.db already holds. Other editions in the folders (Economic
+    Times, The Hindu International / School) are not extracted by design, so they are
+    not reported -- only a gap among the papers the pipeline does read."""
+    have, stems, pubs = _stored(root)
+    out = []
+    for d in sorted(have):
+        folder = Path(root) / "archive" / d
+        if d < KNOBS["first_paper_day"] or not folder.is_dir():
+            continue
+        for pdf in sorted(folder.glob("*.pdf")):
+            paper = pdf.stem[len(d) + 1:]
+            if paper in pubs and f"{d}/{pdf.stem}" not in stems:
+                out.append((d, pdf.name))
+    return out
+
+
+def _extract_args(day):
+    return ["src/p2_extract.py", f"archive/{day}", "--pipeline"]
+
+
 def plan(date=None, root=ROOT):
     """The steps, in order, with the exact command each one runs.
 
@@ -173,6 +238,9 @@ def plan(date=None, root=ROOT):
     """
     root = Path(root)
     day = date or (paper_days(root)[0] if paper_days(root) else None)
+    # Which days step 2 extracts: the one asked for, or EVERY archived day not yet
+    # extracted (oldest first). Recomputed after step 1 files new papers.
+    days = [date] if date else unextracted_days(root)
     tag_model = KNOBS["tag_model"]
     est = KNOBS["estimate_usd"]
     steps = [
@@ -180,14 +248,14 @@ def plan(date=None, root=ROOT):
          "python": VENV, "args": ["src/p1_archive_paper.py"],
          "paid": True, "estimate": est["archive"], "kind": "command"},
         {"n": 2, "name": "extract", "what": "PDFs in, articles out (referee on Business Line)",
-         "python": VENV, "args": ["src/p2_extract.py", f"archive/{day}", "--pipeline"],
-         "paid": True, "estimate": est["extract"], "kind": "command",
-         "needs_date": True},
+         "python": VENV, "args": _extract_args(days[0] if days else day),
+         "paid": True, "estimate": est["extract"] * max(1, len(days)), "kind": "extract",
+         "days": days, "needs_date": True},
         {"n": 3, "name": "tag", "what": f"every untagged text as ONE Batch API job ({tag_model})",
          "python": VENV, "args": ["src/p2_tag.py", "submit",
                                   "--model", tag_model,
                                   "--cap", f"{KNOBS['tag_cap_usd']:.2f}"],
-         "paid": True, "estimate": est["tag"], "kind": "tag"},
+         "paid": True, "estimate": est["tag"] * max(1, len(days)), "kind": "tag"},
         {"n": 4, "name": "store check", "what": "per-run counts, before anything is grouped",
          "python": VENV, "args": ["src/p2_store.py", "check"],
          "paid": False, "estimate": 0.0, "kind": "command"},
@@ -214,6 +282,11 @@ def shown(step, root=ROOT):
     """One step's command exactly as it would be typed, from ~/news-intel."""
     if step["kind"] == "skipped":
         return "(nothing to run)"
+    if step["kind"] == "extract" and len(step.get("days") or []) != 1:
+        if not step.get("days"):
+            return "(no archived day is waiting to be extracted)"
+        return "\n     ".join(shown(dict(step, kind="command", args=_extract_args(d)), root)
+                               for d in step["days"])
     python = Path(step["python"])
     try:
         python = python.relative_to(Path(root))
@@ -226,6 +299,14 @@ def shown(step, root=ROOT):
 def print_plan(day, steps, root=ROOT):
     """The plan, the paid steps with an estimate, and the exact commands."""
     print(f"Daily run · paper-day {day or 'NONE FOUND'} · {datetime.now():%Y-%m-%d %H:%M}")
+    extract = next((s for s in steps if s.get("needs_date")), {})
+    waiting = extract.get("days") or []
+    print(f"  waiting to be extracted now: {len(waiting)} day(s)"
+          + (f" ({', '.join(waiting)})" if waiting else "")
+          + " · days filed by step 1 are added after it runs")
+    for d, pdf in missing_core_papers(root):
+        print(f"  NOTE: {d} has articles but {pdf} was never extracted (a core paper) "
+              f"-- not run automatically; run p2_extract.py on it if it should be")
     print()
     for s in steps:
         money = f"PAID ≈ ${s['estimate']:.2f}" if s["paid"] else ("—" if s["kind"] == "skipped" else "free")
@@ -358,13 +439,25 @@ def run_tag(step, runner, capture, sleep, root=ROOT, log=print):
     cap = f"{KNOBS['tag_cap_usd']:.2f}"
     already = open_batch(root)
     if already:
-        log(f"  a batch is already out ({already}); resuming — not submitting, "
-            f"nothing re-paid")
-    else:
-        code = run_command(step, runner, root)
-        if code != 0:
-            return "failed"
+        # Collect what is already out FIRST, then still submit: the texts extracted in
+        # THIS run are not in that batch. Resuming without submitting left a catch-up's
+        # days extracted and never tagged (found 3 Nov, with 3 Nov's batch still open).
+        # p2_tag skips texts that already have a record, so nothing is paid twice, and
+        # it says "Nothing to tag" and exits 0 when there is nothing new.
+        log(f"  a batch is already out ({already}); collecting it first, nothing re-paid")
+        first = _wait_collect(step, runner, capture, sleep, root, log)
+        if first != "ok":
+            return first
+        log("  now submitting whatever is still untagged (this run's new texts)")
+    code = run_command(step, runner, root)
+    if code != 0:
+        return "failed"
+    return _wait_collect(step, runner, capture, sleep, root, log)
 
+
+def _wait_collect(step, runner, capture, sleep, root=ROOT, log=print):
+    """Poll `status` until the batch is back, then `collect`. "ok" | "paused" | "failed"."""
+    model = KNOBS["tag_model"]
     poll = [str(VENV), "src/p2_tag.py", "status", "--model", model]
     collect = [str(VENV), "src/p2_tag.py", "collect", "--model", model]
     waited, limit = 0.0, KNOBS["batch_wait_hours"] * 3600
@@ -437,21 +530,32 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
                 if run_command(step, runner, root) != 0:
                     return stop(step, started, ran, log)
                 ran.append(step["name"])
-                # The archive step has just filed today's PDFs, which makes a NEWER
-                # dated folder than the one the plan was printed with -- the plan is
-                # drawn before step 1 runs, so on a normal morning it names yesterday.
-                # Follow the papers that were just filed, and say so: the approval was
-                # about which steps cost money, and that has not changed.
+                # The archive step has just filed new PDFs -- possibly SEVERAL days of
+                # them (a week of papers collected at once). The plan was drawn before
+                # step 1, so recompute EVERY archived day not yet extracted, oldest
+                # first, and say so. Following only the newest folder is what left
+                # 25 Oct - 2 Nov archived and unread on 3 Nov.
                 if date is None:
-                    now = paper_days(root)
-                    if now and now[0] != day:
-                        was, day = day, now[0]
-                        log(f"  papers just filed: the paper-day is now {day} "
-                            f"(was {was}); extract follows the new day")
-                        for s in steps:
-                            if s.get("needs_date"):
-                                s["args"] = ["src/p2_extract.py", f"archive/{day}",
-                                             "--pipeline"]
+                    waiting = unextracted_days(root)
+                    for s in steps:
+                        if s.get("needs_date"):
+                            s["days"] = waiting
+                            s["args"] = _extract_args(waiting[0]) if waiting else s["args"]
+                    if waiting:
+                        day = waiting[-1]
+                        log(f"  papers filed: {len(waiting)} day(s) to extract, oldest first: "
+                            f"{', '.join(waiting)}")
+                    else:
+                        log("  no archived day is waiting to be extracted")
+                continue
+            if step["kind"] == "extract":
+                for d in step.get("days") or []:
+                    one = dict(step, kind="command", args=_extract_args(d))
+                    log(f"  extract {d} · {shown(one, root)}")
+                    if run_command(one, runner, root) != 0:
+                        return stop(dict(step, what=f"{step['what']} · failed on {d}"),
+                                    started, ran, log)
+                ran.append(step["name"])
                 continue
             if step["kind"] == "tag":
                 outcome = run_tag(dict(step, day=day), runner, capture, sleep, root, log)
