@@ -1437,13 +1437,65 @@ eq("[page] a browse cannot be sorted by relevance, so that switch is off",
 var live = APP.liveTurn.call(null);
 
 // State 3 · Think harder: the Haiku answer folds to one line
-var folded = APP.answerTurn(answerFixture(), {folded: true});
+var folded = APP.answerTurn(answerFixture(), {foldable: true, folded: true});
 eq("[page] state 3 · the Haiku answer folds to one line with its cost",
    textOf(folded).indexOf("▸ Haiku answer · 0.05¢") > 0, true);
 eq("[page] state 3 · and its sentences are gone while folded",
    textOf(folded).indexOf("Sample answer · one.") > 0, false);
 eq("[page] state 3 · the Sonnet label names the passage count",
    APP.sonnetLabel({parent_answer_id: "a1"}), "Sonnet · same 6 passages");
+
+// S4 · L-2: the fold is a switch both ways, read from the conversation
+var foldOpen = APP.answerTurn(answerFixture(), {foldable: true, folded: false});
+eq("[page] L-2 · open, the Haiku answer keeps its label as the switch back, sentences shown",
+   [textOf(foldOpen).indexOf("▾ Haiku answer · 0.05¢") > 0,
+    textOf(foldOpen).indexOf("Sample answer · one.") > 0], [true, true]);
+nodesOf(foldOpen, "button").filter(function (b) {
+  return textOf(b).indexOf("▾ Haiku answer") === 0; })[0].handlers.click[0]({});
+eq("[page] L-2 · pressing the open switch folds it again (both ways)", PS.folded.a1, true);
+PS.folded = {};
+eq("[page] L-2 · an answer with nothing under it has no Haiku label",
+   textOf(APP.answerTurn(answerFixture(), {})).indexOf("Haiku answer") < 0, true);
+var keptConv = PS.conversation, keptLive = PS.live;
+PS.conversation = {turns: [{kind: "answer", answer: answerFixture()},
+  {kind: "answer", answer: answerFixture({answer_id: "a2", parent_answer_id: "a1",
+                                          model: "sonnet"})}]};
+PS.live = null; PS.folded = {};
+eq("[page] L-2 · a Sonnet answer in the conversation folds its Haiku answer (so a reload keeps it)",
+   APP.foldState("a1"), {foldable: true, folded: true});
+PS.folded = {a1: false};
+eq("[page] L-2 · the reader's choice wins", APP.foldState("a1"),
+   {foldable: true, folded: false});
+PS.folded = {};
+PS.conversation = {turns: [{kind: "answer", answer: answerFixture()}]};
+eq("[page] L-2 · nothing under it, no Think harder running: not foldable",
+   APP.foldState("a1"), {foldable: false, folded: false});
+PS.live = {question: "what happened in Delhi?", sentences: [], results: null,
+           error: null, parentOf: "a1"};
+eq("[page] L-2 · it folds on the press, while Think harder runs",
+   APP.foldState("a1"), {foldable: true, folded: true});
+
+// S4 · L-1 and L-3: Think harder's live turn, and words while a stream runs
+var thLive = APP.liveTurn();
+eq("[page] L-1 · Think harder's live turn draws no question row",
+   classesOf(thLive).filter(function (c) { return c === "turn-row turn-q"; }).length, 0);
+eq("[page] L-1 · it opens with the Sonnet label, as the stored one will",
+   textOf(thLive).indexOf("Sonnet · same 6 passages"), 0);
+eq("[page] L-3 · and says Sonnet is writing", textOf(thLive).indexOf("Sonnet is writing…") > 0, true);
+PS.live.error = {code: "model_error", reason: "other", retryable: true};
+eq("[page] L-2 · a failed Think harder leaves the Haiku answer open",
+   APP.foldState("a1"), {foldable: false, folded: false});
+eq("[page] L-3 · an error says no one is writing",
+   textOf(APP.liveTurn()).indexOf("is writing") < 0, true);
+PS.live = {question: "q", sentences: [], results: null, error: null};
+var askLive = APP.liveTurn();
+eq("[page] L-3 · a question's live turn keeps its Q row and says Haiku is writing",
+   [classesOf(askLive).filter(function (c) { return c === "turn-row turn-q"; }).length,
+    textOf(askLive).indexOf("Haiku is writing…") > 0], [1, true]);
+PS.live.answer = answerFixture();
+eq("[page] L-3 · once the answer is done the words go",
+   textOf(APP.liveTurn()).indexOf("is writing") < 0, true);
+PS.conversation = keptConv; PS.live = keptLive; PS.folded = {};
 eq("[page] state 3 · with the results gone, it claims no number",
    APP.sonnetLabel({parent_answer_id: "nothing"}), "Sonnet · the same passages");
 
@@ -2705,6 +2757,15 @@ def look_i7():
           re.findall(r"(--s115|--s17):\s*([\d.]+px)",
                      re.search(r":root\s*\{(.*?)\n\}", css, re.S).group(1)),
           [("--s115", "11.5px"), ("--s17", "17px")])
+    check("[page] L-5 · the pane's one column is the pane's width, not its widest child's",
+          _rule(css, ".pane").get("grid-template-columns"), "minmax(0, 1fr)")
+    chip = _rule(css, ".scope-chip span")
+    check("[page] L-5 · a long scope chip wraps (no nowrap, no ellipsis)",
+          [chip.get("white-space"), chip.get("text-overflow"), chip.get("overflow-wrap"),
+           chip.get("min-width")], [None, None, "anywhere", "0"])
+    check("[page] L-3 · the working words are muted 12.5 px",
+          [_rule(css, ".answer-working").get(k) for k in ("font-size", "color")],
+          ["var(--s125)", "var(--text-muted)"])
     btn = _rule(css, ".btn")
     check("[page] I7 · one button shape: 30 px tall, Plex 12.5 px 500, padding 0 12 px, "
           "radius 2 px, 1 px border",
@@ -5651,7 +5712,13 @@ var STATES = [
     await APP.openArticle(Object.keys(DATA.articles)[0]); }},
   {name: 'ask · conversation, flags as served', world: function (w) {
     w.conv = convWith(EXTRA_TURNS); }, then: async function () {
-    APP.S.results.f1 = clone(DATA.search[1]); APP.renderAssistant(); }},
+    APP.S.results.f1 = clone(DATA.search[1]);
+    /* L-2 folds a Haiku answer with a Sonnet answer under it by default: opened here,
+       so its buttons are swept open in this state and folded in the next. */
+    APP.S.conversation.turns.forEach(function (t) {
+      if (t.kind === 'answer' && t.answer.parent_answer_id) {
+        APP.S.folded[t.answer.parent_answer_id] = false; } });
+    APP.renderAssistant(); }},
   {name: 'ask · conversation, every flag on', world: function (w) {
     allFlagsOn(w); w.conv = convWith(EXTRA_TURNS); }, then: async function () {
     APP.S.results.f1 = clone(DATA.search[1]); APP.S.folded.f1 = true; APP.renderAssistant(); }},

@@ -915,6 +915,9 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .pane {
   display: grid;
   grid-template-rows: auto auto 1fr auto;
+  /* L-5 · the one column is the pane's width, never its widest child's: a long scope
+     chip measured 407 px inside a 359 px pane and pushed everything past the edge. */
+  grid-template-columns: minmax(0, 1fr);
   height: 100%;
   width: 100%;
 }
@@ -965,10 +968,10 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   font-size: var(--s11);
   color: var(--text-secondary);
 }
+/* L-5 · a long headline wraps inside its chip (Kunaal: wrap, not "…"). */
 .scope-chip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .scope-chip button { color: var(--text-muted); line-height: 1; padding: 0 2px; }
 .scope-chip button:hover { color: var(--red); }
@@ -1170,6 +1173,12 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   text-align: left;
 }
 .answer-folded:hover { color: var(--ink); }
+/* L-3 · what is working while a stream runs ("Haiku is writing…"). */
+.answer-working {
+  margin: 0 0 8px;
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
 .sonnet-label { margin: 0 0 6px; }
 
 /* The results list. It arrives first and is the thing the answer is built from, so it

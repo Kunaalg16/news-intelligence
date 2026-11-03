@@ -2340,13 +2340,15 @@ function answerTurn(answer, opts) {
   const body = el('div', { class: 'turn-body' });
   block.append(turnRow('A', body));
 
-  if (o.folded) {
+  /* L-2 · a Haiku answer with a Sonnet answer under it carries its own label, which is
+     also the switch: "▸" folded, "▾" open, both ways. */
+  if (o.foldable) {
     body.append(el('button', {
       class: 'reset answer-folded', type: 'button',
-      'aria-expanded': 'false',
-      onclick: () => { S.folded[answer.answer_id] = false; renderAssistant(); },
-    }, '▸ Haiku answer · ' + moneyFine(answer.cost_usd)));
-    return block;
+      'aria-expanded': o.folded ? 'false' : 'true',
+      onclick: () => { S.folded[answer.answer_id] = !o.folded; renderAssistant(); },
+    }, (o.folded ? '▸ ' : '▾ ') + 'Haiku answer · ' + moneyFine(answer.cost_usd)));
+    if (o.folded) return block;
   }
 
   if (answer.verdict === 'empty') {
@@ -2477,12 +2479,26 @@ async function streamAnswer(url, body, onEvent) {
   for (const event of last.events) onEvent(event);
 }
 
+/* L-3 · while a stream runs, words say what is working, not only the caret. */
+function workingWords(live) {
+  return (live.parentOf ? 'Sonnet' : 'Haiku') + ' is writing…';
+}
+
+/* L-1 · Think harder's live turn has no question of its own (its parent shows it), so
+   it is drawn as the stored one will be: the Sonnet label, then an A row. */
 function liveTurn() {
   const live = S.live;
   if (!live) return null;
   const byHash = paneHashes();
   const block = el('div', { class: 'pane-turn' });
-  block.append(questionRow(live.question));
+  if (live.parentOf) {
+    const parent = answerById(live.parentOf) || {};
+    block.append(el('p', { class: 'block-label sonnet-label',
+      text: sonnetLabel({ passage_count: parent.passage_count,
+                          parent_answer_id: live.parentOf }) }));
+  } else {
+    block.append(questionRow(live.question));
+  }
   const body = el('div', { class: 'turn-body' });
   block.append(turnRow('A', body));
 
@@ -2508,6 +2524,10 @@ function liveTurn() {
     }
     text.append(el('span', { class: 'answer-caret', 'aria-hidden': 'true' }));
     body.append(text);
+    if (!live.answer) {
+      body.append(el('p', { class: 'answer-working', role: 'status',
+                            text: workingWords(live) }));
+    }
   }
 
   if (live.results) {
@@ -2563,6 +2583,7 @@ async function runThinkHarder(answerId) {
   const parent = answerById(answerId);
   S.live = { question: (parent ? parent.question : ''), sentences: [], results: null,
              error: null, parentOf: answerId };
+  delete S.folded[answerId];     /* L-2 · folds on the press (foldState), whatever was chosen */
   renderAssistant();
   await streamAnswer('/api/think_harder', { answer_id: answerId }, (event) => {
     if (!S.live) return;
@@ -2573,10 +2594,7 @@ async function runThinkHarder(answerId) {
   });
   const live = S.live;
   if (!keepLiveAfterStream(live)) S.live = null;
-  if (live && live.answer) {
-    S.folded[answerId] = true;
-    S.results[live.answer.answer_id] = S.results[answerId];
-  }
+  if (live && live.answer) S.results[live.answer.answer_id] = S.results[answerId];
   await refreshConversation();
   S.cost = await api.cost();
   renderAssistant();
@@ -2714,6 +2732,20 @@ function widenLine(answer) {
    place (contract: same position), whatever order the conversation lists them in, and a
    chain of re-asks ends at the newest. With K3 hiding the old turn this changes nothing;
    it is the page's own guard for "same position". */
+/* L-2 · whether a Haiku answer can fold, and whether it is folded now. It folds while
+   Think harder runs on it and while a Sonnet answer to it is in the conversation, so
+   the fold is read from the conversation and survives a reload; a failed Think harder
+   leaves it open. S.folded holds only what the reader chose with the switch. */
+function foldState(answerId) {
+  const turns = (S.conversation && S.conversation.turns) || [];
+  const running = Boolean(S.live && S.live.parentOf === answerId && !S.live.error);
+  const foldable = running || turns.some((t) => t.kind === 'answer'
+                                         && t.answer.parent_answer_id === answerId);
+  if (!foldable) return { foldable: false, folded: false };
+  return { foldable: true,
+           folded: answerId in S.folded ? Boolean(S.folded[answerId]) : true };
+}
+
 function paneTurns(conversation) {
   const turns = (conversation && conversation.turns) || [];
   const ids = new Set(turns.filter((t) => t.kind === 'answer').map((t) => t.answer.answer_id));
@@ -2865,7 +2897,8 @@ function renderAssistant() {
         body.append(answerTurn(answer, { noQuestion: true, noResults: true }));
       } else {
         if (!here || S.live.error) {
-          body.append(answerTurn(answer, { folded: Boolean(S.folded[answer.answer_id]),
+          const fold = foldState(answer.answer_id);
+          body.append(answerTurn(answer, { foldable: fold.foldable, folded: fold.folded,
                                            first: !firstSeen }));
         }
         firstSeen = true;
@@ -3838,7 +3871,7 @@ const EXPORTS = {
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */
   answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
-  backgroundBlock, resultRow, sonnetLabel, renderAssistant, collapsedRail,
+  backgroundBlock, resultRow, sonnetLabel, foldState, workingWords, renderAssistant, collapsedRail,
   keepLiveAfterStream,
   suggestSection, suggestionsBox, suggestionRow, icon, userLinkTo, suggestionPinned,
   exploreChips, exploreCounts, exploreArticleRows, exploreRow, exploreScreen,
