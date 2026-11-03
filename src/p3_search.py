@@ -190,7 +190,9 @@ KNOBS = {
     # one repair; think_harder the same on Sonnet; background ~200 / 250; suggest
     # ~1,500 / 300. Measured by: the first five live calls of each kind.
     "estimate_min_rows": 5,
-    "estimate_fallback_usd": {"ask": 0.0008, "think_harder": 0.012,
+    # think_harder: MEASURED 0.020446 on the first live call (3 Nov) -- Sonnet's default
+    # thinking is billed as output, which the 0.012 arithmetic left out.
+    "estimate_fallback_usd": {"ask": 0.0008, "think_harder": 0.021,
                               "background": 0.0002, "suggest": 0.0004},
     # Output ceilings per call purpose. A cut-off answer fails its checks, so these
     # sit well above what the rules ask for.
@@ -899,10 +901,11 @@ MODEL_REGISTER = {
     "claude-haiku-5-5": {"forced_tool": True, "structured_output": "not yet used live",
                          "thinking_default": "adaptive, effort medium",
                          "verified": "2026-11-03, live ask (forced tool, $0.000792)"},
-    "claude-sonnet-5-5": {"forced_tool": False, "structured_output": "documented; first "
-                          "live call pending", "thinking_default": "adaptive, effort high "
-                          "(counts against max_tokens)",
-                          "verified": "2026-11-03: forced tool -> 400 (live); docs read"},
+    "claude-sonnet-5-5": {"forced_tool": False, "structured_output": True,
+                          "thinking_default": "adaptive, effort high (billed as output; "
+                          "counts against max_tokens)",
+                          "verified": "2026-11-03, live: forced tool -> 400 (refused, $0); "
+                          "structured output -> Think harder answered, $0.020446"},
 }
 
 ASK_PROMPT_VERSION = "a1.0"
@@ -1027,7 +1030,14 @@ def _live_client():
             if "tool_choice" not in str(e):
                 raise
             forced_refused.add(model)
-            return _from_text(sdk.messages.create(**structured))
+            try:
+                return _from_text(sdk.messages.create(**structured))
+            except anthropic.BadRequestError as e2:
+                # Name WHICH request failed and what it carried, so a second refusal is
+                # evidence rather than a repeat of the first one's message.
+                raise type(e2)(f"structured fallback ALSO refused (request had keys "
+                               f"{sorted(structured)}): {e2}", response=e2.response,
+                               body=e2.body) from e
         usage = message.usage
         block = next((b for b in message.content
                       if getattr(b, "type", "") == "tool_use"), None)
