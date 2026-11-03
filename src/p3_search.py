@@ -898,10 +898,14 @@ PRICES_PER_MTOK = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.00,
 # one live call, and the date is written in. The client below decides per call from the
 # API's own refusal where it can, but this table is what a reader checks first.
 MODEL_REGISTER = {
-    "claude-haiku-5-5": {"forced_tool": True, "structured_output": "not yet used live",
+    # Request shapes PROBED against the real API, 3 Nov (count_tokens, free; script
+    # _work/k3_b2_b26_out/sonnet_probe.py): forced tool / auto tool / structured output.
+    # Overhead on a one-line prompt: forced 569, auto 445, structured 321 tokens.
+    "claude-haiku-5-5": {"forced_tool": True, "auto_tool": True,
+                         "structured_output": "accepted (probe); not yet used live",
                          "thinking_default": "adaptive, effort medium",
                          "verified": "2026-11-03, live ask (forced tool, $0.000792)"},
-    "claude-sonnet-5-5": {"forced_tool": False, "structured_output": True,
+    "claude-sonnet-5-5": {"forced_tool": False, "auto_tool": True, "structured_output": True,
                           "thinking_default": "adaptive, effort high (billed as output; "
                           "counts against max_tokens)",
                           "verified": "2026-11-03, live: forced tool -> 400 (refused, $0); "
