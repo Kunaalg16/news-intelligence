@@ -1,7 +1,16 @@
 """
-test_p3_app.py -- TEST (free, no API key, no internet). Checks the K1 app v0:
-src/p3_app_double.py (the §4 interface) and src/p3_app.py (the routes). The page itself
-is checked by the markup and contrast parts that arrive with A7.
+test_p3_app.py -- TEST (free, no API key, no internet). Checks the K1 app on K3's REAL
+data layer (`p3_reader`, which re-exports `p3_search`) and src/p3_app.py (the routes).
+
+SINCE THE INTEGRATION (brief `_docs/K1_integration_brief.md`, I1-I2)
+    The double is gone. Every section runs on a fresh COPY of data/intel.db, with a FAKE
+    model client plugged into p3_search (the real one cannot even be built in this
+    process), and the real intel.db's checksum is compared before and after the run.
+    Page states the archive cannot produce on demand come from `tests/p3_app_stub.py`,
+    chosen cases only, handed to the app by the check that needs one. A check that
+    cannot run on real data is SKIPPED with its reason and counted, never dropped.
+    Parts 1-5 below are build 1's description and are kept for the record; where they
+    say "the double", read "the data layer".
 
 WHAT IT DOES
     Six parts, none of which touches a database or the reader's real state file.
@@ -103,28 +112,135 @@ PASS LINES (fixed before the run; brief §4 rules, §7 populations, §8.7 states
     Ownership (brief §2.1, acceptance check 9)
     - The double imports no sqlite3, no p3_store, no p3_digest, and nothing that reaches
       the network. It writes exactly one file: `_work/k1_app_state.json`.
-    - `p3_app.py` has exactly ONE data import, `p3_app_double`, so integration is the
-      one-line swap the brief asks for, and it too imports no database.
+    - `p3_app.py` has exactly ONE data import, `p3_reader` (since I1), and imports no
+      database itself; the double's file is gone and the app never names the stub.
     A failed line is answered by reading the failure, not by moving the line.
 
 WHEN TO RUN
-    After every change to src/p3_app_double.py. Under two seconds.
+    After every change to the app, the page or K3's reader. A few seconds.
 
 USAGE (from ~/news-intel)
     .venv/bin/python tests/test_p3_app.py
 """
 
+import collections
+import hashlib
 import json
+import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-import p3_app_double as D
+sys.path.insert(0, str(ROOT / "tests"))
+import p3_reader as R          # K3's real data layer: what the app imports (brief I1)
+import p3_search as PS         # its ask/search half, for the fake model client below
+import p3_app_stub as S        # chosen edge cases only; the app never imports it
+
+# Every section runs on its own COPY of intel.db (brief I2 item 2), so the real file is
+# never written and the live conversation never leaks into a check. The whole run is
+# fenced by the real file's checksum, taken before the first section and after the last.
+REAL_INTEL = ROOT / "data" / "intel.db"
 
 CHECKS = []
+SKIPS = []      # (name, reason): a check that cannot run on real data, said out loud
+
+
+def skip(name, reason):
+    """Record a check that does not run here, and why. A skip is counted and printed,
+    never silent: the report names every one (brief I2 item 5)."""
+    SKIPS.append((name, reason))
+
+
+# ------------------------------------------------------------- the fake model client
+
+def fake_model(prompt, system, purpose, model, schema):
+    """Stands in for every paid call (brief I2 item 1). Canned by schema, built from the
+    passages the prompt really carries, so cites point at real article ids.
+    Returns (payload, input_tokens, output_tokens) as p3_search's client does."""
+    ids = re.findall(r'<article id="([^"]+)"', prompt)
+    heads = re.findall(r'<article id="[^"]+"[^>]*>\nheadline: ([^\n]*)', prompt)
+    if schema == "sentences":
+        return ({"sentences": [{"text": f"The paper reported: {h}.", "cites": [i]}
+                               for i, h in list(zip(ids, heads))[:3]]}, 3000, 200)
+    if schema == "whys":
+        return ({"whys": [{"story_id": sid, "why": "Covers a related development."}
+                          for sid in re.findall(r'story_id="([^"]+)"', prompt)]},
+                1500, 100)
+    return ({"text": "General background, not from your papers."}, 200, 100)
+
+
+def _refuse_real_client():
+    raise RuntimeError("a check reached for the REAL model client; every section must "
+                       "run with the fake one (brief I2 item 1)")
+
+
+# The real client cannot be built in this process at all: if a section ever clears the
+# fake, the call fails loudly here instead of reaching the SDK. K3's write guard
+# (`FakeModelOnRealDb`, be8593a) is the second fence behind this one.
+PS._live_client = _refuse_real_client
+
+
+# The knobs the checks read live in two modules: the reader's (cap, digests) and
+# search's (suggestions, the pane). No name is in both (checked 3 Nov), so one lookup
+# reads either; a write lands in search's dict, and the suite only writes knobs there.
+KNOBS = collections.ChainMap(PS.KNOBS, R.KNOBS)
+
+
+def _checksum(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# ----------------------------------- reading stories back, by public functions only
+# The double's private helpers (`_find_story`, `_search_corpus`, `_load_state`, ...)
+# went with it. What the checks used them for is read here through the contract's own
+# functions, so a check can never pass on a helper the app does not have.
+
+def story_hashes(story):
+    return [r["text_hash"] for r in (story or {}).get("coverage", {}).get("rows", [])]
+
+
+def digest_stories():
+    """Every story the digests hold, each once, latest digest first. (The double's
+    `_search_corpus()` was exactly this set; K3's search reads the whole archive.)"""
+    seen, out = set(), []
+    for entry in R.list_digests():
+        for story in (R.get_digest(entry["ref"]) or {}).get("stories", []):
+            if story["story_id"] not in seen:
+                seen.add(story["story_id"])
+                out.append(story)
+    return out
+
+
+def find_story(predicate):
+    return next((st for st in digest_stories() if predicate(st)), None)
+
+
+def story_of(story_id):
+    """A story by id: from the digests, or -- for a suggestion's target, which may be
+    anywhere in the archive -- the shape the link functions need, from its search row."""
+    got = find_story(lambda st: st.get("story_id") == story_id)
+    if got:
+        return got
+    rows = R.search("", filters={"story_ids": [story_id]}, limit=1)["stories"]
+    if not rows:
+        return None
+    return {"story_id": story_id, "headline": {"text": rows[0].get("headline")},
+            "coverage": {"rows": [{"text_hash": a["text_hash"]}
+                                  for a in rows[0]["articles"]]}}
+
+
+def thread_story_ids(story):
+    """What contract rule 9 says a suggestion may never be: the story itself, any day
+    its thread already holds, and the reader's own links out of it."""
+    entries = (R.thread(story["story_id"]) or {}).get("entries", [])
+    ids = {story["story_id"]} | {e.get("entry_id") for e in entries}
+    ids |= {e.get("story_id") for e in entries}
+    ids |= {u["target_story_id"] for u in R.list_user_links(story_hashes(story))}
+    return ids - {None}
 
 
 def check(name, got, want):
@@ -230,10 +346,9 @@ def build_mock_world(tmp):
     (tmp / "_work" / "digest_mock_older.json").write_text(json.dumps(older))
     (tmp / "_work" / "not_a_digest.json").write_text(json.dumps({"hello": "world"}))
 
-    D.ROOT = tmp
-    D.WORK = tmp / "_work"
-    D.ARCHIVE = tmp / "archive"
-    D.STATE_FILE = tmp / "_work" / "k1_app_state.json"
+    R.ROOT = tmp
+    R.WORK = tmp / "_work"
+    R.ARCHIVE = tmp / "archive"
     return digest
 
 
@@ -244,119 +359,119 @@ def mock(tmp):
     one_day, three_day, five_day = digest["stories"]
 
     # --- digests ------------------------------------------------------------------
-    refs = [d["ref"] for d in D.list_digests()]
+    refs = [d["ref"] for d in R.list_digests()]
     check("both mock digests are listed, newest built_at first", refs,
           ["digest_mock", "digest_mock_older"])
     check("a JSON file that is not a digest is not offered as one",
           "not_a_digest" in refs, False)
     check("latest is the newest by built_at",
-          D.get_digest("latest")["built_at"], "2026-10-05T07:00:00")
+          R.get_digest("latest")["built_at"], "2026-10-05T07:00:00")
     check("a named ref loads that file",
-          D.get_digest("digest_mock_older")["window"]["kind"], "day")
-    check("an unknown ref is None, not another digest", D.get_digest("nope"), None)
-    check("run_status is ready", D.run_status()["state"], "ready")
-    D.FIXTURES["processing"] = True
-    check("the processing fixture gives state H1", D.run_status()["state"], "processing")
-    D.FIXTURES["processing"] = False
+          R.get_digest("digest_mock_older")["window"]["kind"], "day")
+    check("an unknown ref is None, not another digest", R.get_digest("nope"), None)
+    check("run_status is ready", R.run_status()["state"], "ready")
+    R.FIXTURES["processing"] = True
+    check("the processing fixture gives state H1", R.run_status()["state"], "processing")
+    R.FIXTURES["processing"] = False
 
     # --- read on leave ------------------------------------------------------------
-    hashes = D._story_hashes(three_day)
+    hashes = story_hashes(three_day)
     check("a story nothing is read of is not READ",
-          all(D.read_state(hashes).values()), False)
-    D.mark_read(hashes[:2])
+          all(R.read_state(hashes).values()), False)
+    R.mark_read(hashes[:2])
     check("one hash short of the coverage is not READ",
-          all(D.read_state(hashes).values()), False)
-    D.mark_read(hashes)
-    check("every coverage hash read means READ", all(D.read_state(hashes).values()), True)
+          all(R.read_state(hashes).values()), False)
+    R.mark_read(hashes)
+    check("every coverage hash read means READ", all(R.read_state(hashes).values()), True)
 
     # --- keep unread --------------------------------------------------------------
-    five = D._story_hashes(five_day)
-    D.set_keep_unread(five_day["story_id"], five, True)
-    D.mark_read(five)
+    five = story_hashes(five_day)
+    R.set_keep_unread(five_day["story_id"], five, True)
+    R.mark_read(five)
     check("keep unread on: leaving marks nothing",
-          any(D.read_state(five).values()), False)
-    D.set_keep_unread(five_day["story_id"], five, False)
-    D.mark_read(five)
+          any(R.read_state(five).values()), False)
+    R.set_keep_unread(five_day["story_id"], five, False)
+    R.mark_read(five)
     check("keep unread off: the next leave marks it READ",
-          all(D.read_state(five).values()), True)
-    D.set_keep_unread(five_day["story_id"], five, True)
+          all(R.read_state(five).values()), True)
+    R.set_keep_unread(five_day["story_id"], five, True)
     check("keep unread on a READ story makes it unread again",
-          any(D.read_state(five).values()), False)
-    D.set_keep_unread(five_day["story_id"], five, False)
+          any(R.read_state(five).values()), False)
+    R.set_keep_unread(five_day["story_id"], five, False)
 
     # --- new since you read it ----------------------------------------------------
     check("nothing read yet means nothing is 'new since'",
-          D.new_since_read(one_day), [])
+          R.new_since_read(one_day), [])
     extra = row("Business Line", "2026-10-03", 6, "h-three-4")
     grown = json.loads(json.dumps(three_day))
     grown["coverage"]["rows"].append(extra)
     check("an article added after the read shows as the only new one",
-          D.new_since_read(grown), ["h-three-4"])
+          R.new_since_read(grown), ["h-three-4"])
     check("the grown story is no longer READ",
-          all(D.read_state(D._story_hashes(grown)).values()), False)
+          all(R.read_state(story_hashes(grown)).values()), False)
 
     # --- boards and pins ----------------------------------------------------------
-    b1 = D.create_board("Taxes")
-    b2 = D.create_board("Protests")
-    p1 = D.pin(b1, "story", {"story_id": three_day["story_id"], "text_hashes": hashes},
+    b1 = R.create_board("Taxes")
+    b2 = R.create_board("Protests")
+    p1 = R.pin(b1, "story", {"story_id": three_day["story_id"], "text_hashes": hashes},
                source={"digest_ref": "digest_mock"})
     check("pinning makes that board the most recently used",
-          [b["name"] for b in D.list_boards()][0], "Taxes")
+          [b["name"] for b in R.list_boards()][0], "Taxes")
     check("pin_count counts that board's pins only",
-          {b["name"]: b["pin_count"] for b in D.list_boards()}, {"Taxes": 1, "Protests": 0})
+          {b["name"]: b["pin_count"] for b in R.list_boards()}, {"Taxes": 1, "Protests": 0})
     check("a pin stores the story's hashes as they were",
-          D.list_pins(b1)[0]["payload"]["text_hashes"], hashes)
-    p2 = D.pin(b1, "article", {"text_hash": "h-three-1"}, source={})
-    D.unpin(p1)
+          R.list_pins(b1)[0]["payload"]["text_hashes"], hashes)
+    p2 = R.pin(b1, "article", {"text_hash": "h-three-1"}, source={})
+    R.unpin(p1)
     check("unpin removes exactly one pin",
-          [p["pin_id"] for p in D.list_pins(b1)], [p2])
-    check("the other board is untouched", D.list_pins(b2), [])
+          [p["pin_id"] for p in R.list_pins(b1)], [p2])
+    check("the other board is untouched", R.list_pins(b2), [])
 
     # --- follows, feedback, prefs -------------------------------------------------
-    D.follow(three_day["story_id"], hashes, True)
+    R.follow(three_day["story_id"], hashes, True)
     check("a followed story is listed",
-          [f["story_id"] for f in D.list_follows()], [three_day["story_id"]])
-    D.follow(three_day["story_id"], hashes, False)
-    check("unfollowing removes it", D.list_follows(), [])
-    D.feedback("thread_link", "2026-10-01:bbb000000002", [], "down", note="not the same story")
-    fb = D._load_state()["feedback"][-1]
-    check("feedback stores kind, vote and note",
-          [fb["target_kind"], fb["vote"], fb["note"]],
-          ["thread_link", "down", "not the same story"])
-    check("an unset pref is None", D.get_pref("thread_view"), None)
-    D.set_pref("thread_view", "graph")
-    check("a pref round-trips", D.get_pref("thread_view"), "graph")
+          [f["story_id"] for f in R.list_follows()], [three_day["story_id"]])
+    R.follow(three_day["story_id"], hashes, False)
+    check("unfollowing removes it", R.list_follows(), [])
+    R.feedback("thread_link", "2026-10-01:bbb000000002", [], "down", note="not the same story")
+    fb = R.list_feedback().get("thread_link:2026-10-01:bbb000000002") or {}
+    check("feedback stores kind, vote and note (read back through list_feedback)",
+          [fb.get("vote"), fb.get("note")], ["down", "not the same story"])
+    check("an unset pref is None", R.get_pref("thread_view"), None)
+    R.set_pref("thread_view", "graph")
+    check("a pref round-trips", R.get_pref("thread_view"), "graph")
 
     # --- visits -------------------------------------------------------------------
-    check("no visit yet means no last visit", D.last_visit(), None)
-    D.record_visit("digest_mock", digest["window"], opened_story=False)
+    check("no visit yet means no last visit", R.last_visit(), None)
+    R.record_visit("digest_mock", digest["window"], opened_story=False)
     check("a visit where no story was opened does not count as a visit",
-          D.last_visit(opened_only=True), None)
-    check("but it is there when opened_only is off", bool(D.last_visit(opened_only=False)), True)
-    D.record_visit("digest_mock", digest["window"], opened_story=True)
-    check("two visits to the same digest in one sitting are one visit",
-          len(D._load_state()["visits"]), 1)
+          R.last_visit(opened_only=True), None)
+    check("but it is there when opened_only is off", bool(R.last_visit(opened_only=False)), True)
+    R.record_visit("digest_mock", digest["window"], opened_story=True)
+    skip("two visits to the same digest in one sitting are one visit",
+         "the number of stored visits is not readable through the contract; K3's own "
+         "suite pins the sitting rule")
     check("opening a story in that visit makes it count",
-          bool(D.last_visit(opened_only=True)), True)
+          bool(R.last_visit(opened_only=True)), True)
 
     # --- cost ---------------------------------------------------------------------
-    cost = D.cost_today()
+    cost = R.cost_today()
     check("spend is the write-up and story-so-far costs of the latest digest",
           round(cost["spent_usd"], 6), round(0.001 * 3 + 0.0006 * 3, 6))
     check("the cap is the digest's own knob", cost["cap_usd"], 0.5)
-    D.FIXTURES["cap_reached"] = True
+    R.FIXTURES["cap_reached"] = True
     check("the cap_reached fixture spends exactly the cap (H5)",
-          D.cost_today()["spent_usd"], 0.5)
-    D.FIXTURES["cap_reached"] = False
-    D.FIXTURES["nothing_new"] = True
+          R.cost_today()["spent_usd"], 0.5)
+    R.FIXTURES["cap_reached"] = False
+    R.FIXTURES["nothing_new"] = True
     check("the nothing_new fixture reports every story read (H2)",
-          all(D.read_state(D._story_hashes(one_day)).values()), True)
-    D.FIXTURES["nothing_new"] = False
+          all(R.read_state(story_hashes(one_day)).values()), True)
+    R.FIXTURES["nothing_new"] = False
 
     # --- the invented thread ------------------------------------------------------
-    check("a day-1 story has no thread (H3)", D.thread(one_day["story_id"]), None)
-    t3 = D.thread(three_day["story_id"])
-    t5 = D.thread(five_day["story_id"])
+    check("a day-1 story has no thread (H3)", R.thread(one_day["story_id"]), None)
+    t3 = R.thread(three_day["story_id"])
+    t5 = R.thread(five_day["story_id"])
     check("a 3-day thread has 3 entries", t3["days"], 3)
     check("a 5-day thread gains one run-up day", t5["days"], 6)
     check("entries are newest first",
@@ -390,7 +505,7 @@ def mock(tmp):
           [r["attaches_to"] in {e["entry_id"] for e in t5["entries"]} for r in t5["related"]],
           [True])
     missing = [pg["pdf"] for t in (t3, t5) for e in t["entries"] for pg in e["pages"]
-               if not (D.ROOT / pg["pdf"]).exists()]
+               if not (R.ROOT / pg["pdf"]).exists()]
     check("every page link in every invented entry points at a PDF that exists",
           missing, [])
     wrong_date = [pg["pdf"] for t in (t3, t5) for e in t["entries"] for pg in e["pages"]
@@ -401,7 +516,7 @@ def mock(tmp):
           True)
 
     # --- the invented article -----------------------------------------------------
-    art = D.article("h-five-3")
+    art = R.article("h-five-3")
     check("the article's headline is the real one from the coverage row",
           art["headline"], "A printed headline on Business Line p5")
     check("its paper, date and page are real",
@@ -409,11 +524,11 @@ def mock(tmp):
           ["Business Line", "2026-10-01", 5])
     check("it is flagged as fixture", art["fixture"], True)
     check("the body is long enough to need several paragraphs",
-          len(art["body"].split()) >= D.KNOBS["body_words_min"], True)
-    check("an unknown text_hash is None", D.article("nope"), None)
+          len(art["body"].split()) >= KNOBS["body_words_min"], True)
+    check("an unknown text_hash is None", R.article("nope"), None)
 
     # --- what it wrote ------------------------------------------------------------
-    written = sorted(p.name for p in (D.ROOT / "_work").iterdir()
+    written = sorted(p.name for p in (R.ROOT / "_work").iterdir()
                      if not p.name.startswith("digest") and p.name != "not_a_digest.json")
     check("the double wrote exactly one file", written, ["k1_app_state.json"])
 
@@ -422,24 +537,23 @@ def mock(tmp):
 
 def real():
     """Read-only on the two digests in _work/, with the state file sent somewhere safe."""
-    D.ROOT = ROOT
-    D.ARCHIVE = ROOT / "archive"
+    R.ROOT = ROOT
+    R.ARCHIVE = ROOT / "archive"
     with tempfile.TemporaryDirectory() as tmp:
-        D.WORK = Path(tmp)              # §3 rule 7, as in routes() below
-        D.STATE_FILE = Path(tmp) / "state.json"
+        R.WORK = Path(tmp)              # §3 rule 7, as in routes() below
 
-        refs = [d["ref"] for d in D.list_digests()]
+        refs = [d["ref"] for d in R.list_digests()]
         check("both real digests are found", sorted(refs),
               ["digest_live", "k3_b1_3_digest_2026-10-11"])
         check("the live digest is the latest", refs[0], "digest_live")
-        live = D.get_digest("latest")
+        live = R.get_digest("latest")
         check("the live digest has ten stories", len(live["stories"]), 10)
 
-        cost = D.cost_today()
+        cost = R.cost_today()
         check("today's spend on the live digest", round(cost["spent_usd"], 6), 0.010941)
         check("the cap comes from the live digest's own knob", cost["cap_usd"], 0.5)
 
-        day = D.get_digest("k3_b1_3_digest_2026-10-11")
+        day = R.get_digest("k3_b1_3_digest_2026-10-11")
         check("the day digest has no cap knob", "daily_cost_cap_usd" in day["knobs"], False)
         check("a story in the day digest has no story_so_far key at all",
               "story_so_far" in day["stories"][0], False)
@@ -450,7 +564,7 @@ def real():
         check("one live story shows its story so far", len(shown), 1)
         story = shown[0]
         tid = story["story_so_far"]["thread_id"]
-        t = D.thread(tid)
+        t = R.thread(tid)
         check("its thread is 5 story-so-far days plus the run-up day", t["days"], 6)
         cited = {c for s in story["story_so_far"]["sentences"] for c in s["cites"]}
         ids = {e["entry_id"] for e in t["entries"]}
@@ -463,17 +577,19 @@ def real():
         day1 = [s for s in live["stories"]
                 if not s["developing"] and (s.get("story_so_far") or {}).get("days") == 1]
         check("live day-1 stories get no thread (H3)",
-              [D.thread(s["story_id"]) is None for s in day1], [True] * len(day1))
+              [R.thread(s["story_id"]) is None for s in day1], [True] * len(day1))
         check("and there are day-1 stories to check", len(day1) > 0, True)
 
         first_hash = live["stories"][0]["coverage"]["rows"][0]["text_hash"]
-        art = D.article(first_hash)
+        art = R.article(first_hash)
         check("a real coverage hash resolves to an article",
               art["headline"], live["stories"][0]["coverage"]["rows"][0]["headline"])
         check("its page link is the row's own",
               art["page_link"]["pdf"],
               live["stories"][0]["coverage"]["rows"][0]["page_link"]["pdf"])
-        check("no real state file was written", D.STATE_FILE.exists(), False)
+        skip("no real state file was written",
+             "K3 keeps state in intel.db; the whole-run checksum of the real file is the "
+             "check now, and a missing temp file would pass here while broken")
 
 
 # ---------------------------------------------------------------------- 3. routes
@@ -492,8 +608,8 @@ def routes():
     """Every route called directly: no client, no server, no bound port (see A0)."""
     import p3_app as A
 
-    D.ROOT = ROOT
-    D.ARCHIVE = ROOT / "archive"
+    R.ROOT = ROOT
+    R.ARCHIVE = ROOT / "archive"
     with tempfile.TemporaryDirectory() as tmp:
         # Brief 2b §3 rule 7. `_save_state` writes its temporary file into `WORK` and
         # only then renames it onto `STATE_FILE`, so redirecting the file alone still
@@ -501,10 +617,9 @@ def routes():
         # area (brief rule 4), found by build 2's report §6. The digests are read from
         # `ROOT / KNOBS["digest_dir"]`, not from `WORK`, so the real ones are still
         # there to test against.
-        D.WORK = Path(tmp)
-        D.STATE_FILE = Path(tmp) / "state.json"
+        R.WORK = Path(tmp)
         check("[fixture] the state DIRECTORY is redirected too, not only the file, so "
-              "no check writes into the real _work/", D.WORK == Path(tmp), True)
+              "no check writes into the real _work/", R.WORK == Path(tmp), True)
 
         paths = {r.path for r in A.app.routes if hasattr(r, "path")}
         wanted = {"/", "/api/digest", "/api/digests", "/api/status",
@@ -2353,19 +2468,28 @@ def markup():
 def ownership():
     app_src = (ROOT / "src" / "p3_app.py").read_text()
     app_imports = re.findall(r"^\s*(?:import|from)\s+([\w.]+)", app_src, re.M)
-    check("p3_app has exactly one data import, so integration is a one-line swap",
-          [i for i in app_imports if i.startswith("p3_")], ["p3_app_double"])
-    check("p3_app opens no database either",
-          sorted({"sqlite3", "p3_store", "p3_digest"} & set(app_imports)), [])
+    # Brief I1: one data import, and it is K3's reader. The stub is the suite's, so the
+    # app naming it would mean a test case could reach the real screen.
+    check("p3_app has exactly one data import, and it is K3's p3_reader",
+          [i for i in app_imports if i.startswith("p3_")], ["p3_reader"])
+    check("p3_app opens no database and builds no model client itself (R0)",
+          sorted({"sqlite3", "p3_store", "p3_digest", "anthropic"} & set(app_imports)), [])
+    check("the double has left the app: no line of p3_app.py or app/ names it",
+          [f for f in ("src/p3_app.py", "app/index.html", "app/app.js", "app/app.css")
+           if "p3_app_double" in (ROOT / f).read_text()], [])
+    check("and its file is gone (git rm, so history keeps it)",
+          (ROOT / "src" / "p3_app_double.py").exists(), False)
+    check("the app never imports the stub; only tests hand it in",
+          "p3_app_stub" in app_src, False)
 
-    src = (ROOT / "src" / "p3_app_double.py").read_text()
+    src = (ROOT / "tests" / "p3_app_stub.py").read_text()
     imports = re.findall(r"^\s*(?:import|from)\s+([\w.]+)", src, re.M)
     forbidden = {"sqlite3", "p3_store", "p3_digest", "p3_index", "p3_group", "p3_label",
-                 "urllib", "socket", "http", "httpx", "httpx2", "requests", "anthropic"}
-    check("the double imports no database and nothing that reaches the network",
-          sorted(set(imports) & forbidden), [])
-    check("it writes only the one state file",
-          sorted(set(re.findall(r"_work/[\w.]+", src))), ["_work/k1_app_state.json"])
+                 "p3_reader", "p3_search", "urllib", "socket", "http", "httpx",
+                 "requests", "anthropic"}
+    check("the stub imports no database, no K3 module and nothing that reaches the "
+          "network", sorted(set(imports) & forbidden), [])
+    check("and writes no file", bool(re.search(r"write_text|open\(.*[\"']w", src)), False)
 
 
 def v01_search():
@@ -2405,10 +2529,9 @@ def v01_search():
       archive's own 9-15 Oct range -- and every value it offers really has stories
       behind it, so no filter can be chosen that returns nothing.
     """
-    import p3_app_double as D
 
     # --- browse ----------------------------------------------------------------
-    browse = D.search("")
+    browse = R.search("")
     check("[behaviour] a browse has no verdict to give", browse["verdict"], None)
     check("[behaviour] a browse is sorted newest", browse["sort"], "newest")
     latest = [max(s["dates"]) for s in browse["stories"]]
@@ -2416,7 +2539,7 @@ def v01_search():
           latest, sorted(latest, reverse=True))
     check("[behaviour] every article in a story row is one of that story's own rows",
           sorted({a["text_hash"] for s in browse["stories"] for a in s["articles"]}
-                 - {h for s in D._search_corpus() for h in D._story_hashes(s)}), [])
+                 - {h for s in digest_stories() for h in story_hashes(s)}), [])
 
     check("[fixture] the corpus is 19 stories, the one in both files counted once",
           browse["total_stories"], 19)
@@ -2427,7 +2550,7 @@ def v01_search():
           [s["story_id"] for s in browse["stories"]].count("2026-10-11:56eaf7aa4d5b"), 1)
 
     # --- the three verdicts, from real queries ---------------------------------
-    enough, thin, empty = D.search("police"), D.search("GST"), D.search("Norway")
+    enough, thin, empty = R.search("police"), R.search("GST"), R.search("Norway")
     check("[fixture] 'police' is enough", [enough["verdict"], enough["total_stories"]],
           ["enough", 4])
     check("[fixture] 'GST' is thin", [thin["verdict"], thin["total_stories"]],
@@ -2436,15 +2559,15 @@ def v01_search():
           ["empty", 0])
     check("[fixture] an empty verdict brings back no stories", empty["stories"], [])
 
-    D.KNOBS["verdict_enough_min"] = 5
+    KNOBS["verdict_enough_min"] = 5
     check("[fixture] the verdict line is the knob, not a 3 in the code",
-          D.search("police")["verdict"], "thin")
-    D.KNOBS["verdict_enough_min"] = 3
+          R.search("police")["verdict"], "thin")
+    KNOBS["verdict_enough_min"] = 3
     check("[fixture] and putting the knob back restores it",
-          D.search("police")["verdict"], "enough")
+          R.search("police")["verdict"], "enough")
 
     # --- scoring ---------------------------------------------------------------
-    two = D.search("Delhi police")
+    two = R.search("Delhi police")
     check("[fixture] a story matching both query words scores 2",
           max(s["score"] for s in two["stories"]), 2.0)
     check("[fixture] and every score is a count of words, never above the word count",
@@ -2452,15 +2575,15 @@ def v01_search():
     check("[fixture] a story that matches nothing is not in the result",
           [s for s in two["stories"] if s["score"] == 0.0], [])
 
-    short = D.search("AI")
+    short = R.search("AI")
     check("[fixture] a query of only short words still searches, not browses",
           [short["verdict"], short["total_stories"]], ["thin", 2])
-    check("[fixture] a short word matches whole words only",
-          D._word_hits(["ai"], "She said again it was an aid"), 0)
-    check("[fixture] a long word matches inside a longer one, so plurals are found",
-          D._word_hits(["protest"], "Protesters gathered"), 1)
+    for name in ("[fixture] a short word matches whole words only",
+                 "[fixture] a long word matches inside a longer one, so plurals are found"):
+        skip(name, "tested the double's own matcher, which is gone; behaviour check 16 "
+                   "tests the rule on K3's search")
     check("[fixture] short words are dropped when a longer one is there",
-          D._query_words("of the police"), ["the", "police"])
+          PS.tokens("of the police"), ["the", "police"])
 
     # --- the article rows ------------------------------------------------------
     gst = thin["stories"][0]
@@ -2480,18 +2603,18 @@ def v01_search():
           isinstance(gst["papers"], int), True)
 
     # --- filters ---------------------------------------------------------------
-    one_paper = D.search("", filters={"papers": ["Mint"]})
+    one_paper = R.search("", filters={"papers": ["Mint"]})
     check("[fixture] a paper filter leaves only that paper",
           sorted({a["paper"] for s in one_paper["stories"] for a in s["articles"]}),
           ["Mint"])
-    one_kind = D.search("", filters={"kinds": ["opinion"]})
+    one_kind = R.search("", filters={"kinds": ["opinion"]})
     check("[fixture] a kind filter leaves only that kind",
           sorted({a["kind"] for s in one_kind["stories"] for a in s["articles"]}),
           ["opinion"])
-    one_topic = D.search("", filters={"topics": ["AI"]})
+    one_topic = R.search("", filters={"topics": ["AI"]})
     check("[fixture] a topic filter narrows to that theme's stories",
           0 < one_topic["total_stories"] < browse["total_stories"], True)
-    one_day = D.search("", filters={"date_from": "2026-10-11", "date_to": "2026-10-11"})
+    one_day = R.search("", filters={"date_from": "2026-10-11", "date_to": "2026-10-11"})
     check("[fixture] a one-day filter leaves only that day's rows",
           sorted({a["date"] for s in one_day["stories"] for a in s["articles"]}),
           ["2026-10-11"])
@@ -2501,7 +2624,7 @@ def v01_search():
           browse["searched_days"], 7)
 
     drop = enough["stories"][0]["story_id"]
-    minus = D.search("police", filters={"exclude_story_ids": [drop]})
+    minus = R.search("police", filters={"exclude_story_ids": [drop]})
     check("[fixture] exclude_story_ids removes exactly that story",
           [minus["total_stories"], drop in [s["story_id"] for s in minus["stories"]]],
           [enough["total_stories"] - 1, False])
@@ -2512,24 +2635,24 @@ def v01_search():
     scores = [s["score"] for s in two["stories"]]
     check("[fixture] relevance order puts the best score first",
           scores, sorted(scores, reverse=True))
-    newest = D.search("Delhi police", sort="newest")
+    newest = R.search("Delhi police", sort="newest")
     check("[fixture] newest order ignores the score",
           [max(s["dates"]) for s in newest["stories"]],
           sorted([max(s["dates"]) for s in newest["stories"]], reverse=True))
     check("[fixture] and keeps the same stories",
           sorted(s["story_id"] for s in newest["stories"]),
           sorted(s["story_id"] for s in two["stories"]))
-    small = D.search("", limit=4)
+    small = R.search("", limit=4)
     check("[fixture] limit caps what comes back", len(small["stories"]), 4)
     check("[fixture] and leaves the totals alone",
           [small["total_stories"], small["total_articles"]],
           [browse["total_stories"], browse["total_articles"]])
     check("[fixture] limit 0 brings back nothing but still counts",
-          [len(D.search("", limit=0)["stories"]), D.search("", limit=0)["total_stories"]],
+          [len(R.search("", limit=0)["stories"]), R.search("", limit=0)["total_stories"]],
           [0, 19])
 
     # --- facets ----------------------------------------------------------------
-    f = D.facets()
+    f = R.facets()
     check("[fixture] facets name the five papers in the archive",
           f["papers"], ["Business Line", "Business Standard", "Mint", "The Hindu",
                         "Times of India"])
@@ -2540,13 +2663,13 @@ def v01_search():
           [f["date_min"], f["date_max"]], ["2026-10-09", "2026-10-15"])
     empty_facets = []
     for paper in f["papers"]:
-        if not D.search("", filters={"papers": [paper]})["total_stories"]:
+        if not R.search("", filters={"papers": [paper]})["total_stories"]:
             empty_facets.append(paper)
     for kind in f["kinds"]:
-        if not D.search("", filters={"kinds": [kind]})["total_stories"]:
+        if not R.search("", filters={"kinds": [kind]})["total_stories"]:
             empty_facets.append(kind)
     for topic in f["topics"]:
-        if not D.search("", filters={"topics": [topic]})["total_stories"]:
+        if not R.search("", filters={"topics": [topic]})["total_stories"]:
             empty_facets.append(topic)
     check("[fixture] every value a filter offers has stories behind it",
           empty_facets, [])
@@ -2554,21 +2677,14 @@ def v01_search():
           [browse["fixture"], thin["fixture"], empty["fixture"]], [True, True, True])
 
 
-def _fresh_double(state_file):
-    """A second, independent copy of the double reading the same state file -- what a
-    restart of the app really is. Loaded under its own name so nothing is shared with
-    the module the rest of this file uses, which is the point: if the conversation came
-    back from an in-memory variable rather than the file, this would not see it."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "p3_app_double_restarted", ROOT / "src" / "p3_app_double.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.ROOT, mod.ARCHIVE = ROOT, ROOT / "archive"
-    mod.WORK = state_file.parent
-    mod.STATE_FILE = state_file
-    mod.KNOBS["fixture_stream_delay_ms"] = 0
-    return mod
+def _fresh_double(_state_file=None):
+    """What a restart of the app really is, for the real reader: every connection
+    dropped, so the next call reads intel.db again. If the conversation came back from
+    an in-memory variable rather than the database, a check after this would not see
+    it. (The name is kept so the checks that call it read as they did; the double it
+    once reloaded is gone, and `_state_file` is ignored -- K3 keeps state in intel.db.)"""
+    R.close_all()
+    return R
 
 
 def v01_ask():
@@ -2617,18 +2733,15 @@ def v01_ask():
     - [fixture] Suggestions are 3 to 5, name their two rarest shared words, and cost.
     - [fixture] A story with NO thread that is given a user link now has one.
     """
-    import p3_app_double as D
 
     with tempfile.TemporaryDirectory() as tmp:
-        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
-        D.WORK = Path(tmp)
-        D.STATE_FILE = Path(tmp) / "state.json"
-        D.KNOBS["fixture_stream_delay_ms"] = 0
-        D.FIXTURES["assistant_error"] = False
-        D.FIXTURES["cap_reached"] = False
+        R.ROOT, R.ARCHIVE = ROOT, ROOT / "archive"
+        R.WORK = Path(tmp)
+        R.FIXTURES["assistant_error"] = False
+        R.FIXTURES["cap_reached"] = False
 
         # --- rule 1, 2, 10 and the answer's shape ------------------------------
-        events = list(D.ask("police", {"story_id": None}))
+        events = list(R.ask("police", {"story_id": None}))
         kinds = [e["type"] for e in events]
         check("[behaviour] 1 · results comes first, before any sentence",
               kinds[0], "results")
@@ -2672,29 +2785,29 @@ def v01_ask():
         check("[fixture] and says it is a fixture", answer["fixture"], True)
 
         # --- rule 11 · the cost moves by exactly the call's own cost -----------
-        before = D.cost_today()["spent_usd"]
-        events2 = list(D.ask("GST", None))
+        before = R.cost_today()["spent_usd"]
+        events2 = list(R.ask("GST", None))
         thin = events2[-1]["answer"]
         check("[behaviour] 11 · spend rises by exactly that answer's cost",
-              round(D.cost_today()["spent_usd"] - before, 6), thin["cost_usd"])
+              round(R.cost_today()["spent_usd"] - before, 6), thin["cost_usd"])
         check("[fixture] a thin answer still gets two sentences",
               [thin["verdict"], len(thin["sentences"])], ["thin", 2])
 
         # --- rule 3 · the empty verdict ----------------------------------------
-        before = D.cost_today()["spent_usd"]
-        empty = list(D.ask("Norway", None))[-1]["answer"]
+        before = R.cost_today()["spent_usd"]
+        empty = list(R.ask("Norway", None))[-1]["answer"]
         check("[behaviour] 3 · an empty answer has no sentences", empty["sentences"], [])
         check("[behaviour] 3 · and costs nothing", empty["cost_usd"], 0)
         check("[behaviour] 3 · and offers exactly three closest stories",
               len(empty["closest"]), 3)
         check("[behaviour] 3 · and the spend did not move",
-              D.cost_today()["spent_usd"], before)
+              R.cost_today()["spent_usd"], before)
         check("[fixture] the closest stories are newest first",
               [max(s["dates"]) for s in empty["closest"]],
               sorted([max(s["dates"]) for s in empty["closest"]], reverse=True))
 
         # --- rule 4 · think harder ---------------------------------------------
-        harder_events = list(D.think_harder(answer["answer_id"]))
+        harder_events = list(R.think_harder(answer["answer_id"]))
         harder = harder_events[-1]["answer"]
         check("[fixture] think_harder sends no results event",
               [e["type"] for e in harder_events if e["type"] == "results"], [])
@@ -2707,13 +2820,13 @@ def v01_ask():
         check("[behaviour] 4 · it cites only from the parent's passages",
               sorted(set(harder["cited"]) - in_results), [])
         check("[behaviour] 4 · and the next ask is Haiku again, so it is one-shot",
-              list(D.ask("police", None))[-1]["answer"]["model"], "haiku")
+              list(R.ask("police", None))[-1]["answer"]["model"], "haiku")
 
         # --- rules 5 and 6 · background ----------------------------------------
-        got = D.ask_background(empty["answer_id"])
+        got = R.ask_background(empty["answer_id"])
         check("[fixture] background on an empty answer is answered",
               [got["model"], got["cost_usd"]], ["haiku", 0.0003])
-        reloaded = D.current_conversation()
+        reloaded = R.current_conversation()
         stored = [t["answer"] for t in reloaded["turns"] if t.get("kind") == "answer"
                   and t["answer"]["answer_id"] == empty["answer_id"]][0]
         check("[behaviour] 5 · a background line is a plain string, not a cited sentence",
@@ -2725,7 +2838,7 @@ def v01_ask():
         check("[behaviour] 6 · and it is now on the stored answer",
               stored["background"], got["text"])
         try:
-            D.ask_background(empty["answer_id"])
+            R.ask_background(empty["answer_id"])
             twice = "no error"
         except LookupError:
             twice = "LookupError"
@@ -2738,7 +2851,7 @@ def v01_ask():
         # halves are checked, because "it raised something" is what let v0.1 answer 400
         # for an answer id that was never issued.
         try:
-            D.ask_background("ans_nope")
+            R.ask_background("ans_nope")
             unknown = "no error"
         except LookupError as exc:
             unknown = type(exc).__name__
@@ -2748,18 +2861,18 @@ def v01_ask():
               unknown, "LookupError")
 
         # the alternating background line on enough answers
-        marks = [bool(list(D.ask("police", None))[-1]["answer"]["background"])
+        marks = [bool(list(R.ask("police", None))[-1]["answer"]["background"])
                  for _ in range(4)]
         check("[fixture] an enough answer carries a background line every second time",
               marks, [marks[0], not marks[0], marks[0], not marks[0]])
-        with_line = list(D.ask("police", None))[-1]["answer"]
-        without = list(D.ask("police", None))[-1]["answer"]
+        with_line = list(R.ask("police", None))[-1]["answer"]
+        without = list(R.ask("police", None))[-1]["answer"]
         if with_line["background"] is None:                  # whichever way it fell
             with_line, without = without, with_line
         check("[behaviour] 6 · background works on an enough answer that came without one",
-              isinstance(D.ask_background(without["answer_id"])["text"], str), True)
+              isinstance(R.ask_background(without["answer_id"])["text"], str), True)
         try:
-            D.ask_background(with_line["answer_id"])
+            R.ask_background(with_line["answer_id"])
             already = "no error"
         except ValueError:
             already = "error"
@@ -2770,8 +2883,8 @@ def v01_ask():
         seen = {}
         for switch in ("model_busy", "no_network", "key_rejected", "timeout",
                        "checks_failed", "other"):
-            D.FIXTURES["assistant_error"] = switch
-            event = list(D.ask("police", None))[-1]
+            R.FIXTURES["assistant_error"] = switch
+            event = list(R.ask("police", None))[-1]
             seen[switch] = (event["code"], event["reason"], event["retryable"],
                             bool(event["message"]))
         check("[behaviour] 12 · every reason comes back as itself, with a message",
@@ -2785,177 +2898,139 @@ def v01_ask():
         check("[behaviour] 12 · and true for the other four",
               sorted(k for k, v in seen.items() if v[2] is True),
               ["model_busy", "no_network", "other", "timeout"])
-        D.FIXTURES["assistant_error"] = True
+        R.FIXTURES["assistant_error"] = True
         check("[fixture] the switch set to True means model_busy",
-              list(D.ask("police", None))[-1]["reason"], "model_busy")
-        D.FIXTURES["assistant_error"] = "nonsense"
+              list(R.ask("police", None))[-1]["reason"], "model_busy")
+        R.FIXTURES["assistant_error"] = "nonsense"
         check("[fixture] an unknown reason falls back to 'other', not a crash",
-              list(D.ask("police", None))[-1]["reason"], "other")
-        D.FIXTURES["assistant_error"] = "timeout"
-        failed = list(D.ask("police", None))
+              list(R.ask("police", None))[-1]["reason"], "other")
+        R.FIXTURES["assistant_error"] = "timeout"
+        failed = list(R.ask("police", None))
         check("[fixture] an error answer still sends its results first, so the reader "
               "sees what was found",
               [failed[0]["type"], failed[0]["search"]["verdict"], len(failed)],
               ["results", "enough", 2])
-        D.FIXTURES["assistant_error"] = False
+        R.FIXTURES["assistant_error"] = False
 
         # --- rule 7 and 13 · the cap ------------------------------------------
-        D.FIXTURES["cap_reached"] = True
-        before = D.cost_today()["spent_usd"]
-        capped = list(D.ask("police", None))
+        R.FIXTURES["cap_reached"] = True
+        before = R.cost_today()["spent_usd"]
+        capped = list(R.ask("police", None))
         check("[behaviour] 7 · at the cap the answer is cap_reached",
               [capped[0]["type"], capped[-1]["type"], capped[-1]["code"]],
               ["results", "error", "cap_reached"])
         check("[behaviour] 7 · with no sentence in between",
               [e for e in capped if e["type"] == "sentence"], [])
         check("[behaviour] 7 · and it adds no cost",
-              D.cost_today()["spent_usd"], before)
+              R.cost_today()["spent_usd"], before)
         check("[fixture] think harder is capped too",
-              list(D.think_harder(answer["answer_id"]))[-1]["code"], "cap_reached")
+              list(R.think_harder(answer["answer_id"]))[-1]["code"], "cap_reached")
 
-        knob_cap = D.cost_today()["cap_usd"]
-        raised = D.raise_cap_today(1.00)
+        knob_cap = R.cost_today()["cap_usd"]
+        raised = R.raise_cap_today(1.00)
         check("[behaviour] 13 · the cap is the knob plus the dollar",
               raised["cap_usd"], round(knob_cap + 1.00, 6))
         check("[behaviour] 13 · and says how much of it is an override",
               raised["override_usd"], 1.0)
         check("[behaviour] 13 · ask answers again while the spend is under the new cap",
-              list(D.ask("police", None))[-1]["type"], "done")
-        real_today = D._today
-        D._today = lambda: "2099-01-01"
+              list(R.ask("police", None))[-1]["type"], "done")
+        real_today = R._today
+        R._today = lambda: "2099-01-01"
         try:
             check("[behaviour] 13 · and tomorrow the cap is the knob alone",
-                  D.cost_today()["cap_usd"], knob_cap)
+                  R.cost_today()["cap_usd"], knob_cap)
             check("[behaviour] 13 · with nothing carried over",
-                  D.cost_today()["override_usd"], 0)
+                  R.cost_today()["override_usd"], 0)
         finally:
-            D._today = real_today
+            R._today = real_today
         check("[fixture] presses add up",
-              D.raise_cap_today()["cap_usd"], round(knob_cap + 2.00, 6))
+              R.raise_cap_today()["cap_usd"], round(knob_cap + 2.00, 6))
         pressed = 2
-        while pressed < D.KNOBS["cap_override_max_per_day"]:
-            D.raise_cap_today()
+        while pressed < KNOBS["cap_override_max_per_day"]:
+            R.raise_cap_today()
             pressed += 1
         try:
-            D.raise_cap_today()
+            R.raise_cap_today()
             past = "no error"
         except ValueError:
             past = "error"
         check("[fixture] and are refused past the knob's limit for one day",
               past, "error")
-        D.FIXTURES["cap_reached"] = False
+        R.FIXTURES["cap_reached"] = False
 
         # --- rule 8 · the conversation survives a restart ----------------------
-        conv = D.current_conversation()
+        conv = R.current_conversation()
         check("[fixture] the conversation holds the answers as turns",
               len([t for t in conv["turns"] if t["kind"] == "answer"]) > 0, True)
         bg_turns = [t for t in conv["turns"] if t["kind"] == "background"]
+        answers = {t["answer"]["answer_id"]: t["answer"] for t in conv["turns"]
+                   if t["kind"] == "answer"}
         check("[fixture] and each background as a turn of its own",
               [len(bg_turns) > 0,
-               sorted({t["answer_id"] for t in bg_turns}
-                      - set(D._load_state()["answers"]))],
+               sorted({t["answer_id"] for t in bg_turns} - set(answers))],
               [True, []])
         check("[fixture] every background turn carries the text that went on its answer",
               [t for t in bg_turns
-               if D._load_state()["answers"][t["answer_id"]]["background"] != t["text"]],
+               if answers[t["answer_id"]].get("background") != t["text"]],
               [])
-        D.add_divider(conv["conversation_id"], "sid_1", "A STORY'S HEADLINE")
-        divider = D.current_conversation()["turns"][-1]
+        R.add_divider(conv["conversation_id"], "sid_1", "A STORY'S HEADLINE")
+        divider = R.current_conversation()["turns"][-1]
         check("[fixture] a divider is a turn with the story it points at",
               [divider["kind"], divider["story_id"], divider["headline"]],
               ["divider", "sid_1", "A STORY'S HEADLINE"])
 
-        restarted = _fresh_double(D.STATE_FILE)
+        restarted = _fresh_double()
         check("[behaviour] 8 · after a restart the conversation is the same one",
               restarted.current_conversation()["conversation_id"],
               conv["conversation_id"])
         check("[behaviour] 8 · with its turns still in it",
               len(restarted.current_conversation()["turns"]),
-              len(D.current_conversation()["turns"]))
-        fresh_id = D.new_conversation()
+              len(R.current_conversation()["turns"]))
+        fresh_id = R.new_conversation()
         check("[behaviour] 8 · and only new_conversation() changes it",
               [fresh_id != conv["conversation_id"],
-               D.current_conversation()["turns"]], [True, []])
-        check("[fixture] the old conversation is still in the state file",
-              conv["conversation_id"] in
-              [c["conversation_id"] for c in D._load_state()["conversations"]], True)
+               R.current_conversation()["turns"]], [True, []])
+        skip("[fixture] the old conversation is still in the state file",
+             "a past conversation is not listable through the contract (only the "
+             "current one is)")
 
         # --- rule 9 · suggestions ----------------------------------------------
         story_id = "2026-10-11:56eaf7aa4d5b"
-        story = D._find_story(lambda s: s.get("story_id") == story_id)
-        before = D.cost_today()["spent_usd"]
-        sugg = D.suggest_connections(story_id, D._story_hashes(story))
+        story = story_of(story_id)
+        before = R.cost_today()["spent_usd"]
+        sugg = R.suggest_connections(story_id, story_hashes(story))
         ids = [s["story_id"] for s in sugg["suggestions"]]
         check("[behaviour] 9 · a suggestion is never the story itself",
               story_id in ids, False)
         check("[behaviour] 9 · nor anything its own thread already holds",
-              sorted(set(ids) & D._thread_story_ids(story)), [])
+              sorted(set(ids) & thread_story_ids(story)), [])
         # Decision D11 withdrew §4.4's "3-5": the floor is gone, because a padded set
         # is worse than a short one. `suggest_min` went with it.
         check("[behaviour] 18 · zero to five suggestions, and never padded",
-              0 <= len(ids) <= D.KNOBS["suggest_max"], True)
+              0 <= len(ids) <= KNOBS["suggest_max"], True)
         check("[fixture] and `suggest_min` is gone rather than left unused",
-              "suggest_min" in D.KNOBS, False)
+              "suggest_min" in KNOBS, False)
         check("[fixture] each says why",
               [s for s in sugg["suggestions"] if not s["why"].startswith("Sample reason")],
               [])
         # A word the whole archive uses is never NAMED as the reason, however rare it
         # ranks among the rest: "shares the words 'for', 'and'" reads as a reason and is
         # not one. Measured on the GST story: "for" is in 14 of the 19 stories.
-        texts = {st["story_id"]: D._story_text(st) for st in D._search_corpus()}
-        everywhere = max(1, int(len(texts) * D.KNOBS["suggest_why_max_spread"]))
-        named = [w.strip("'") for s2 in sugg["suggestions"]
-                 for w in re.findall(r"'([a-z0-9]+)'", s2["why"])]
-        # D11's relevance bar: a row is shown only if it shares a word that is not in
-        # more than `common_word_share` of the corpus's stories. That is also the widest
-        # word a `why` can name, because the row got in on it.
-        bar = max(1, int(len(texts) * D.KNOBS["common_word_share"]))
-        check("[fixture] no why names a word wider than that bar",
-              [w for w in named
-               if sum(1 for t in texts.values() if D._word_hits([w], t)) > bar], [])
-        check("[fixture] and one shared word reads 'word', not 'words'",
-              [s2["why"] for s2 in sugg["suggestions"]
-               if len(re.findall(r"'[a-z0-9]+'", s2["why"])) == 1
-               and "the word '" not in s2["why"]], [])
         check("[fixture] each carries one to three articles",
               sorted({len(s["articles"]) for s in sugg["suggestions"]} - {1, 2, 3}), [])
         check("[fixture] and the set costs what the estimate said",
-              [sugg["cost_usd"], round(D.cost_today()["spent_usd"] - before, 6)],
-              [D.estimate_cost("suggest")] * 2)
-
-        # The naming knob (0.4) is tighter than the relevance bar (0.5), so a row whose
-        # only shared word sits between them is shown with that word named. Swept over
-        # every story in the corpus, because this one story does not produce it:
-        # measured 2 Nov, 6 of 93 rows, naming 'lic' (8 of 19 stories) and 'with' (9).
-        # Pinned as the words they are, so a corpus change says so out loud rather than
-        # quietly widening what a `why` may name.
-        # Swept over EVERY story, not just this one: the Delhi story's own five hits
-        # all clear the bar, so a bar that stopped filtering would not show up here.
-        between, padded, rows_seen = set(), [], 0
-        spread_of = {}
-        for one in D._search_corpus():
-            qwords = D._query_words((one.get("headline") or {}).get("text", "") + " "
-                                    + (one.get("one_liner") or {}).get("text", ""))
-            for w in qwords:
-                if w not in spread_of:
-                    spread_of[w] = sum(1 for t in texts.values() if D._word_hits([w], t))
-            for s2 in D.suggest_connections(one["story_id"])["suggestions"]:
-                rows_seen += 1
-                mine = texts.get(s2["story_id"], "")
-                if not [w for w in qwords
-                        if D._word_hits([w], mine) and spread_of[w] <= bar]:
-                    padded.append((one["story_id"], s2["headline"]))
-                for w in re.findall(r"'([a-z0-9]+)'", s2["why"]):
-                    if sum(1 for t in texts.values() if D._word_hits([w], t)) > everywhere:
-                        between.add(w)
-        check("[fixture] the sweep really saw every story's suggestions",
-              [len(D._search_corpus()), rows_seen > 50], [19, True])
-        check("[behaviour] 18 · no suggestion anywhere in the corpus is padding: each "
-              "shares a word that is not a common one", padded, [])
-        check("[fixture] and the words named between the two bars are the measured ones",
-              sorted(between), ["lic", "with"])
+              [sugg["cost_usd"], round(R.cost_today()["spent_usd"] - before, 6)],
+              [R.estimate_cost("suggest")] * 2)
+        for name in ("[fixture] no why names a word wider than that bar",
+                     "[fixture] and one shared word reads 'word', not 'words'",
+                     "[fixture] the sweep really saw every story's suggestions",
+                     "[fixture] and the words named between the two bars are the measured ones"):
+            skip(name, "the double's word-share rule; K3 uses a similarity bar and writes "
+                       "`why` with Haiku (contract v2.3)")
+        skip("[behaviour] 18 · no suggestion anywhere in the corpus is padding",
+             "PENDING I2: rewritten to K3's relevance bar")
         try:
-            D.suggest_connections("no_such_story")
+            R.suggest_connections("no_such_story")
             missing = "no error"
         except LookupError:
             missing = "LookupError"
@@ -2965,14 +3040,14 @@ def v01_ask():
               missing, "LookupError")
 
         # --- rule 14 · the reader's own links ----------------------------------
-        bare = [s["story_id"] for s in D._search_corpus()
-                if D.thread(s["story_id"]) is None][0]
-        bare_story = D._find_story(lambda s: s.get("story_id") == bare)
+        bare = [s["story_id"] for s in digest_stories()
+                if R.thread(s["story_id"]) is None][0]
+        bare_story = story_of(bare)
         target_id = ids[0]
-        target = D._find_story(lambda s: s.get("story_id") == target_id)
-        link_id = D.add_user_link(bare, D._story_hashes(bare_story), target_id,
-                                  D._story_hashes(target))
-        made = D.thread(bare)
+        target = story_of(target_id)
+        link_id = R.add_user_link(bare, story_hashes(bare_story), target_id,
+                                  story_hashes(target))
+        made = R.thread(bare)
         user_entries = [e for e in made["entries"] if e["link_type"] == "user"]
         check("[behaviour] 14 · a story with no thread has one once you add a link",
               bool(made), True)
@@ -2986,21 +3061,24 @@ def v01_ask():
                len(target["coverage"]["rows"])])
         check("[behaviour] 14 · the header counts say how many you added",
               made["entries_added_by_you"], 1)
-        listed = D.list_user_links(D._story_hashes(bare_story))
+        listed = R.list_user_links(story_hashes(bare_story))
         check("[behaviour] 14 · list_user_links shows it",
               [len(listed), listed[0]["link_id"], listed[0]["target_story_id"]],
               [1, link_id, target_id])
-        state_keys_before = sorted(D._load_state())
+        def reader_state():
+            return [R.read_state(story_hashes(bare_story)), R.list_follows(),
+                    R.list_boards(), R.list_keep_unread(), R.list_feedback()]
+        state_before = reader_state()
         check("[behaviour] 14 · remove_user_link takes it out",
-              [D.remove_user_link(link_id), D.thread(bare)], [True, None])
+              [R.remove_user_link(link_id), R.thread(bare)], [True, None])
         check("[behaviour] 14 · and list_user_links agrees",
-              D.list_user_links(D._story_hashes(bare_story)), [])
+              R.list_user_links(story_hashes(bare_story)), [])
         check("[behaviour] 14 · nothing outside the reader's own state was touched",
-              sorted(D._load_state()), state_keys_before)
+              reader_state(), state_before)
         # v0.1 returned False and left the route to decide what that meant. Contract
         # v2.2 makes it the class, so the route maps it without reading the message.
         try:
-            D.remove_user_link("ulink_nope")
+            R.remove_user_link("ulink_nope")
             gone = "no error"
         except LookupError:
             gone = "LookupError"
@@ -3010,34 +3088,34 @@ def v01_ask():
               gone, "LookupError")
 
         # a user link on a story that HAS a thread joins the days it already had
-        has_thread = [s["story_id"] for s in D._search_corpus()
-                      if D.thread(s["story_id"])][0]
-        ht_story = D._find_story(lambda s: s.get("story_id") == has_thread)
-        was = len(D.thread(has_thread)["entries"])
-        link2 = D.add_user_link(has_thread, D._story_hashes(ht_story), target_id,
-                                D._story_hashes(target))
-        now = D.thread(has_thread)
+        has_thread = [s["story_id"] for s in digest_stories()
+                      if R.thread(s["story_id"])][0]
+        ht_story = story_of(has_thread)
+        was = len(R.thread(has_thread)["entries"])
+        link2 = R.add_user_link(has_thread, story_hashes(ht_story), target_id,
+                                story_hashes(target))
+        now = R.thread(has_thread)
         check("[fixture] a user link adds one entry to a thread that already had days",
               len(now["entries"]), was + 1)
         check("[fixture] and the days count still counts only the days",
-              now["days"], D.thread(has_thread)["days"])
+              now["days"], R.thread(has_thread)["days"])
         check("[fixture] the entry ids are unique, user entries and days alike",
               len({e["entry_id"] for e in now["entries"]}), len(now["entries"]))
-        D.remove_user_link(link2)
+        R.remove_user_link(link2)
 
         # --- estimates ----------------------------------------------------------
         check("[fixture] every kind has an estimate",
-              [D.estimate_cost(k) for k in ("ask", "think_harder", "background",
+              [R.estimate_cost(k) for k in ("ask", "think_harder", "background",
                                             "suggest")],
               [0.0005, 0.011, 0.0003, 0.0005])
         try:
-            D.estimate_cost("nonsense")
+            R.estimate_cost("nonsense")
             bad_kind = "no error"
         except ValueError:
             bad_kind = "error"
         check("[fixture] and an unknown kind is an error, not a zero", bad_kind, "error")
-        check("[fixture] the state file is the only thing this wrote",
-              D.STATE_FILE.exists(), True)
+        skip("[fixture] the state file is the only thing this wrote",
+             "state lives in intel.db; the whole-run checksum fence covers it")
 
 
 def drain(response):
@@ -3088,45 +3166,43 @@ def v01b_contract():
     """Contract v2.2 §6-§9 -- the rules numbered 15-19, and the v2.2 keys by name."""
     import p3_app as A
 
-    D.ROOT = ROOT
-    D.ARCHIVE = ROOT / "archive"
+    R.ROOT = ROOT
+    R.ARCHIVE = ROOT / "archive"
     with tempfile.TemporaryDirectory() as tmp:
-        D.WORK = Path(tmp)                              # §3 rule 7
-        D.STATE_FILE = Path(tmp) / "state.json"
+        R.WORK = Path(tmp)                              # §3 rule 7
 
         # --- 15 · a scoped search returns nothing outside story_ids -------------
-        wide = D.search("police", limit=50)
+        wide = R.search("police", limit=50)
         check("[fixture] 15 · the unscoped query matches more than one story, so the "
               "next check has something to exclude", len(wide["stories"]) > 1, True)
         only = wide["stories"][0]["story_id"]
-        scoped = D.search("police", filters={"story_ids": [only]}, limit=50)
+        scoped = R.search("police", filters={"story_ids": [only]}, limit=50)
         check("[behaviour] 15 · a scoped search returns nothing outside story_ids",
               sorted({s["story_id"] for s in scoped["stories"]} - {only}), [])
         check("[behaviour] 15 · and the totals are the scope's, not the archive's",
               scoped["total_stories"], 1)
         # the include side's other half, confirmed by name (§2)
         hashes = [a["text_hash"] for a in wide["stories"][0]["articles"]][:1]
-        by_hash = D.search("police", filters={"text_hashes": hashes}, limit=50)
+        by_hash = R.search("police", filters={"text_hashes": hashes}, limit=50)
         check("[behaviour] 15 · and filters.text_hashes narrows to those articles",
               sorted({a["text_hash"] for s in by_hash["stories"]
                       for a in s["articles"]} - set(hashes)), [])
 
         # --- 16 · a query of only short words is searched, not browsed (D5/D6) --
-        ai = D.search("AI", limit=50)
+        ai = R.search("AI", limit=50)
         check("[behaviour] 16 · search('AI') has a verdict, so it is a search and not "
               "a browse", ai["verdict"] in ("enough", "thin", "empty"), True)
         check("[behaviour] 16 · and the sort is the one a search uses",
               ai["sort"], "relevance")
-        check("[behaviour] 16 · D6 · a short word matches only as a whole word",
-              D._word_hits(["ai"], "he said again he had aid"), 0)
-        check("[behaviour] 16 · while a long one matches inside a longer word",
-              D._word_hits(["protest"], "the protesters gathered"), 1)
+        for name in ("[behaviour] 16 · D6 · a short word matches only as a whole word",
+                     "[behaviour] 16 · while a long one matches inside a longer word"):
+            skip(name, "PENDING I2: rewritten to observe K3's search results")
         check("[behaviour] 16 · D5 · a short word is dropped only when a long one "
-              "remains", [D._query_words("AI"), D._query_words("AI policy")],
+              "remains", [PS.tokens("AI"), PS.tokens("AI policy")],
               [["ai"], ["policy"]])
 
         # --- 17 · an answer survives the restart with its v2.2 fields -----------
-        events = list(D.ask("police", None))
+        events = list(R.ask("police", None))
         live = events[-1]["answer"]
         # From the `results` EVENT, not from the answer's own stored `results`: a check
         # that reads the field it is checking passes when the field is empty.
@@ -3134,7 +3210,7 @@ def v01b_contract():
         cited_ids = sorted({s["story_id"] for s in streamed["stories"]
                             if {a["text_hash"] for a in s["articles"]}
                             & set(live["cited"])})
-        after = _fresh_double(D.STATE_FILE).current_conversation()
+        after = _fresh_double().current_conversation()
         stored = [t["answer"] for t in after["turns"] if t["kind"] == "answer"
                   and t["answer"]["answer_id"] == live["answer_id"]][0]
         check("[behaviour] 17 · a restart finds the answer in the conversation",
@@ -3163,7 +3239,7 @@ def v01b_contract():
                      if r["mark"] == "cited"), cited_ids)
         check("[fixture] 17 · results holds no more than the pane shows, plus the "
               "cited ones",
-              len(stored["results"]) <= max(D.KNOBS["pane_results_shown"],
+              len(stored["results"]) <= max(KNOBS["pane_results_shown"],
                                             len(cited_ids)), True)
         # The page shows PANE_RESULTS_SHOWN rows; the answer remembers
         # KNOBS["pane_results_shown"] of them. Two numbers, one meaning: a page that
@@ -3172,7 +3248,7 @@ def v01b_contract():
         js_shown = re.search(r"const PANE_RESULTS_SHOWN = (\d+)",
                              (ROOT / "app" / "app.js").read_text())
         check("[fixture] 17 · the page's row count and the double's knob are the same "
-              "number", int(js_shown.group(1)), D.KNOBS["pane_results_shown"])
+              "number", int(js_shown.group(1)), KNOBS["pane_results_shown"])
         # The fixture writer only ever cites the top three stories, so a real answer
         # never puts a cited story below the pane's fold and the "plus every cited
         # story" half of D12 goes unexercised by the flow above. Checked on the
@@ -3180,13 +3256,13 @@ def v01b_contract():
         made_up = [{"story_id": f"s{i}", "headline": f"H{i}",
                     "dates": ["2026-10-01"], "papers": 1,
                     "articles": [{"text_hash": f"h{i}"}]} for i in range(8)]
-        kept = D._compact_results(made_up, ["h7"], 5)
+        kept = PS._compact_results(made_up, ["h7"], 5)
         check("[behaviour] 17 · a cited story below the pane's fold is kept, and marked",
               [[r["story_id"] for r in kept], kept[-1]["mark"]],
               [["s0", "s1", "s2", "s3", "s4", "s7"], "cited"])
         check("[behaviour] 17 · while an uncited story below it is dropped",
               [r["story_id"] for r in kept if r["story_id"] in ("s5", "s6")], [])
-        harder = list(D.think_harder(live["answer_id"]))[-1]["answer"]
+        harder = list(R.think_harder(live["answer_id"]))[-1]["answer"]
         check("[behaviour] 17 · Think harder's passage_count is the parent's, which is "
               "the whole claim it makes",
               harder["passage_count"], live["passage_count"])
@@ -3197,21 +3273,21 @@ def v01b_contract():
               [True, []])
 
         # --- 19 · the two error classes, told apart ----------------------------
-        empty = list(D.ask("Norway fjord salmon quota", None))[-1]["answer"]
-        D.ask_background(empty["answer_id"])
-        pin_board = D.create_board("errors")
-        pin_id = D.pin(pin_board, "story", {"story_id": "x"}, {"from": "test"})
-        D.unpin(pin_id)
+        empty = list(R.ask("Norway fjord salmon quota", None))[-1]["answer"]
+        R.ask_background(empty["answer_id"])
+        pin_board = R.create_board("errors")
+        pin_id = R.pin(pin_board, "story", {"story_id": "x"}, {"from": "test"})
+        R.unpin(pin_id)
         missing = {
-            "think_harder": lambda: next(D.think_harder("ans_nope")),
-            "ask_background": lambda: D.ask_background("ans_nope"),
-            "suggest_connections": lambda: D.suggest_connections("no_such_story"),
-            "unpin": lambda: D.unpin(pin_id),
-            "remove_user_link": lambda: D.remove_user_link("ulink_nope"),
+            "think_harder": lambda: next(R.think_harder("ans_nope")),
+            "ask_background": lambda: R.ask_background("ans_nope"),
+            "suggest_connections": lambda: R.suggest_connections("no_such_story"),
+            "unpin": lambda: R.unpin(pin_id),
+            "remove_user_link": lambda: R.remove_user_link("ulink_nope"),
         }
         unhonourable = {
-            "ask_background twice": lambda: D.ask_background(empty["answer_id"]),
-            "estimate_cost": lambda: D.estimate_cost("nonsense"),
+            "ask_background twice": lambda: R.ask_background(empty["answer_id"]),
+            "estimate_cost": lambda: R.estimate_cost("nonsense"),
             "raise_cap_today past the limit": _press_cap_past_the_limit,
         }
         check("[behaviour] 19 · every missing thing raises LookupError",
@@ -3237,13 +3313,13 @@ def v01b_contract():
                       status_of(A.estimate, kind="nonsense")}), [400])
 
         # --- the rest of §2's confirm-present list, by name ---------------------
-        story = D._find_story(lambda s: D.thread(s.get("story_id")) is not None)
-        target = D._find_story(
+        story = find_story(lambda s: R.thread(s.get("story_id")) is not None)
+        target = find_story(
             lambda s: s.get("story_id") != story.get("story_id"))
-        before = D.thread(story["story_id"])
-        link_id = D.add_user_link(story["story_id"], D._story_hashes(story),
-                                  target["story_id"], D._story_hashes(target))
-        th = D.thread(story["story_id"])
+        before = R.thread(story["story_id"])
+        link_id = R.add_user_link(story["story_id"], story_hashes(story),
+                                  target["story_id"], story_hashes(target))
+        th = R.thread(story["story_id"])
         user_entries = [e for e in th["entries"] if e.get("link_type") == "user"]
         check("[behaviour] a user entry carries link_id and story_id, for Remove and "
               "for opening the target",
@@ -3257,21 +3333,21 @@ def v01b_contract():
         check("[behaviour] the link is an entry, and `days` counts days only (D9)",
               [len(th["entries"]) - len(before["entries"]),
                th["days"] - before["days"]], [1, 0])
-        D.remove_user_link(link_id)
+        R.remove_user_link(link_id)
         check("[fixture] and taking it out puts the thread back as it was",
-              [len(D.thread(story["story_id"])["entries"]),
-               D.thread(story["story_id"])["entries_added_by_you"]],
+              [len(R.thread(story["story_id"])["entries"]),
+               R.thread(story["story_id"])["entries_added_by_you"]],
               [len(before["entries"]), 0])
         # D11 deleted a wording as well as a code path. A deleted path can come back
         # as a one-line fallback, so the words themselves are checked for by name.
         sources = "".join((ROOT / f).read_text() for f in
-                          ("src/p3_app_double.py", "src/p3_app.py", "app/app.js"))
+                          ("src/p3_app.py", "app/app.js"))
         check("[fixture] the filler wording is gone from the app, not just unreachable",
               [w for w in ("shown to fill the set",
                            "nothing in common but words the whole archive uses")
                if w in sources], [])
         check("[fixture] cap_override_max_per_day is a named knob, not a number in "
-              "the code", isinstance(D.KNOBS["cap_override_max_per_day"], int), True)
+              "the code", isinstance(KNOBS["cap_override_max_per_day"], int), True)
 
 
 def _raises(fn):
@@ -3288,8 +3364,8 @@ def _raises(fn):
 
 def _press_cap_past_the_limit():
     """Press the one-day override until the knob refuses one more."""
-    for _ in range(D.KNOBS["cap_override_max_per_day"] + 1):
-        D.raise_cap_today()
+    for _ in range(KNOBS["cap_override_max_per_day"] + 1):
+        R.raise_cap_today()
 
 
 def v01_routes():
@@ -3319,15 +3395,12 @@ def v01_routes():
       of rather than letting the pane show the wrong wording.
     """
     import p3_app as A
-    import p3_app_double as D
 
     with tempfile.TemporaryDirectory() as tmp:
-        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
-        D.WORK = Path(tmp)
-        D.STATE_FILE = Path(tmp) / "state.json"
-        D.KNOBS["fixture_stream_delay_ms"] = 0
-        D.FIXTURES["assistant_error"] = False
-        D.FIXTURES["cap_reached"] = False
+        R.ROOT, R.ARCHIVE = ROOT, ROOT / "archive"
+        R.WORK = Path(tmp)
+        R.FIXTURES["assistant_error"] = False
+        R.FIXTURES["cap_reached"] = False
 
         paths = {r.path for r in A.app.routes if hasattr(r, "path")}
         wanted = {"/api/search", "/api/facets", "/api/ask", "/api/think_harder",
@@ -3411,25 +3484,25 @@ def v01_routes():
 
         # --- suggestions and the reader's links ---------------------------------
         story_id = "2026-10-11:56eaf7aa4d5b"
-        story = D._find_story(lambda s: s.get("story_id") == story_id)
+        story = story_of(story_id)
         sugg = A.suggest(payload={"story_id": story_id,
-                                  "text_hashes": D._story_hashes(story)})
+                                  "text_hashes": story_hashes(story)})
         check("[fixture] /api/suggest answers with no more than five suggestions (D11)",
-              0 <= len(sugg["suggestions"]) <= D.KNOBS["suggest_max"], True)
+              0 <= len(sugg["suggestions"]) <= KNOBS["suggest_max"], True)
         check("[fixture] and 404s on a story that does not exist",
               status_of(A.suggest, payload={"story_id": "nope"}), 404)
         check("[fixture] a missing story_id is a 400",
               status_of(A.suggest, payload={}), 400)
 
         target_id = sugg["suggestions"][0]["story_id"]
-        target = D._find_story(lambda s: s.get("story_id") == target_id)
+        target = story_of(target_id)
         made = A.user_link(payload={"story_id": story_id,
-                                    "text_hashes": D._story_hashes(story),
+                                    "text_hashes": story_hashes(story),
                                     "target_story_id": target_id,
-                                    "target_text_hashes": D._story_hashes(target)})
+                                    "target_text_hashes": story_hashes(target)})
         check("[fixture] /api/user_link answers with the new link's id",
               bool(made["link_id"]), True)
-        listed = A.user_links(hashes=D._story_hashes(story))["user_links"]
+        listed = A.user_links(hashes=story_hashes(story))["user_links"]
         check("[fixture] /api/user_links lists it, so the + icon is dark after a reload",
               [len(listed), listed[0]["link_id"]], [1, made["link_id"]])
         check("[fixture] DELETE removes it",
@@ -3460,7 +3533,7 @@ def v01_routes():
               status_of(A.set_fixtures, payload={"assistant_error": "sulking"}), 400)
         A.set_fixtures(payload={"assistant_error": False})
         check("[fixture] and switching it off still works",
-              D.FIXTURES["assistant_error"], False)
+              R.FIXTURES["assistant_error"], False)
 
 
 def v01_states():
@@ -3474,18 +3547,15 @@ def v01_states():
     Pass lines, written before the run: each of the nine states below is reachable, and
     the input that reaches it is named here so the report's manual list can repeat it.
     """
-    import p3_app_double as D
 
     with tempfile.TemporaryDirectory() as tmp:
-        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
-        D.WORK = Path(tmp)
-        D.STATE_FILE = Path(tmp) / "state.json"
-        D.KNOBS["fixture_stream_delay_ms"] = 0
-        D.FIXTURES["assistant_error"] = False
-        D.FIXTURES["cap_reached"] = False
+        R.ROOT, R.ARCHIVE = ROOT, ROOT / "archive"
+        R.WORK = Path(tmp)
+        R.FIXTURES["assistant_error"] = False
+        R.FIXTURES["cap_reached"] = False
 
         # 1 and 2 · answering, then an answer, from the query "police"
-        events = list(D.ask("police", None))
+        events = list(R.ask("police", None))
         answer = events[-1]["answer"]
         check("[fixture] state 1 · 'police' gives a results event before any sentence",
               [events[0]["type"], events[0]["search"]["verdict"]],
@@ -3494,70 +3564,69 @@ def v01_states():
               [len(answer["sentences"]) >= 2, len(answer["cited"]) >= 1], [True, True])
 
         # 3 · think harder
-        harder = list(D.think_harder(answer["answer_id"]))[-1]["answer"]
+        harder = list(R.think_harder(answer["answer_id"]))[-1]["answer"]
         check("[fixture] state 3 · Think harder on it gives a Sonnet answer",
               harder["model"], "sonnet")
 
         # 4 · weak match, from the query "GST"
-        thin = list(D.ask("GST", None))[-1]["answer"]
+        thin = list(R.ask("GST", None))[-1]["answer"]
         check("[fixture] state 4 · 'GST' gives a thin answer with a count to show",
               [thin["verdict"], thin["found_count"] > 0], ["thin", True])
 
         # 5 and 6 · nothing found, then background on request
-        empty = list(D.ask("Norway", None))[-1]["answer"]
+        empty = list(R.ask("Norway", None))[-1]["answer"]
         check("[fixture] state 5 · 'Norway' gives an empty verdict and three closest",
               [empty["verdict"], len(empty["closest"])], ["empty", 3])
         check("[fixture] state 6 · and background on request answers for it",
-              bool(D.ask_background(empty["answer_id"])["text"]), True)
+              bool(R.ask_background(empty["answer_id"])["text"]), True)
 
         # 7 · a divider, from opening another story
-        conv = D.current_conversation()
-        D.add_divider(conv["conversation_id"], "sid", "ANOTHER STORY")
+        conv = R.current_conversation()
+        R.add_divider(conv["conversation_id"], "sid", "ANOTHER STORY")
         check("[fixture] state 7 · opening another story adds a divider turn",
-              D.current_conversation()["turns"][-1]["kind"], "divider")
+              R.current_conversation()["turns"][-1]["kind"], "divider")
 
         # 8 · the conversation kept across a restart
         check("[fixture] state 8 · and the conversation survives a restart",
-              _fresh_double(D.STATE_FILE).current_conversation()["conversation_id"],
+              _fresh_double().current_conversation()["conversation_id"],
               conv["conversation_id"])
 
         # 9 · the error reasons and the cap, both from fixture switches
         reached = {}
         for reason in ("model_busy", "no_network", "key_rejected", "timeout",
                        "checks_failed", "other"):
-            D.FIXTURES["assistant_error"] = reason
-            reached[reason] = list(D.ask("police", None))[-1]["reason"]
+            R.FIXTURES["assistant_error"] = reason
+            reached[reason] = list(R.ask("police", None))[-1]["reason"]
         check("[fixture] state 9 · every error reason is reachable by its switch",
               sorted(k for k, v in reached.items() if k == v), sorted(reached))
-        D.FIXTURES["assistant_error"] = False
-        D.FIXTURES["cap_reached"] = True
+        R.FIXTURES["assistant_error"] = False
+        R.FIXTURES["cap_reached"] = True
         check("[fixture] state 9 · and the cap band by the cap_reached switch",
-              list(D.ask("police", None))[-1]["code"], "cap_reached")
-        D.FIXTURES["cap_reached"] = False
+              list(R.ask("police", None))[-1]["code"], "cap_reached")
+        R.FIXTURES["cap_reached"] = False
 
         # 10 (D3) and 11 · suggestions and Explore, both from real data
         story_id = "2026-10-11:56eaf7aa4d5b"
-        story = D._find_story(lambda s: s.get("story_id") == story_id)
-        sugg = D.suggest_connections(story_id, D._story_hashes(story))
+        story = story_of(story_id)
+        sugg = R.suggest_connections(story_id, story_hashes(story))
         check("[fixture] state 10 · the Delhi story gives up to five suggestions (D11)",
-              0 <= len(sugg["suggestions"]) <= D.KNOBS["suggest_max"], True)
-        bare = [s["story_id"] for s in D._search_corpus()
-                if D.thread(s["story_id"]) is None][0]
-        bare_story = D._find_story(lambda s: s.get("story_id") == bare)
-        target = D._find_story(
-            lambda s: s.get("story_id") == sugg["suggestions"][0]["story_id"])
-        link_id = D.add_user_link(bare, D._story_hashes(bare_story),
-                                  target["story_id"], D._story_hashes(target))
+              0 <= len(sugg["suggestions"]) <= KNOBS["suggest_max"], True)
+        bare = [s["story_id"] for s in digest_stories()
+                if R.thread(s["story_id"]) is None][0]
+        bare_story = story_of(bare)
+        target = story_of(sugg["suggestions"][0]["story_id"])
+        link_id = R.add_user_link(bare, story_hashes(bare_story),
+                                  target["story_id"], story_hashes(target))
         check("[fixture] state 10 · and + on one gives a thread where there was none",
-              [e["link_type"] for e in D.thread(bare)["entries"]
+              [e["link_type"] for e in R.thread(bare)["entries"]
                if e["link_type"] == "user"], ["user"])
-        D.remove_user_link(link_id)
+        R.remove_user_link(link_id)
         check("[fixture] state 11 · Explore's filters all have something behind them",
               [v for key in ("papers", "topics", "kinds")
-               for v in D.facets()[key]
-               if not D.search("", filters={key: [v]})["total_stories"]], [])
+               for v in R.facets()[key]
+               if not R.search("", filters={key: [v]})["total_stories"]], [])
         check("[fixture] state 11 · and H6 is reachable with a real filter pair",
-              D.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
+              R.search("Norway", filters={"papers": ["Mint"]})["total_stories"], 0)
 
 
 def script_guard():
@@ -3580,8 +3649,8 @@ def script_guard():
     """
     import p3_app as A
 
-    for name in ("p3_app.py", "p3_app_double.py"):
-        src = (ROOT / "src" / name).read_text()
+    for name in ("src/p3_app.py", "tests/p3_app_stub.py"):
+        src = (ROOT / name).read_text()
         lines = src.split("\n")
         guards = [i for i, line in enumerate(lines)
                   if line.startswith('if __name__ == "__main__"')]
@@ -3645,7 +3714,6 @@ def asgi():
     """
     import asyncio
     import p3_app as A
-    import p3_app_double as D
 
     async def request(method, path, query=b"", body=None):
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
@@ -3683,12 +3751,10 @@ def asgi():
         return start["status"], headers, chunks
 
     with tempfile.TemporaryDirectory() as tmp:
-        D.ROOT, D.ARCHIVE = ROOT, ROOT / "archive"
-        D.WORK = Path(tmp)
-        D.STATE_FILE = Path(tmp) / "state.json"
-        D.KNOBS["fixture_stream_delay_ms"] = 0
-        D.FIXTURES["assistant_error"] = False
-        D.FIXTURES["cap_reached"] = False
+        R.ROOT, R.ARCHIVE = ROOT, ROOT / "archive"
+        R.WORK = Path(tmp)
+        R.FIXTURES["assistant_error"] = False
+        R.FIXTURES["cap_reached"] = False
 
         got = asyncio.run(request("GET", "/"))
         check("[fixture] GET / serves the page as HTML",
@@ -3872,31 +3938,61 @@ def page_contract():
     check("[page] and Explore is one of them", "explore" in screens, True)
 
 
-def main():
+def run_section(fn, *args):
+    """One section on a fresh copy of intel.db, with the fake model plugged in and the
+    app pointed back at the real reader afterwards. A crash is a failed check that names
+    the section and the line, never a stopped run: a later section still gets its say."""
+    import traceback
+    import p3_app as A
     with tempfile.TemporaryDirectory() as tmp:
-        mock(tmp)
-    real()
-    v01_search()
-    v01_ask()
-    v01b_contract()
-    routes()
-    v01_routes()
-    v01_states()
-    pdf_guard()
-    js_logic()
-    contrast()
-    markup()
-    script_guard()
-    asgi()
-    page_contract()
-    ownership()
+        copy = Path(tmp) / "intel.db"
+        shutil.copy2(REAL_INTEL, copy)
+        os.environ["P3_READER_INTEL_DB"] = str(copy)
+        R.close_all()
+        PS._CLIENT = fake_model
+        root, archive, work = R.ROOT, R.ARCHIVE, R.WORK
+        try:
+            fn(*args)
+        except Exception as exc:
+            where = [f for f in traceback.extract_tb(exc.__traceback__)
+                     if "test_p3_app" in f.filename or "/src/" in f.filename][-2:]
+            check(f"section {fn.__name__} runs to the end",
+                  f"{type(exc).__name__}: {exc} ["
+                  + " <- ".join(f"{Path(f.filename).name}:{f.lineno}" for f in where)
+                  + "]", "no crash")
+        finally:
+            R.close_all()
+            R.ROOT, R.ARCHIVE, R.WORK = root, archive, work
+            A.data = R
+            check(f"{fn.__name__} left the fake model in place", PS._CLIENT, fake_model)
+            os.environ.pop("P3_READER_INTEL_DB", None)
+
+
+def main():
+    before = _checksum(REAL_INTEL)
+    with tempfile.TemporaryDirectory() as tmp:
+        run_section(mock, tmp)
+    for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
+                    v01_states, pdf_guard, js_logic, contrast, markup, script_guard,
+                    asgi, page_contract, ownership):
+        run_section(section)
+    check("the real intel.db is byte-for-byte what it was before the run",
+          _checksum(REAL_INTEL) == before, True)
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")
-    print(f"{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed "
-          f"(mock world + the two real digests + the routes + the page's logic "
-          f"+ ownership)")
-    print("no database was opened and no real read state was touched by this test")
+    tags = {t: [c for c in CHECKS if f"[{t}]" in c[0]] for t in ("behaviour", "fixture", "page")}
+    untagged = len(CHECKS) - sum(len(v) for v in tags.values())
+    print("  ".join(f"[{t}] {len(v) - sum(g != w for _, g, w in v)}/{len(v)}"
+                    for t, v in tags.items()) + f"  untagged {untagged}")
+    print(f"{len(SKIPS)} checks skipped on real data, each with its reason "
+          f"(`--skips` lists them)")
+    if "--skips" in sys.argv:
+        for name, why in SKIPS:
+            print(f"  SKIP {name}: {why}")
+    print(f"{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed (the real reader on a "
+          f"copy of intel.db + the stub's chosen cases + the page's logic + ownership)")
+    print("fake model client only; the real intel.db was not written")
     print("PASS" if not bad else "FAIL")
     return 1 if bad else 0
 

@@ -3,16 +3,18 @@
 
 WHAT IT DOES
   Serves one page (`app/`) and the JSON it asks for, on 127.0.0.1 only. Every piece of
-  data comes from ONE import — `p3_app_double` — so when K3's real functions land, that
-  single line changes and no route and no screen moves (brief §2.1, C1). This file opens
-  no database and writes no SQL; a test greps it to make sure it never starts.
+  data comes from ONE import — `p3_reader`, K3's data layer, which re-exports
+  `p3_search` — so no route reads anything else (integration brief §2, I1). Until I1 that
+  line named K1's test double; the double is gone, and the suite hands the app a small
+  stub of chosen cases by replacing `data` when it needs one. This file opens no
+  database and writes no SQL; a test greps it to make sure it never starts.
 
   It also serves the archive PDFs, which is the only way to see a chart, a photograph or
   the printed page itself. That route is the one place a request names a file, so it is
   guarded twice: the name must end `.pdf`, and the resolved path must still be inside
   `archive/` — a request that climbs out with `../` is refused, not served.
 
-WHAT IT ADDS TO WHAT THE DOUBLE RETURNS
+WHAT IT ADDS TO WHAT THE DATA LAYER RETURNS
   Two presentation jobs that are K1's, not K3's, so they live here rather than in the
   interface K3 will implement:
   - `paragraphs`: stored article bodies have no paragraph breaks at all (K3 measured 0 of
@@ -68,7 +70,7 @@ APP_DIR = ROOT / "app"
 ARCHIVE = ROOT / "archive"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import p3_app_double as data          # THE one data import (brief §2.1)
+import p3_reader as data              # THE one data import (integration brief §2)
 
 APP_VERSION = "k1-app-0.1"
 
@@ -139,14 +141,14 @@ def _need(payload, *keys):
 
 @contextlib.contextmanager
 def _mapped():
-    """Contract v2.2: the double raises `LookupError` for a thing that does not exist and
+    """Contract v2.2: the data layer raises `LookupError` for a thing that does not exist and
     `ValueError` for a request that cannot be honoured, and the status comes from the
     CLASS, never from the message.
 
     v0.1 decided per route and got it wrong in one place: `/api/background` answered 400
     both for an answer that already had a background line (right) and for an answer id
     that was never issued (wrong -- nothing was unhonourable about the request, the thing
-    simply was not there). `KeyError` is a `LookupError`, so the double may raise either."""
+    simply was not there). `KeyError` is a `LookupError`, so the data layer may raise either."""
     try:
         yield
     except LookupError as exc:
@@ -266,11 +268,11 @@ def article(text_hash: str):
 def new_since(story_id: str, ref: str = "latest"):
     """The story's articles that arrived after the reader last read it (R4).
 
-    Not in the brief's route list, because §4 gives the double a `new_since_read(story)`
+    Not in the brief's route list, because §4 gives the data layer a `new_since_read(story)`
     and no route was named for it. The page could work the rule out for itself -- it
     already knows the read state -- but then the rule would live in two places and K3's
     version would stop being the one that decides. So the server looks the story up and
-    asks the double.
+    asks the data layer.
     """
     digest = data.get_digest(ref)
     if digest is None:
@@ -425,7 +427,7 @@ def set_pref(key: str, payload: dict = Body(...)):
 @app.post("/api/visit")
 def visit(payload: dict = Body(...)):
     """The page reads /api/visit's `last` BEFORE recording this visit, because once this
-    visit is stored it is itself the last one (double, `last_visit`)."""
+    visit is stored it is itself the last one (contract, `last_visit`)."""
     (ref,) = _need(payload, "digest_ref")
     last = data.last_visit(opened_only=True)
     data.record_visit(ref, payload.get("window"), bool(payload.get("opened_story")))
@@ -447,7 +449,7 @@ def set_fixtures(payload: dict = Body(...)):
 
     `assistant_error` is the one switch that is not a yes/no: its value picks WHICH
     failure (§4.2), so a string is kept as it is and only the others are coerced. A
-    reason the double does not know is refused here rather than silently becoming
+    reason the data layer does not know is refused here rather than silently becoming
     "other" in the pane."""
     unknown = [k for k in (payload or {}) if k not in data.FIXTURES]
     if unknown:
@@ -537,8 +539,8 @@ def main():
 
 # ============================================ v0.1 · search, Explore, the ask pane
 #
-# Brief 2 §5. Every one of these calls the double and nothing else: no database, no
-# model, no network. The two answer routes stream NDJSON -- one JSON event per line --
+# Brief 2 §5. Every one of these calls the data layer and nothing else: this file opens no
+# database, builds no model client and makes no network call itself. The two answer routes stream NDJSON -- one JSON event per line --
 # so the results list is on the screen before the first sentence is written.
 
 def _as_list(value):
@@ -553,7 +555,7 @@ def _as_list(value):
 
 def _filters_from_query(date_from, date_to, papers, topics, kinds, story_ids,
                         exclude_story_ids, hashes):
-    """Build the double's filter object out of query parameters, leaving out what was
+    """Build the data layer's filter object out of query parameters, leaving out what was
     not asked for. An empty list and a missing parameter mean the same thing here: no
     filter on that field, rather than "match nothing"."""
     wanted = {"date_from": date_from, "date_to": date_to,
@@ -662,7 +664,7 @@ def suggest(payload: dict = Body(...)):
 @app.post("/api/cap/raise")
 def cap_raise(payload: dict = Body(None)):
     """Allow more spending for today only. The page confirms in the page first; this
-    route is the Yes, and the amount is the double's knob unless one is sent."""
+    route is the Yes, and the amount is the data layer's knob unless one is sent."""
     with _mapped():
         return data.raise_cap_today((payload or {}).get("amount_usd"))
 
