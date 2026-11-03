@@ -828,6 +828,68 @@ def ask_mock(tmp):
           (True, S.price("claude-haiku-5-5", avg[0], avg[1])))
     check("[estimate] an unknown kind is ValueError",
           raises(lambda: S.estimate_cost("poem"), ValueError), True)
+
+    # --- the write guard (incident 3 Nov): a FAKE model never writes the REAL intel.db.
+    # The real file is never aimed at here: the synthetic file stands in for it by
+    # repointing REAL_INTEL_DB, so a broken guard could only touch the synthetic file.
+    def rows():
+        con = R._intel_ro()
+        return tuple(con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                     for t in ("turns", "cost_log", "conversations", "passage_sets"))
+
+    real_path = S.REAL_INTEL_DB
+    S.REAL_INTEL_DB = Path(intel).resolve()                  # "the real file", for now
+    S._CLIENT = Fake(GOOD, GOOD)
+    before = rows()
+    try:
+        ev = run(S.ask("Did the repo rate go up?"))
+        refused = [e.get("detail") or "" for e in ev if e["type"] == "error"]
+        refused = any("real data/intel.db" in d for d in refused)
+    except S.FakeModelOnRealDb:
+        refused = True
+    check("[guard] 1 · a fake model aimed at the real file is refused, loudly", refused, True)
+    check("[guard] 1 · ... and nothing was written to it", rows(), before)
+    S.REAL_INTEL_DB = real_path
+    ev = run(S.ask("Did the repo rate go up?"))
+    check("[guard] 2 · a fake model on a copy still saves its answer",
+          (ev[-1]["type"], rows()[0] == before[0] + 1), ("done", True))
+
+    # 3 · the REAL-model path (_CLIENT None) is never blocked: the SDK is faked, the
+    # target is the synthetic file, and the answer must be saved.
+    import types
+    fake_sdk = types.ModuleType("anthropic")
+
+    class _Messages:
+        def create(self, **kw):
+            return types.SimpleNamespace(
+                usage=types.SimpleNamespace(input_tokens=3000, output_tokens=200),
+                content=[types.SimpleNamespace(type="tool_use", input=GOOD[0])])
+    fake_sdk.Anthropic = lambda **kw: types.SimpleNamespace(messages=_Messages())
+    fake_sdk.BadRequestError = type("BadRequestError", (Exception,), {})
+    dot = types.ModuleType("dotenv")
+    dot.load_dotenv = lambda *a, **k: None
+    saved_mods = {m: sys.modules.get(m) for m in ("anthropic", "dotenv")}
+    saved_key = os.environ.get("ANTHROPIC_API_KEY")
+    sys.modules.update(anthropic=fake_sdk, dotenv=dot)
+    os.environ["ANTHROPIC_API_KEY"] = "fake-not-a-key"
+    S._CLIENT, S._LIVE = None, None
+    try:
+        before = rows()
+        ev = run(S.ask("Did the repo rate go up?"))
+        check("[guard] 3 · the real-model path is not blocked: the answer is saved",
+              (ev[-1]["type"], rows()[0] == before[0] + 1), ("done", True))
+    finally:
+        S._LIVE = None                       # never leave the fake SDK's client cached
+        for m, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(m, None)
+            else:
+                sys.modules[m] = v
+        if saved_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = saved_key
+
     S._CLIENT = None
     R.close_all()
     S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
@@ -985,6 +1047,15 @@ def shapes_mock():
               raises(lambda: call("P", "SYS", "ask", "claude-noshape-1", "text"), ValueError),
               True)
         check("shape · ... with zero requests sent", len(sent), 0)
+        # The guard on the TRUE real path: it must refuse before any connection is
+        # opened, so this touches nothing (the env var is unset here = the real file).
+        saved_env = os.environ.pop("P3_READER_INTEL_DB", None)
+        S._CLIENT = lambda *a: None
+        check("[guard] the true data/intel.db is refused to a fake model",
+              raises(S._writer, S.FakeModelOnRealDb), True)
+        S._CLIENT = None
+        if saved_env is not None:
+            os.environ["P3_READER_INTEL_DB"] = saved_env
     finally:
         S.MODEL_REGISTER.pop("claude-noshape-1", None)
         for m, v in saved.items():

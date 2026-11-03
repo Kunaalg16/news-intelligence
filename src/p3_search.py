@@ -1076,6 +1076,30 @@ def _from_text(message):
     return reply, usage.input_tokens, usage.output_tokens
 
 
+REAL_INTEL_DB = (ROOT / "data" / "intel.db").resolve()
+
+
+class FakeModelOnRealDb(RuntimeError):
+    """A fake model's answer was about to be saved into the REAL intel.db."""
+
+
+def _writer():
+    """The writable intel.db connection, for every write this module makes.
+
+    Refuses (raises, never skips silently) when a FAKE model is plugged in (`_CLIENT`
+    is set; no code in src/ sets it, only tests and scratch scripts) and the write
+    would land in the real `data/intel.db`. Incident 3 Nov: a scratch repro wrote a
+    fake answer, fake costs and a blank summary there. The real app leaves `_CLIENT`
+    None, so this never fires on a real model."""
+    R = _R()
+    # The FIXED real path, not `INTEL_DB`: tests and scripts repoint that constant, and
+    # the 3 Nov script did exactly that while the write still went to the real file.
+    if _CLIENT is not None and Path(R._intel_path()).resolve() == REAL_INTEL_DB:
+        raise FakeModelOnRealDb("a fake model tried to write to the real data/intel.db; "
+                                "set P3_READER_INTEL_DB to a copy first")
+    return R._intel_w()
+
+
 def _client():
     global _LIVE
     if _CLIENT is not None:
@@ -1125,7 +1149,7 @@ def _log_cost(purpose, model_id, in_tokens, out_tokens, note=None):
     else can check the cap. Returns the row's `usd`, which is what the answer's own cost
     line adds up -- so the two are the same numbers, not two computations (§9)."""
     usd = price(model_id, in_tokens, out_tokens)
-    con = _R()._intel_w()
+    con = _writer()
     con.execute("INSERT INTO cost_log (at, purpose, model, in_tokens, out_tokens, usd, "
                 "visit_id, note) VALUES (?,?,?,?,?,?,?,?)",
                 (_R()._now(), purpose, model_id, in_tokens, out_tokens, usd, None, note))
@@ -1191,7 +1215,7 @@ CURRENT_KEY = "current_conversation_id"
 def _new_conversation_row():
     R = _R()
     cid = "c_" + uuid.uuid4().hex[:12]
-    con = R._intel_w()
+    con = _writer()
     con.execute("INSERT INTO conversations (conversation_id, started_at, summary, "
                 "updated_at) VALUES (?,?,?,?)", (cid, R._now(), None, R._now()))
     con.commit()
@@ -1227,7 +1251,7 @@ def _turns(cid):
 
 def _add_turn(cid, kind, payload):
     R = _R()
-    con = R._intel_w()
+    con = _writer()
     con.execute("INSERT INTO turns (turn_id, conversation_id, kind, payload, at) "
                 "VALUES (?,?,?,?,?)",
                 ("t_" + uuid.uuid4().hex[:12], cid, kind, json.dumps(payload), R._now()))
@@ -1311,7 +1335,7 @@ def _memory(cid, spent, before=None):
             reply = _call("ask", MODEL_IDS["haiku"], record, SUMMARY_RULES, "text", spent,
                           note=SUMMARY_NOTE)
             text = (reply.get("text") or "").strip()
-            con = R._intel_w()
+            con = _writer()
             con.execute("UPDATE conversations SET summary = ? WHERE conversation_id = ?",
                         (json.dumps({"covers": covers, "text": text}), cid))
             con.commit()
@@ -1359,7 +1383,7 @@ def _store_passage_set(chosen):
     hashes = list(dict.fromkeys(p["text_hash"] for p in chosen))
     keep = [{k: p[k] for k in ("passage_id", "text_hash", "story_id", "text", "article")}
             for p in chosen]
-    con = R._intel_w()
+    con = _writer()
     con.execute("INSERT OR IGNORE INTO passage_sets (passage_set_id, text_hashes, passages, "
                 "created_at) VALUES (?,?,?,?)",
                 (psid, json.dumps(hashes), json.dumps(keep), R._now()))
@@ -1597,7 +1621,7 @@ def ask_background(answer_id):
     cost = round(sum(spent), 6)
     answer["background"] = text
     R = _R()
-    con = R._intel_w()
+    con = _writer()
     con.execute("UPDATE turns SET payload = ? WHERE turn_id = ?", (json.dumps(answer), tid))
     con.commit()
     _add_turn(cid, "background", {"answer_id": answer_id, "text": text, "cost_usd": cost,
@@ -1699,7 +1723,7 @@ def suggest_connections(story_id, text_hashes=None):
                     "dates": s["dates"], "papers": s["papers"],
                     "why": whys[s["story_id"]], "articles": s["articles"]}
                    for s in picks if whys.get(s["story_id"])]
-    con = R._intel_w()
+    con = _writer()
     con.execute("INSERT OR REPLACE INTO suggest_cache (fingerprint, model, prompt_version, "
                 "suggestions, verdict, created_at) VALUES (?,?,?,?,?,?)",
                 (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION, json.dumps(suggestions),
