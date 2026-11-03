@@ -45,6 +45,23 @@
   --s19: 19px;
   --s26: 26px;
   --s40: 40px;
+  /* I7 (Kunaal, 3 Nov): two sizes off the scale, for the ask pane only. The brief's
+     artboard is drawn at them and Kunaal chose it over D14's mapping (11, 16). */
+  --s115: 11.5px;               /* the cost on a paid button; the information line */
+  --s17: 17px;                  /* the answer's prose */
+
+  /* I7 · buttons by kind of action, in the ask pane. One shape, three roles: paid
+     (spends money, the cost is on the button), free (changes what is shown or asked),
+     save (keeps something). Information is not a button. */
+  --btn-paid-ground: #F2E8D2;
+  --btn-paid-ink: #6B4E0E;
+  --btn-paid-border: #7A5A12;
+  --btn-free-ground: #FFFEFA;
+  --btn-free-ink: #1A1A1A;
+  --btn-free-border: #878276;
+  --btn-save-ground: #E4EEEC;
+  --btn-save-ink: #1C5450;
+  --btn-save-border: #1C5450;
 
   --serif: 'Newsreader', Georgia, serif;
   --sans: 'IBM Plex Sans', system-ui, sans-serif;
@@ -738,9 +755,14 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .see-also-toggle { color: var(--text-secondary); text-align: left; }
 .see-also-toggle:hover { text-decoration: underline; }
 .see-also-toggle[aria-expanded="true"] { color: var(--ink); }
-.see-also-heads { display: block; margin: 4px 0 0; }
+/* I7 · a bulleted list with a hanging indent: `list-item` with the bullet OUTSIDE the
+   box, so a wrapped line starts under the text, not under the bullet. Spans, not a
+   <ul>, because the fold sits inside the line's <p>; app.js gives them list roles. */
+.see-also-heads { display: block; margin: 6px 0 0; padding-left: 1.1em; }
 .see-also-head {
-  display: block;
+  display: list-item;
+  list-style: disc outside;
+  margin: 0 0 6px;
   font-family: var(--serif);
   font-size: var(--s14);
   color: var(--text-muted);
@@ -852,6 +874,13 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--text-secondary);
 }
 .cheat-sheet dd { margin: 0; font-size: var(--s125); color: var(--text-secondary); }
+/* I7 · the legend glitch: the marks' <dt>s took the key boxes above. Placed after
+   `.cheat-sheet dt` (same specificity, so order decides). The keys' `flex: 0 0 42px`
+   still sets the column, so `width` loses to it and the marks centre in the same 42 px
+   column as the keys. */
+.cheat-marks dt { border: none; background: none; padding: 0; width: 20px; display: flex;
+                  justify-content: center; align-items: center; }
+.cheat-marks dl div { align-items: center; }
 
 /* A vote already given stays visible, so it is not given twice. */
 .action[data-vote="true"][aria-pressed="true"] {
@@ -898,12 +927,13 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   text-transform: uppercase;
   color: var(--ochre);
 }
-.pane-header button {
+/* Widen / Collapse stay header links; New conversation is a free button (I7). */
+.pane-header button:not(.btn) {
   font-size: var(--s11);
   color: var(--text-muted);
   text-decoration: underline;
 }
-.pane-header button:hover { color: var(--ink); }
+.pane-header button:not(.btn):hover { color: var(--ink); }
 
 /* The collapsed pane: the vertical label of v0's rail, but a live button now. */
 .pane-collapsed { width: 100%; height: 100%; }
@@ -940,19 +970,48 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   padding: 4px 14px 14px;
 }
 
-.pane-turn { margin: 0 0 18px; }
-.pane-you {
-  margin: 0 0 8px;
-  font-size: var(--s14);
-  font-weight: 500;
+.pane-turn { margin: 0 0 22px; }
+
+/* I7 · the turn layout: a 22 px column of markers, Q beside the question and A beside
+   the answer. `baseline` puts each marker on its row's FIRST text line, whatever that
+   line is (the prose, a "nothing found" line, an error), so no margin is guessed. */
+.turn-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: baseline;
+}
+.turn-row + .turn-row { margin-top: 8px; }
+.turn-mark {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--ink);
+  font-size: var(--s11);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink);
+}
+.turn-a .turn-mark {
+  background: var(--chip-ground);
+  border-color: var(--ochre);
   color: var(--ochre);
+}
+.turn-body { min-width: 0; }
+.pane-you {
+  margin: 0;
+  font-size: var(--s16);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
 }
 
 /* The answer. Serif, because it is prose and is read, not scanned. */
 .answer-text p {
   margin: 0 0 8px;
   font-family: var(--serif);
-  font-size: var(--s16);
+  font-size: var(--s17);
   line-height: 1.55;
 }
 .answer-caret {
@@ -1000,31 +1059,47 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   gap: 6px;
   margin: 8px 0 0;
 }
+.answer-actions:empty { display: none; }
+/* Explore's own cost line (the main page keeps its look, I7). */
 .answer-cost { font-size: var(--s11); color: var(--text-muted); }
-.answer-actions .action { font-size: var(--s11); }
 
-/* Q3 (c) · the way out of a narrowed question. Ochre outline, like Think harder and the
-   cap's override: the three buttons in the pane that spend money or change what was
-   asked, as against the quiet grey of Pin and Background. It is first in the row because
-   `actionsRow` puts it there, which is what the suite checks; there is no `order` rule
-   here, because a rule no check can see is one that can rot without saying so. */
-.ask-all-papers {
-  padding: 2px 7px;
-  border: 1px solid var(--ochre);
-  border-radius: 2px;
-  color: var(--ochre);
+/* I7 · information is not a button: the model and its cost, "sample data". One plain
+   line, no border, above the row of buttons. */
+.answer-info {
+  margin: 8px 0 0;
+  font-size: var(--s115);
+  color: var(--text-muted);
 }
-.ask-all-papers:hover { background: var(--chip-ground); }
-.think-harder {
-  padding: 2px 7px;
-  border: 1px solid var(--ochre);
+
+/* I7 · buttons by kind of action, in the ask pane only (the left panel and the main
+   page keep `.action`). One shape for all three roles; the colour says the role. Order
+   in a row is paid, then free, then save: `actionsRow` builds it in that order, which
+   is what the suite checks. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid;
   border-radius: 2px;
-  color: var(--ochre);
+  font-family: var(--sans);
+  font-size: var(--s125);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
 }
-.think-harder:hover { background: var(--chip-ground); }
+.btn:hover { border-color: var(--ink); }
+.btn-paid { background: var(--btn-paid-ground); color: var(--btn-paid-ink);
+            border-color: var(--btn-paid-border); }
+.btn-free { background: var(--btn-free-ground); color: var(--btn-free-ink);
+            border-color: var(--btn-free-border); }
+.btn-save { background: var(--btn-save-ground); color: var(--btn-save-ink);
+            border-color: var(--btn-save-border); }
+/* The cost always rides on a paid button, a little smaller and heavier than its verb. */
+.btn-cost { font-size: var(--s115); font-weight: 600; white-space: pre; }
 /* A disabled control is a mark, not prose: --mark is the >= 3:1 token, and greying it
-   to --text-muted would leave it looking live. */
-.think-harder[disabled] { border-color: var(--mark); color: var(--mark); }
+   to --text-muted would leave it looking live. The ground stays, so the role does. */
+.btn[disabled] { border-color: var(--mark); color: var(--mark); cursor: default; }
 
 /* The folded Haiku answer, once Think harder has answered (state 3). */
 .answer-folded {
@@ -1141,14 +1216,6 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .cap-band p { margin: 0 0 5px; }
 .cap-band strong { color: var(--red); }
 .cap-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.cap-allow {
-  padding: 2px 8px;
-  border: 1px solid var(--ochre);
-  border-radius: 2px;
-  color: var(--ochre);
-  font-size: var(--s11);
-}
-.cap-allow:hover { background: var(--chip-ground-hover); }
 .cap-ends { font-size: var(--s11); color: var(--text-muted); }
 
 .pane-composer {
@@ -1268,7 +1335,11 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 
 /* The marks the `?` sheet explains, since the thread's shapes are not keys. */
 .cheat-marks { margin: 14px 0 0; }
-.cheat-marks .node { position: static; display: inline-block; vertical-align: middle; }
+/* I7 · `transform: none`: the thread's `.node` is pulled back by half its own size to sit
+   centred ON the spine; here there is no spine, and the pull left every mark 5-7 px up
+   and to the left of its cell's centre (seen at the run check, not in the brief's fix). */
+.cheat-marks .node { position: static; display: inline-block; vertical-align: middle;
+                     transform: none; }
 
 /* ===================================================== the Explore screen (§8.5)
 

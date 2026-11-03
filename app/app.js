@@ -1091,8 +1091,9 @@ function seeAlsoFold(plan, storyId) {
   if (open) {
     const all = [];
     for (const page of plan.pages) for (const head of page.headlines) all.push(head);
-    fold.append(el('span', { class: 'see-also-heads' },
-      all.map((head) => el('span', { class: 'see-also-head', text: head }))));
+    fold.append(el('span', { class: 'see-also-heads', role: 'list' },
+      all.map((head) => el('span', { class: 'see-also-head', role: 'listitem',
+                                     text: head }))));
   }
   return fold;
 }
@@ -2068,8 +2069,7 @@ function resultsList(answerId, result, answer) {
   for (const story of shown) section.append(resultRow(story, answer));
 
   if (result.total_stories > shown.length) {
-    section.append(el('button', {
-      class: 'reset action', type: 'button',
+    section.append(paneButton('free', {
       onclick: () => openExploreFrom(result),
     }, 'Show all ' + result.total_stories + ' in Explore'));
   }
@@ -2105,7 +2105,7 @@ function answerPinButton(answer) {
     payload: { answer_id: answer.answer_id, question: answer.question,
                sentences: answer.sentences, cited: answer.cited, model: answer.model },
     source: { conversation_id: answer.conversation_id },
-  }));
+  }), { class: 'btn btn-save' });
 }
 
 function sampleTag() {
@@ -2167,45 +2167,73 @@ async function askAllPapers(question) {
   await askNow(question);
 }
 
+/* I7 · one button shape, three roles (brief §5): `paid` spends money and always carries
+   its cost, `free` changes what is shown or asked, `save` keeps something. Ask pane only;
+   the left panel and the main page keep `.action`. */
+const PANE_BUTTON = {               /* written out whole, so the suite can read them */
+  paid: { class: 'reset btn btn-paid' },
+  free: { class: 'reset btn btn-free' },
+  save: { class: 'reset btn btn-save' },
+};
+
+/* `props.class` adds a class of the button's own (a flag's hook, a test's handle). */
+function paneButton(role, props, ...children) {
+  const own = props && props.class;
+  return el('button', Object.assign({}, props, {
+    class: PANE_BUTTON[role].class + (own ? ' ' + own : ''), type: 'button',
+  }), ...children);
+}
+
+function costTag(usd) {
+  return el('span', { class: 'btn-cost', text: '≈ ' + moneyFine(usd) });
+}
+
+/* I7 · information is not a button: the model and what it cost, and "sample data", as
+   one plain line. An empty answer cost nothing because no model was asked, and saying
+   "Haiku · 0¢" would imply one was (§8.3 state 5). */
+function answerInfo(answer) {
+  const none = answer.verdict === 'empty';
+  const bits = [none ? 'no model call · 0¢'
+                     : (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
+                       + ' · ' + moneyFine(answer.cost_usd)];
+  if (answer.fixture) bits.push('sample data');
+  return el('p', { class: 'answer-info', text: bits.join(' · ') });
+}
+
+/* In the order the brief gives: paid, then free, then save. "Ask all papers instead"
+   is free now (it was ochre, Q3 c): it widens the question, and the question it then
+   asks is what costs, at the usual price. */
 function actionsRow(answer) {
   const none = answer.verdict === 'empty';
   const row = el('div', { class: 'answer-actions' });
-  /* First in the row, and only when there is a scope to drop: on an answer that found
-     nothing or almost nothing, widening the question is the likeliest next move, and on
-     an unscoped answer there is nothing to widen to. */
-  if ((none || answer.verdict === 'thin') && scopeIsNarrowed(answer.scope)) {
-    row.append(el('button', {
-      class: 'reset action ask-all-papers', type: 'button', 'data-you': 'true',
-      onclick: () => askAllPapers(answer.question),
-    }, 'Ask all papers instead'));
-  }
-  /* An empty answer cost nothing because no model was asked, and saying "Haiku · 0¢"
-     would imply one was (§8.3 state 5). */
-  row.append(el('span', { class: 'answer-cost',
-                          text: none ? 'no model call · 0¢'
-                                     : (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
-                                       + ' · ' + moneyFine(answer.cost_usd) }));
-  if (answer.fixture) row.append(sampleTag());
 
   if (S.flags.think_harder && answer.model === 'haiku' && answer.verdict !== 'empty') {
     const room = roomFor('think_harder');
-    row.append(el('button', {
-      class: 'reset think-harder', type: 'button',
+    row.append(paneButton('paid', { class: 'think-harder',
       disabled: room.ok ? null : true,
       onclick: () => runThinkHarder(answer.answer_id),
-    }, 'Think harder · ≈ ' + moneyFine(S.estimates.think_harder)
-       + (room.ok ? '' : ' ' + room.why)));
+    }, 'Think harder · ', costTag(S.estimates.think_harder),
+       room.ok ? null : ' ' + room.why));
   }
 
+  /* While it runs the button says so and carries no price: the call is already made. */
   if (S.flags.background_on_request && !answer.background) {
     const busy = Boolean(S.backgroundBusy[answer.answer_id]);
-    row.append(el('button', {
-      class: 'reset action background-button', type: 'button',
+    row.append(paneButton('paid', { class: 'background-button',
       disabled: busy ? true : null, 'aria-busy': busy ? 'true' : null,
       onclick: () => askBackground(answer.answer_id),
     }, busy ? 'Writing background…'
-            : none ? 'Answer from background knowledge'
-                   : 'Background · ≈ ' + moneyFine(S.estimates.background)));
+            : [none ? 'Answer from background knowledge · ' : 'Background · ',
+               costTag(S.estimates.background)]));
+  }
+
+  /* Only when there is a scope to drop: on an answer that found nothing or almost
+     nothing, widening the question is the likeliest next move, and on an unscoped
+     answer there is nothing to widen to. */
+  if ((none || answer.verdict === 'thin') && scopeIsNarrowed(answer.scope)) {
+    row.append(paneButton('free', { class: 'ask-all-papers',
+      onclick: () => askAllPapers(answer.question),
+    }, 'Ask all papers instead'));
   }
 
   row.append(answerPinButton(answer));
@@ -2216,11 +2244,13 @@ function actionsRow(answer) {
    sentences and whether there are any. */
 /* I6 · a refused call, in the place its button was: the server's own message and a
    Retry. Used by Background and Suggest connections. */
-function refusedBox(error, retry, what) {
+function refusedBox(error, retry, what, paidCost) {
   return el('div', { class: 'pane-error' },
     el('p', { class: 'error-first',
               text: error.status === 0 ? NOT_RUNNING : what + ' · ' + error.message }),
-    el('button', { class: 'reset action', type: 'button', onclick: retry }, 'Retry'));
+    paidCost === undefined
+      ? el('button', { class: 'reset action', type: 'button', onclick: retry }, 'Retry')
+      : paneButton('paid', { onclick: retry }, 'Retry · ', costTag(paidCost)));
 }
 
 /* I6 · meaning search is off: K3's search() then says `mode: "fts_only"` (absent in
@@ -2232,16 +2262,29 @@ function searchModeNote(result) {
   return el('p', { class: 'mode-note', text: WORDS_ONLY });
 }
 
+/* I7 · the turn layout (brief §4.5, always): a marker column, Q beside the question and
+   A beside the answer. The marker letters are real text, so a screen reader hears
+   "Q, what happened…" and "A, …" in the order they are drawn. */
+const TURN_ROW = { Q: { class: 'turn-row turn-q' }, A: { class: 'turn-row turn-a' } };
+
+function turnRow(which, content) {
+  return el('div', TURN_ROW[which], el('span', { class: 'turn-mark', text: which }), content);
+}
+
+function questionRow(question) {
+  return turnRow('Q', el('p', { class: 'pane-you', text: question }));
+}
+
 function answerTurn(answer, opts) {
   const o = opts || {};
   const byHash = paneHashes();
   const block = el('div', { class: 'pane-turn' });
-  if (!o.noQuestion) {
-    block.append(el('p', { class: 'pane-you', text: 'You · ' + answer.question }));
-  }
+  if (!o.noQuestion) block.append(questionRow(answer.question));
+  const body = el('div', { class: 'turn-body' });
+  block.append(turnRow('A', body));
 
   if (o.folded) {
-    block.append(el('button', {
+    body.append(el('button', {
       class: 'reset answer-folded', type: 'button',
       'aria-expanded': 'false',
       onclick: () => { S.folded[answer.answer_id] = false; renderAssistant(); },
@@ -2257,12 +2300,12 @@ function answerTurn(answer, opts) {
     const days = answer.searched_days
                  || (S.results[answer.answer_id] || {}).searched_days
                  || null;
-    block.append(el('p', { class: 'answer-none' },
+    body.append(el('p', { class: 'answer-none' },
       el('strong', { text: scopeWords(answer.scope).none }),
       days ? ' · searched ' + count(days, 'day') : ''));
     if (answer.closest && answer.closest.length) {
-      block.append(el('p', { class: 'block-label', text: 'Closest stories' }));
-      block.append(el('ul', { class: 'closest' }, answer.closest.map((story) =>
+      body.append(el('p', { class: 'block-label', text: 'Closest stories' }));
+      body.append(el('ul', { class: 'closest' }, answer.closest.map((story) =>
         el('li', {},
           el('button', { class: 'reset', type: 'button',
                          onclick: () => openStory(story.story_id) }, story.headline),
@@ -2271,7 +2314,7 @@ function answerTurn(answer, opts) {
     }
   } else {
     if (answer.verdict === 'thin') {
-      block.append(el('p', { class: 'answer-weak',
+      body.append(el('p', { class: 'answer-weak',
                              text: scopeWords(answer.scope).weak + ' · '
                                    + count(answer.found_count, 'article') + ' found' }));
     }
@@ -2280,24 +2323,25 @@ function answerTurn(answer, opts) {
       text.append(el('p', {}, sentence.text, ' ',
                      chipsFor(sentence.cites, byHash)));
     }
-    block.append(text);
+    body.append(text);
   }
 
   const back = backgroundBlock(answer);
-  if (back) block.append(back);
-  block.append(actionsRow(answer));
+  if (back) body.append(back);
+  body.append(answerInfo(answer));
+  body.append(actionsRow(answer));
   const refused = S.backgroundError[answer.answer_id];
   if (refused) {
-    block.append(refusedBox(refused, () => askBackground(answer.answer_id),
-                            'No background line'));
+    body.append(refusedBox(refused, () => askBackground(answer.answer_id),
+                           'No background line', S.estimates.background));
   }
 
   if (!o.noResults) {
     const result = S.results[answer.answer_id] || storedResults(answer);
     const note = searchModeNote(result);
-    if (note) block.append(note);
+    if (note) body.append(note);
     const list = resultsList(answer.answer_id, result, answer);
-    if (list) block.append(list);
+    if (list) body.append(list);
   }
   return block;
 }
@@ -2377,7 +2421,9 @@ function liveTurn() {
   if (!live) return null;
   const byHash = paneHashes();
   const block = el('div', { class: 'pane-turn' });
-  block.append(el('p', { class: 'pane-you', text: 'You · ' + live.question }));
+  block.append(questionRow(live.question));
+  const body = el('div', { class: 'turn-body' });
+  block.append(turnRow('A', body));
 
   if (live.error && live.error.code === 'cap_reached') {
     /* Nothing here: the band above the composer already says the cap is reached, with
@@ -2389,24 +2435,24 @@ function liveTurn() {
       el('p', { class: 'error-first', text: words.first }),
       el('p', { class: 'error-hint', text: words.hint }));
     if (words.retry) {
-      box.append(el('button', { class: 'reset action', type: 'button',
-                                onclick: () => askNow(live.question) }, 'Retry'));
+      box.append(paneButton('paid', { onclick: () => askNow(live.question) },
+                            'Retry · ', costTag(S.estimates.ask)));
     }
-    block.append(box);
+    body.append(box);
   } else {
     const text = el('div', { class: 'answer-text' });
     for (const sentence of live.sentences) {
       text.append(el('p', {}, sentence.text, ' ', chipsFor(sentence.cites, byHash)));
     }
     text.append(el('span', { class: 'answer-caret', 'aria-hidden': 'true' }));
-    block.append(text);
+    body.append(text);
   }
 
   if (live.results) {
     const note = searchModeNote(live.results);
-    if (note) block.append(note);
+    if (note) body.append(note);
     const list = resultsList('live', live.results, null);
-    if (list) block.append(list);
+    if (list) body.append(list);
   }
   return block;
 }
@@ -2487,10 +2533,9 @@ function capBand() {
   if (!S.flags.cap_override) return band;
 
   const actions = el('div', { class: 'cap-actions' });
-  actions.append(el('button', {
-    class: 'reset cap-allow', type: 'button',
+  actions.append(paneButton('paid', { class: 'cap-allow',
     onclick: () => showCapConfirm(actions),
-  }, 'Allow $1 more today'));
+  }, 'Allow ', el('span', { class: 'btn-cost', text: '$1' }), ' more today'));
   actions.append(el('span', { class: 'cap-ends', text: 'Ends at midnight · logged' }));
   band.append(actions);
   return band;
@@ -2503,16 +2548,14 @@ function showCapConfirm(actions) {
   clear(actions);
   actions.append(el('span', { text: "Raise today's cap to $"
                                     + ((cost.cap_usd || 0) + 1).toFixed(2) + '?' }));
-  actions.append(el('button', {
-    class: 'reset cap-allow', type: 'button',
+  actions.append(paneButton('paid', { class: 'cap-allow',
     onclick: async () => {
       S.cost = await api.raiseCap();
       renderAssistant();
       focusComposer();
     },
-  }, 'Yes, allow'));
-  actions.append(el('button', { class: 'reset action', type: 'button',
-                                onclick: () => renderAssistant() }, 'Cancel'));
+  }, 'Yes, allow ', el('span', { class: 'btn-cost', text: '+$1' })));
+  actions.append(paneButton('free', { onclick: () => renderAssistant() }, 'Cancel'));
 }
 
 /* ------------------------------------------------------------------ the whole pane */
@@ -2563,8 +2606,7 @@ function renderAssistant() {
 
   const header = el('div', { class: 'pane-header' },
     el('p', { class: 'pane-title', text: 'Assistant' }),
-    el('button', { class: 'reset', type: 'button',
-                   onclick: () => startNewConversation() }, 'New conversation'),
+    paneButton('free', { onclick: () => startNewConversation() }, 'New conversation'),
     el('button', { class: 'reset', type: 'button',
                    onclick: () => setPane(S.pane === 'wide' ? 'open' : 'wide') },
       S.pane === 'wide' ? 'Narrow' : 'Widen'),
@@ -3551,7 +3593,8 @@ const EXPORTS = {
   openStory, askNow, openExplore,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
   scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
-  actionsRow, askAllPapers,
+  actionsRow, askAllPapers, paneButton, PANE_BUTTON, answerInfo, turnRow, questionRow,
+  showCapConfirm,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */

@@ -1233,6 +1233,10 @@ eq("[page] D1 · and aria-expanded is now true",
 eq("[page] D1 · the headlines are a block of their own, under the line",
    classesOf(seeAlsoNode()).filter(function (c) {
      return c === "see-also-heads"; }).length, 1);
+eq("[page] I7 · D1 · the block is a list and each headline one item of it",
+   [attrsOf(seeAlsoNode(), "role").filter(function (r) { return r === "list"; }).length,
+    attrsOf(seeAlsoNode(), "role").filter(function (r) { return r === "listitem"; }).length],
+   [1, 3]);
 APP.S.seeAlsoOpen = {};
 eq("[page] D1 · the tooltip is gone from the whole line, open or closed",
    attrsOf(seeAlsoNode(), "title"), []);
@@ -1391,8 +1395,11 @@ var resultsFixture = {query: "Delhi", filters: {}, sort: "relevance", verdict: "
 
 // State 2 · answer done
 var state2 = APP.answerTurn(answerFixture(), {});
-eq("[page] state 2 · the question is yours, in ochre",
-   textOf(state2).indexOf("You · what happened in Delhi?"), 0);
+eq("[page] I7 · state 2 · the question sits on a Q row and the answer on an A row",
+   classesOf(state2).filter(function (c) { return (c || "").indexOf("turn-row") === 0; }),
+   ["turn-row turn-q", "turn-row turn-a"]);
+eq("[page] I7 · state 2 · the Q marker, then the question as asked (no 'You ·': the marker says it)",
+   textOf(state2).indexOf("Qwhat happened in Delhi?"), 0);
 eq("[page] state 2 · both sentences are there",
    textOf(state2).indexOf("Sample answer, continued · two.") > 0, true);
 eq("[page] state 2 · the cost line names the model and the money",
@@ -1503,11 +1510,14 @@ var errored = APP.liveTurn();
 eq("[page] state 9 · the reason is the first line",
    textOf(errored).indexOf("the API key was rejected") > 0, true);
 eq("[page] state 9 · with no Retry, because retrying will not help",
-   controlsOf(errored).filter(function (c) { return c.label === "Retry"; }), []);
+   controlsOf(errored).filter(function (c) { return c.label.indexOf("Retry") === 0; }), []);
 PS.live.error = {reason: "timeout", retryable: true};
 eq("[page] state 9 · a retryable one offers Retry",
-   controlsOf(APP.liveTurn()).filter(function (c) { return c.label === "Retry"; })
+   controlsOf(APP.liveTurn()).filter(function (c) { return c.label.indexOf("Retry") === 0; })
      .length, 1);
+eq("[page] I7 · state 9 · and its Retry is a paid button carrying the price of a question",
+   controlsOf(APP.liveTurn()).filter(function (c) { return c.label.indexOf("Retry") === 0; })
+     .map(function (c) { return c.label; }), ["Retry · ≈ " + APP.moneyFine(PS.estimates.ask)]);
 PS.live = null;
 
 
@@ -1903,20 +1913,23 @@ function actionLabels(scope, verdict) {
     .map(function (c) { return c.label; });
 }
 eq("[page] Q3 c · the way out is offered on a scoped empty answer",
-   actionLabels(SCOPES.oneOpen, "empty").indexOf("Ask all papers instead"), 0);
+   actionLabels(SCOPES.oneOpen, "empty").indexOf("Ask all papers instead") >= 0, true);
 eq("[page] Q3 c · and on a scoped thin one",
-   actionLabels(SCOPES.four, "thin").indexOf("Ask all papers instead"), 0);
-eq("[page] Q3 c · first in the row, before anything else the answer offers",
-   actionLabels(SCOPES.oneOpen, "thin")[0], "Ask all papers instead");
+   actionLabels(SCOPES.four, "thin").indexOf("Ask all papers instead") >= 0, true);
+eq("[page] I7 · Q3 c · after the paid buttons, before Pin (paid, free, save)",
+   actionLabels(SCOPES.oneOpen, "thin"),
+   ["Think harder · ≈ " + APP.moneyFine(PS.estimates.think_harder),
+    "Background · ≈ " + APP.moneyFine(PS.estimates.background),
+    "Ask all papers instead", "Pin to board"]);
 eq("[page] Q3 c · never when there was no scope to get out of",
    [actionLabels(SCOPES.none, "empty").indexOf("Ask all papers instead"),
     actionLabels(SCOPES.none, "thin").indexOf("Ask all papers instead")], [-1, -1]);
 eq("[page] Q3 c · nor on an answer that found plenty, which needs no way out",
    actionLabels(SCOPES.oneOpen, "enough").indexOf("Ask all papers instead"), -1);
-eq("[page] Q3 c · it is ochre, like the other things in the pane that spend or widen",
+eq("[page] I7 · Q3 c · it is a free button now, not ochre: the question it asks is what costs",
    classesOf(APP.actionsRow(answerFixture({verdict: "empty", scope: SCOPES.oneOpen})))
-     .filter(function (c) { return (c || "").indexOf("ask-all-papers") >= 0; }).length,
-   1);
+     .filter(function (c) { return (c || "").indexOf("ask-all-papers") >= 0; }),
+   ["reset btn btn-free ask-all-papers"]);
 
 // Its click takes every chip off and asks again. The scope is cleared SYNCHRONOUSLY,
 // before the ask, so the new turn is unscoped: that is the half worth checking here,
@@ -1934,6 +1947,97 @@ eq("[page] Q3 c · and the next question would be asked of the whole archive",
    APP.scopeIsNarrowed(APP.S.scope), false);
 APP.S.scope = {story_id: null, text_hashes: [], filters: {}};
 APP.S.scopeLabel = null;
+
+// I7 · buttons by kind of action (brief §5). A button's role is read off its class, and
+// the row's order off the order the classes are drawn in.
+function rolesIn(node) {
+  return classesOf(node).map(function (c) {
+    var m = /\bbtn-(paid|free|save)\b/.exec(c || "");
+    return m ? m[1] : null;
+  }).filter(function (r) { return r; });
+}
+function nodesWith(node, cls, found) {
+  found = found || [];
+  if (node && (" " + (node.className || "") + " ").indexOf(" " + cls + " ") >= 0) {
+    found.push(node);
+  }
+  for (var i = 0; i < ((node && node.children) || []).length; i++) {
+    nodesWith(node.children[i], cls, found);
+  }
+  return found;
+}
+var I7_RANK = {paid: 0, free: 1, save: 2};
+function i7InOrder(roles) {
+  for (var i = 1; i < roles.length; i++) {
+    if (I7_RANK[roles[i]] < I7_RANK[roles[i - 1]]) return false;
+  }
+  return true;
+}
+var i7Rows = [["enough", SCOPES.none], ["thin", SCOPES.oneOpen], ["empty", SCOPES.four],
+              ["thin", SCOPES.none], ["empty", SCOPES.none]].map(function (v) {
+  return rolesIn(APP.actionsRow(answerFixture({verdict: v[0], scope: v[1]})));
+});
+eq("[page] I7 · every answer's row runs paid, then free, then save",
+   i7Rows.map(i7InOrder), [true, true, true, true, true]);
+eq("[page] I7 · a scoped thin answer's row holds all three roles",
+   i7Rows[1], ["paid", "paid", "free", "save"]);
+eq("[page] I7 · Pin to board is the save button, on every row",
+   i7Rows.map(function (r) { return r[r.length - 1]; }),
+   ["save", "save", "save", "save", "save"]);
+var i7Paid = nodesWith(APP.actionsRow(answerFixture({verdict: "thin", scope: SCOPES.oneOpen})),
+                       "btn-paid");
+eq("[page] I7 · every paid button carries its cost as its own part",
+   i7Paid.map(function (b) {
+     return nodesWith(b, "btn-cost").map(function (c) { return textOf(c); }); }),
+   [["≈ " + APP.moneyFine(PS.estimates.think_harder)],
+    ["≈ " + APP.moneyFine(PS.estimates.background)]]);
+eq("[page] I7 · so does Background on an empty answer",
+   nodesWith(APP.actionsRow(answerFixture({verdict: "empty", scope: SCOPES.none})), "btn-paid")
+     .map(function (b) { return textOf(b); }),
+   ["Answer from background knowledge · ≈ " + APP.moneyFine(PS.estimates.background)]);
+var i7Turn = APP.answerTurn(answerFixture(), {});
+var i7Info = nodesWith(i7Turn, "answer-info");
+eq("[page] I7 · the model, its cost and 'sample data' are one plain line, not a button",
+   [i7Info.length, i7Info[0].tagName, textOf(i7Info[0])],
+   [1, "P", "Haiku · 0.05¢ · sample data"]);
+eq("[page] I7 · and the line sits above the row of buttons",
+   classesOf(i7Turn).filter(function (c) {
+     return c === "answer-info" || c === "answer-actions"; }),
+   ["answer-info", "answer-actions"]);
+eq("[page] I7 · nothing in an answer is a bordered tag or a cost chip any more",
+   classesOf(i7Turn).filter(function (c) {
+     return c === "fixture-tag" || c === "answer-cost"; }), []);
+eq("[page] I7 · an empty answer's line says no model was asked",
+   textOf(nodesWith(APP.answerTurn(answerFixture({verdict: "empty", scope: SCOPES.none}), {}),
+                    "answer-info")[0]),
+   "no model call · 0¢ · sample data");
+PS.results.a1 = resultsFixture;
+eq("[page] I7 · Show all in Explore is a free button",
+   rolesIn(APP.resultsList("a1", resultsFixture, answerFixture())), ["free"]);
+delete PS.results.a1;
+
+var i7CostWas = PS.cost;
+PS.cost = {spent_usd: 0.5, cap_usd: 0.5, override_usd: 0};
+var i7Band = APP.capBand();
+eq("[page] I7 · Allow $1 more today is a paid button whose cost part is the $1",
+   [rolesIn(i7Band), controlsOf(i7Band).map(function (c) { return c.label; }),
+    nodesWith(i7Band, "btn-cost").map(function (c) { return textOf(c); })],
+   [["paid"], ["Allow $1 more today"], ["$1"]]);
+var i7Actions = nodesWith(i7Band, "cap-actions")[0];
+APP.showCapConfirm(i7Actions);
+eq("[page] I7 · its confirm: Yes (paid, +$1), then Cancel (free)",
+   [rolesIn(i7Actions), controlsOf(i7Actions).map(function (c) { return c.label; })],
+   [["paid", "free"], ["Yes, allow +$1", "Cancel"]]);
+PS.cost = i7CostWas;
+
+PS.backgroundError = {a1: {status: 400, message: "Daily cap reached"}};
+var i7Refused = nodesWith(APP.answerTurn(answerFixture(), {}), "pane-error")[0];
+eq("[page] I7 · a refused Background's Retry is paid and carries the background's price",
+   [rolesIn(i7Refused), controlsOf(i7Refused).map(function (c) { return c.label; })],
+   [["paid"], ["Retry · ≈ " + APP.moneyFine(PS.estimates.background)]]);
+PS.backgroundError = {};
+eq("[page] I7 · the story page's own Retry (Suggest connections) keeps its old look",
+   rolesIn(APP.refusedBox({status: 400, message: "x"}, function () {}, "No suggestions")), []);
 
 
 // === B6 · Suggest connections and the reader's own links (brief 2 §8.4) ===========
@@ -2481,6 +2585,12 @@ def _ratio(a, b):
 # a parser, because what matters is which ink lands on which ground -- and saying so
 # here means a new pair has to be added deliberately.
 TEXT_PAIRS = [
+    ("--btn-paid-ink", "--btn-paid-ground", "I7 a paid button's text and cost"),
+    ("--btn-free-ink", "--btn-free-ground", "I7 a free button's text"),
+    ("--btn-save-ink", "--btn-save-ground", "I7 a save button's text"),
+    ("--text-muted", "--assistant-ground", "I7 the information line in the pane"),
+    ("--ink", "--assistant-ground", "I7 the question and the Q marker"),
+    ("--ochre", "--chip-ground", "I7 the A marker's letter on its fill"),
     ("--ink", "--page", "body text"),
     ("--ink", "--drawer-ground", "drawer headlines"),
     ("--ink", "--chip-ground", "a chip's own border text"),
@@ -2509,6 +2619,12 @@ TEXT_PAIRS = [
 # that they are never used where a border DOES carry meaning, which is what would make
 # 1.63:1 a real failure rather than a quiet divider.
 MARK_PAIRS = [
+    ("--btn-paid-border", "--assistant-ground", "I7 a paid button's edge on the pane"),
+    ("--btn-free-border", "--assistant-ground", "I7 a free button's edge on the pane"),
+    ("--btn-save-border", "--assistant-ground", "I7 a save button's edge on the pane"),
+    ("--mark", "--btn-paid-ground", "I7 a disabled paid button (Think harder at the cap)"),
+    ("--ink", "--assistant-ground", "I7 the Q marker's edge"),
+    ("--ochre", "--assistant-ground", "I7 the A marker's edge"),
     ("--mark", "--page", "caveat tags, the Wrong link? border"),
     ("--mark", "--drawer-ground", "the pin menu's rules"),
     ("--ink", "--page", "the thread's spine and its nodes"),
@@ -2558,6 +2674,91 @@ def contrast():
     root = re.search(r":root\s*\{.*?\n\}", css, re.S).group(0)
     stray = sorted(set(re.findall(r"#[0-9A-Fa-f]{3,8}", css.replace(root, ""))))
     check("every colour on the page comes from a token", stray, [])
+
+
+def _rule(css, selector):
+    """The declarations of the one rule whose selector is exactly `selector`, as a dict."""
+    found = [b for sel, b in re.findall(r"([^{}]+)\{([^}]*)\}", css)
+             if sel.strip().split("\n")[-1].strip() == selector]
+    if len(found) != 1:
+        return {"<rules found>": len(found)}
+    return {k.strip(): v.strip() for k, v in
+            (d.split(":", 1) for d in found[0].split(";") if ":" in d)}
+
+
+def look_i7():
+    """I7 · the look (brief §5 and §4.5's turn layout), read off app.css.
+
+    What would make these pass while broken: a later rule overriding one read here (the
+    checks read one rule each, not the cascade); the run check looks at the computed
+    styles in the real page for that reason."""
+    css = _css_without_comments()
+    tokens = _tokens(css)
+    check("[page] I7 · the role tokens hold the brief's colours",
+          [tokens[t].upper() for t in (
+              "--btn-paid-ground", "--btn-paid-ink", "--btn-paid-border",
+              "--btn-free-ground", "--btn-free-ink", "--btn-free-border",
+              "--btn-save-ground", "--btn-save-ink", "--btn-save-border")],
+          ["#F2E8D2", "#6B4E0E", "#7A5A12", "#FFFEFA", "#1A1A1A", "#878276",
+           "#E4EEEC", "#1C5450", "#1C5450"])
+    check("[page] I7 · the two sizes Kunaal chose over D14 are tokens",
+          re.findall(r"(--s115|--s17):\s*([\d.]+px)",
+                     re.search(r":root\s*\{(.*?)\n\}", css, re.S).group(1)),
+          [("--s115", "11.5px"), ("--s17", "17px")])
+    btn = _rule(css, ".btn")
+    check("[page] I7 · one button shape: 30 px tall, Plex 12.5 px 500, padding 0 12 px, "
+          "radius 2 px, 1 px border",
+          [btn.get(k) for k in ("height", "font-family", "font-size", "font-weight",
+                                "padding", "border-radius", "border")],
+          ["30px", "var(--sans)", "var(--s125)", "500", "0 12px", "2px", "1px solid"])
+    check("[page] I7 · each role paints from its own three tokens",
+          [_rule(css, f".btn-{r}") for r in ("paid", "free", "save")],
+          [{"background": f"var(--btn-{r}-ground)", "color": f"var(--btn-{r}-ink)",
+            "border-color": f"var(--btn-{r}-border)"} for r in ("paid", "free", "save")])
+    check("[page] I7 · the cost on a paid button: 11.5 px, weight 600",
+          [_rule(css, ".btn-cost").get(k) for k in ("font-size", "font-weight")],
+          ["var(--s115)", "600"])
+    check("[page] I7 · the information line: 11.5 px muted, no border",
+          _rule(css, ".answer-info"),
+          {"margin": "8px 0 0", "font-size": "var(--s115)", "color": "var(--text-muted)"})
+    mark = _rule(css, ".turn-mark")
+    check("[page] I7 · the Q marker: 18 x 18, 1.5 px ink border, 11 px 700",
+          [mark.get(k) for k in ("width", "height", "border", "font-size", "font-weight")],
+          ["18px", "18px", "1.5px solid var(--ink)", "var(--s11)", "700"])
+    check("[page] I7 · the A marker: chip fill, ochre border and letter",
+          _rule(css, ".turn-a .turn-mark"),
+          {"background": "var(--chip-ground)", "border-color": "var(--ochre)",
+           "color": "var(--ochre)"})
+    check("[page] I7 · a 22 px marker column, markers on the first text line",
+          [_rule(css, ".turn-row").get(k) for k in ("grid-template-columns", "align-items")],
+          ["22px minmax(0, 1fr)", "baseline"])
+    check("[page] I7 · the question: Plex 16 px 600, line-height 1.4",
+          [_rule(css, ".pane-you").get(k) for k in ("font-size", "font-weight", "line-height")],
+          ["var(--s16)", "600", "1.4"])
+    check("[page] I7 · the answer: Newsreader 17 px, line-height 1.55",
+          [_rule(css, ".answer-text p").get(k) for k in ("font-family", "font-size",
+                                                         "line-height")],
+          ["var(--serif)", "var(--s17)", "1.55"])
+    check("[page] I7 · about 22 px between turns", _rule(css, ".pane-turn"),
+          {"margin": "0 0 22px"})
+    legend = _rule(css, ".cheat-marks dt")
+    check("[page] I7 · legend: the marks' cells lose the key boxes and centre their mark",
+          [legend.get(k) for k in ("border", "background", "padding", "display",
+                                   "justify-content", "align-items")],
+          ["none", "none", "0", "flex", "center", "center"])
+    check("[page] I7 · legend: and the rule comes after `.cheat-sheet dt`, so it wins",
+          css.index(".cheat-marks dt") > css.index(".cheat-sheet dt"), True)
+    check("[page] I7 · legend: each row centres its mark against its words",
+          _rule(css, ".cheat-marks dl div"), {"align-items": "center"})
+    check("[page] I7 · legend: the thread's half-size pull is undone, so a mark sits at its "
+          "cell's centre (found at the run check: 5-7 px off without it)",
+          _rule(css, ".cheat-marks .node").get("transform"), "none")
+    head = _rule(css, ".see-also-head")
+    check("[page] I7 · D1 fold: bullets outside the text (a hanging indent), 6 px apart",
+          [head.get(k) for k in ("display", "list-style", "margin")],
+          ["list-item", "disc outside", "0 0 6px"])
+    check("[page] I7 · D1 fold: the list is indented so its bullets have room",
+          _rule(css, ".see-also-heads").get("padding-left"), "1.1em")
 
 
 def markup():
@@ -4735,7 +4936,11 @@ def page_contract():
     styled = set(re.findall(r"\.([a-z][a-z0-9-]*)", css))
     # `reset` is the shared button reset; `background-button` is a hook the flag map
     # needs, drawn on top of `.action`, and styling it again would say nothing.
-    HOOKS = {"reset", "background-button"}
+    # I7 moved the look of the pane's buttons onto `.btn-paid/free/save`; these classes
+    # stay as handles only (the flag map's selectors, the suite's), as `background-button`
+    # already was. `turn-q` needs nothing beyond `.turn-row`; `turn-a` styles its marker.
+    HOOKS = {"reset", "background-button", "think-harder", "ask-all-papers", "cap-allow",
+             "turn-q"}
     check("[page] every class the page draws is styled", sorted(drawn - styled - HOOKS),
           [])
     check("[page] and the sweep really saw the whole page", len(drawn) > 140, True)
@@ -4838,7 +5043,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, js_logic, contrast, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
