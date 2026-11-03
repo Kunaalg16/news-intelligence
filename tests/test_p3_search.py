@@ -492,6 +492,10 @@ def real():
         "SELECT COUNT(DISTINCT date), MIN(date), MAX(date), COUNT(DISTINCT text_hash) "
         "FROM placements WHERE run_id = ?", (S.D.RUN_ID,)).fetchone()
     news.close()
+    # A floor, so a LOST day or text fails even though both sides of the checks below
+    # would shrink together. Raise it when the archive is re-measured; never lower it.
+    check("real: the archive is no smaller than on 3 Nov (33 days, 8,744 texts)",
+          (days >= 33, texts >= 8744, first), (True, True, "2026-09-16"))
     f = S.facets()
     check("real: five papers", len(f["papers"]), 5)
     check("real: 75 topics, the current tag record's own (not 91 across versions)",
