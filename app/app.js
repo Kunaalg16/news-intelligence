@@ -25,6 +25,7 @@ const S = {
   scope: { story_id: null, text_hashes: [], filters: {} },
   scopeLabel: null,              /* what a filters-only scope chip says */
   results: {},                   /* answer_id -> its results event, this session only */
+  passages: {},                  /* passage_set_id -> its rows, read once per id (I5) */
   live: null,                    /* the answer being streamed right now */
   sorts: {},                     /* answer_id -> 'relevance' | 'newest' */
   folded: {},                    /* answer_id -> true once Think harder answered */
@@ -140,6 +141,7 @@ const api = {
     getJSON('/api/estimate?kind=' + encodeURIComponent(kind)
             + (answerId ? '&answer_id=' + encodeURIComponent(answerId) : '')),
   conversation: () => getJSON('/api/conversation'),
+  passages: (setId) => getJSON('/api/passages/' + encodeURIComponent(setId)),
   newConversation: () => postJSON('/api/conversation/new', {}),
   divider: (conversationId, storyId, headline) =>
     postJSON('/api/conversation/divider', { conversation_id: conversationId,
@@ -459,12 +461,31 @@ function dayChip(entryId) {
   }, dateShort(date));
 }
 
-function chipsFor(cites, byHash) {
+/* I5 · a cite the page cannot resolve is never drawn as nothing (Kunaal, A): it keeps
+   its place as a dashed chip, and pressing it says what happened in one line. `said` is
+   what did the citing -- an answer in the pane, or a write-up sentence. */
+const DEAD_WORDS = {
+  answer: 'This answer cited an article the app can no longer find.',
+  sentence: 'This sentence cited an article the app can no longer find.',
+};
+
+function deadChip(said) {
+  const line = DEAD_WORDS[said] || DEAD_WORDS.answer;
+  return el('button', {
+    class: 'reset chip chip-dead',
+    type: 'button',
+    title: line,
+    onclick: () => toast(line),
+  }, 'source missing');
+}
+
+function chipsFor(cites, byHash, said) {
   const chips = [];
   for (const cite of (cites || [])) {
     const row = byHash.get(cite);
     if (row) chips.push(articleChip(row));
     else if (/^\d{4}-\d{2}-\d{2}:/.test(cite)) chips.push(dayChip(cite));
+    else chips.push(deadChip(said || 'answer'));
   }
   return chips.length ? el('span', { class: 'chips' }, chips) : null;
 }
@@ -812,7 +833,7 @@ function storySoFar(story) {
   const byHash = rowsByHash(story);
   const body = el('div', { class: 'ssf-body', id: 'ssf-body' },
     (ssf.sentences || []).map((s) =>
-      el('p', {}, s.text, chipsFor(s.cites, byHash))),
+      el('p', {}, s.text, chipsFor(s.cites, byHash, 'sentence'))),
     keyDates(ssf.key_dates));
   body.hidden = !open;
 
@@ -880,7 +901,7 @@ function writeup(story) {
                             text: ' · write-up paused: daily cap' }) : null);
   }
   return el('div', { class: 'writeup' },
-    w.sentences.map((s) => el('p', {}, s.text, chipsFor(s.cites, byHash))));
+    w.sentences.map((s) => el('p', {}, s.text, chipsFor(s.cites, byHash, 'sentence'))));
 }
 
 /* §8.4.9 — the opinion and analysis pieces beside the news.
@@ -1741,10 +1762,14 @@ function atCap() {
   return !roomFor('ask').ok;
 }
 
-/* Every hash the page can turn into a chip: the open digest's own rows, plus the
-   articles of any results still in memory. After a reload the results are gone (D12)
-   and a cite whose row is not in the digest simply has no chip, rather than a chip
-   that says nothing. */
+/* Every hash the page can turn into a chip: the open digest's own rows, the articles of
+   any results still in memory (the live answer's too), and -- I5 -- the passage set of
+   every answer in the conversation. After a reload the results are gone (D12), so
+   before I5 a cite outside the digest on screen had no chip at all: 2 of the "police"
+   answer's 6 resolved. The passage set is exactly what the answer was allowed to cite,
+   so every cite of a stored answer resolves from it; what still does not becomes a
+   "source missing" marker in chipsFor, never nothing. Digest rows win, being the
+   fullest. */
 function paneHashes() {
   const map = new Map();
   for (const story of stories()) {
@@ -1752,14 +1777,53 @@ function paneHashes() {
       map.set(row.text_hash, row);
     }
   }
-  for (const result of Object.values(S.results)) {
+  const results = Object.values(S.results);
+  if (S.live && S.live.results) results.push(S.live.results);
+  for (const result of results) {
     for (const row of ((result && result.stories) || [])) {
       for (const art of (row.articles || [])) {
         if (!map.has(art.text_hash)) map.set(art.text_hash, art);
       }
     }
   }
+  for (const rows of Object.values(S.passages)) {
+    for (const row of (rows || [])) {
+      if (!map.has(row.text_hash)) map.set(row.text_hash, row);
+    }
+  }
   return map;
+}
+
+/* The passage sets this conversation still needs: one per id, only for answers that
+   cite something, never one already read. Think harder's answer carries its parent's
+   id, so the pair costs one request. */
+function passageSetsToFetch(conversation, have) {
+  const ids = [];
+  for (const turn of ((conversation && conversation.turns) || [])) {
+    const answer = turn.kind === 'answer' ? turn.answer : null;
+    if (!answer || !answer.passage_set_id) continue;
+    const cites = (answer.sentences || []).some((s) => (s.cites || []).length);
+    if (!cites || ids.includes(answer.passage_set_id)) continue;
+    if (Object.prototype.hasOwnProperty.call(have || {}, answer.passage_set_id)) continue;
+    ids.push(answer.passage_set_id);
+  }
+  return ids;
+}
+
+/* A set that is gone (404) is remembered as empty, so it is not asked for on every
+   redraw and its cites draw the marker. A server that did not answer remembers nothing:
+   the next load asks again. */
+async function loadPassages() {
+  for (const id of passageSetsToFetch(S.conversation, S.passages)) {
+    const got = await api.passages(id);
+    if (got) S.passages[id] = got.passages || [];
+    else if (S.reachable) S.passages[id] = [];
+  }
+}
+
+async function refreshConversation() {
+  S.conversation = await api.conversation();
+  await loadPassages();
 }
 
 /* --------------------------------------------------- what a question was asked OF
@@ -2251,7 +2315,7 @@ async function askNow(question, options) {
     if (live.results) S.results[live.answer.answer_id] = live.results;
     if (live.parentOf) S.folded[live.parentOf] = true;
   }
-  S.conversation = await api.conversation();
+  await refreshConversation();
   S.cost = await api.cost();
   renderAssistant();
 }
@@ -2274,7 +2338,7 @@ async function runThinkHarder(answerId) {
     S.folded[answerId] = true;
     S.results[live.answer.answer_id] = S.results[answerId];
   }
-  S.conversation = await api.conversation();
+  await refreshConversation();
   S.cost = await api.cost();
   renderAssistant();
 }
@@ -2443,7 +2507,7 @@ function renderAssistant() {
 
 async function startNewConversation() {
   await api.newConversation();
-  S.conversation = await api.conversation();
+  await refreshConversation();
   S.results = {};
   S.folded = {};
   S.live = null;                 /* a kept error from the old conversation goes with it */
@@ -2462,7 +2526,7 @@ async function paneStoryOpened(story) {
   S.scope.text_hashes = storyHashes(story);
   if (had && changing) {
     await api.divider(conversationId(), story.story_id, story.headline.text);
-    S.conversation = await api.conversation();
+    await refreshConversation();
   }
 }
 
@@ -3217,7 +3281,7 @@ async function boot() {
   if (S.flags.assistant) {
     const panePref = await api.pref('pane');
     if (panePref && PANE_WIDTHS[panePref.value]) S.pane = panePref.value;
-    S.conversation = await api.conversation();
+    await refreshConversation();
     if (S.conversation && (S.conversation.turns || []).length) {
       S.reloadDivider = dayName(S.conversation.started_at.slice(0, 10)) + ' '
                         + timeOfDay(S.conversation.started_at);
@@ -3294,6 +3358,7 @@ const EXPORTS = {
   articleBody, coverage, viewsLine,
   moneyFine, ndjsonSplit, errorWording, ERROR_WORDS, scopeChips, markFor, roomFor,
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
+  paneHashes, passageSetsToFetch, chipsFor, deadChip, DEAD_WORDS,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
   scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
   actionsRow, askAllPapers,

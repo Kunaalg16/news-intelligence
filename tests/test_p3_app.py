@@ -2296,6 +2296,72 @@ eq("[page] I4 · a dateline with no body is still shown",
    nodesOf(APP.articleBody({dateline: "Mumbai:", paragraphs: []}), "p").map(textOf),
    ["Mumbai:"]);
 
+// I5 · citation chips after a reload, and the dead marker for a cite nothing resolves
+function chipNodes(node) {
+  return nodesOf(node, "button").map(function (b) {
+    return [b.className, textOf(b)];
+  });
+}
+var i5row = {text_hash: "h1", headline: "One", paper: "The Hindu", date: "2026-11-03",
+             kind: "news", page_link: {label: "PDF p2"}};
+var i5byHash = new Map([["h1", i5row]]);
+var i5chips = APP.chipsFor(["h1", "gone", "2026-10-08:x", "gone"], i5byHash);
+eq("[page] I5 · a cite with no row draws the dead marker, in its own place",
+   chipNodes(i5chips),
+   [["reset chip", "TH PDF p2"], ["reset chip chip-dead", "source missing"],
+    ["reset chip", "8 Oct"], ["reset chip chip-dead", "source missing"]]);
+eq("[page] I5 · no cite is ever dropped: chips + markers = cites",
+   nodesOf(i5chips, "button").length, 4);
+eq("[page] I5 · the marker is a real button",
+   nodesOf(APP.deadChip("answer"), "button").length === 1
+   && APP.deadChip("answer").attrs.type, "button");
+document.byId.toast = new Node("div");
+if (typeof setTimeout === "undefined") { globalThis.setTimeout = function () { return 0; }; }
+if (typeof clearTimeout === "undefined") { globalThis.clearTimeout = function () {}; }
+var i5dead = APP.deadChip("answer");
+(i5dead.handlers.click || []).forEach(function (fn) { fn({}); });
+eq("[page] I5 · pressing it shows the one line",
+   textOf(document.byId.toast), "This answer cited an article the app can no longer find.");
+eq("[page] I5 · in a write-up the line names the sentence, not an answer",
+   APP.deadChip("sentence").attrs.title,
+   "This sentence cited an article the app can no longer find.");
+eq("[page] I5 · a sentence with no cites still draws nothing",
+   APP.chipsFor([], i5byHash), null);
+
+var i5conv = {turns: [
+  {kind: "answer", answer: {answer_id: "a1", passage_set_id: "ps_1",
+                            sentences: [{text: "x", cites: ["h1"]}]}},
+  {kind: "divider", story_id: "s", headline: "H"},
+  {kind: "answer", answer: {answer_id: "a2", passage_set_id: "ps_1", parent_answer_id: "a1",
+                            sentences: [{text: "y", cites: ["h1"]}]}},
+  {kind: "answer", answer: {answer_id: "a3", passage_set_id: "ps_2",
+                            sentences: [{text: "z", cites: ["h9"]}]}},
+  {kind: "answer", answer: {answer_id: "a4", passage_set_id: "ps_empty", verdict: "empty",
+                            sentences: []}}]};
+eq("[page] I5 · each passage set is asked for once, only for answers that cite",
+   APP.passageSetsToFetch(i5conv, {}), ["ps_1", "ps_2"]);
+eq("[page] I5 · and a set already read (or remembered gone) is not asked for again",
+   APP.passageSetsToFetch(i5conv, {ps_1: [], ps_2: [{text_hash: "h9"}]}), []);
+
+var i5keep = {digest: APP.S.digest, results: APP.S.results, passages: APP.S.passages,
+              live: APP.S.live};
+APP.S.digest = {stories: [{story_id: "s", coverage: {rows: [
+  {text_hash: "h1", headline: "From the digest", paper: "Mint", page_link: null}]}}]};
+APP.S.results = {};
+APP.S.live = {results: {stories: [{articles: [{text_hash: "h7", headline: "Live",
+                                               paper: "Mint"}]}]}};
+APP.S.passages = {ps_2: [{text_hash: "h9", headline: "From the set", paper: "Mint"},
+                         {text_hash: "h1", headline: "Set copy", paper: "Mint"}]};
+var i5map = APP.paneHashes();
+eq("[page] I5 · paneHashes merges the passage sets after a reload",
+   i5map.has("h9") && i5map.get("h9").headline, "From the set");
+eq("[page] I5 · a digest row wins over the same article in a passage set",
+   i5map.get("h1").headline, "From the digest");
+eq("[page] I5 · the live answer's results resolve its chips while it streams",
+   i5map.has("h7"), true);
+APP.S.digest = i5keep.digest; APP.S.results = i5keep.results;
+APP.S.passages = i5keep.passages; APP.S.live = i5keep.live;
+
 /* The names of the passing checks travel back too, not only the failures: the report
    counts how many checks are `behaviour` (K3 must pass them) and how many are
    `fixture`, and a tally that cannot see the names cannot say. */
@@ -4045,6 +4111,121 @@ def _get(path, query=b""):
     return asyncio.run(go())
 
 
+def _jsc(body, data):
+    """Run app.js under the DOM shim with `DATA` set to `data`, and return the JSON the
+    body prints last. For checks that need the page's logic on REAL rows, which the
+    static JS_TEST block cannot carry."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "run.js"
+        script.write_text('var ROOT = "%s";\nvar DATA = %s;\n%s\nload(ROOT + "/app/app.js");\n%s'
+                          % (ROOT, json.dumps(data), JS_DOM, body))
+        done = subprocess.run([JSC, str(script)], capture_output=True, text=True, timeout=60)
+    out = (done.stdout or "").strip().splitlines()
+    if done.returncode != 0 or not out:
+        raise RuntimeError((done.stderr or done.stdout or "no output").strip()[:300])
+    return json.loads(out[-1])
+
+
+# What the reload check counted, printed in the summary (before -> after).
+CHIPS_RELOAD = []
+
+
+def chips_reload():
+    """I5 · after a reload, every stored answer's cites resolve from its passage set.
+
+    Pass lines, written before the run:
+    - `/api/passages/<id>` answers, through the ASGI app, exactly `passages(id)` for every
+      passage set a stored answer names; an id never stored is a 404.
+    - On the live digest with no results in memory (a reload), and the sets fetched:
+      every cite of every stored answer that cites anything draws a real chip, none a
+      marker. Before the sets are merged, at least one does not (else the check proves
+      nothing about the merge).
+    - chips + markers = cites, for every answer, before and after.
+    The brief's case was the "police" answer (2/6 -> 6/6). That answer is no longer in
+    the reader's intel.db (9 answers today: the EPFO question and its Think harder
+    re-reads, the Melbourne Cup and "what was the post" ones), so the check runs over
+    all of them.
+    What would pass while broken: a paneHashes that put EVERY hash in (a fake row) --
+    guarded by the chip's label naming the passage row's paper; a page that dropped
+    unresolved cites -- guarded by chips + markers = cites.
+    """
+    import sqlite3
+    con = sqlite3.connect(f"file:{os.environ['P3_READER_INTEL_DB']}?mode=ro", uri=True)
+    try:
+        answers = [json.loads(p) for (p,) in con.execute(
+            "SELECT payload FROM turns WHERE kind = 'answer' ORDER BY turn_id")]
+    finally:
+        con.close()
+    citing = [a for a in answers
+              if any(s.get("cites") for s in (a.get("sentences") or []))]
+    if not citing:
+        skip("I5 · stored answers resolve after a reload", "no stored answer cites anything")
+        return
+    sets = {}
+    for psid in dict.fromkeys(a["passage_set_id"] for a in citing):
+        status, _h, body = _get(f"/api/passages/{psid}")
+        sets[psid] = json.loads(body)["passages"] if status == 200 else None
+    check("I5 · /api/passages answers each stored set exactly as passages() does",
+          sets, {psid: R.passages(psid) for psid in sets})
+    status, _h, _b = _get("/api/passages/ps_never_stored")
+    check("I5 · a set never stored is a 404", status, 404)
+
+    conv = {"conversation_id": "c", "started_at": "2026-11-03T00:00:00",
+            "turns": [{"kind": "answer", "answer": a} for a in citing]}
+    got = _jsc(r"""
+var ST = APP.S;
+ST.digest = DATA.digest; ST.results = {}; ST.live = null;
+/* Where each cite SHOULD come from: the digest's row if it has one, else the set's. */
+var SOURCE = {};
+Object.keys(DATA.sets).forEach(function (id) {
+  (DATA.sets[id] || []).forEach(function (r) { SOURCE[r.text_hash] = r; });
+});
+DATA.digest.stories.forEach(function (st) {
+  st.coverage.rows.forEach(function (r) { SOURCE[r.text_hash] = r; });
+});
+function tally() {
+  var byHash = APP.paneHashes(), out = [];
+  DATA.conv.turns.forEach(function (t) {
+    var cites = [], chips = 0, dead = 0, wrong = 0;
+    t.answer.sentences.forEach(function (s) {
+      cites = cites.concat(s.cites);
+      var node = APP.chipsFor(s.cites, byHash);
+      nodesOf(node, "button").forEach(function (b, i) {
+        if (b.className.indexOf("chip-dead") >= 0) { dead += 1; return; }
+        chips += 1;
+        var want = SOURCE[s.cites[i]];
+        if (!want || textOf(b).indexOf(APP.paperCode(want.paper) + " ") !== 0) wrong += 1;
+      });
+    });
+    out.push({cites: cites.length, chips: chips, dead: dead, wrong: wrong});
+  });
+  return out;
+}
+ST.passages = {};
+var before = tally();
+var asked = APP.passageSetsToFetch(DATA.conv, ST.passages);
+asked.forEach(function (id) { ST.passages[id] = DATA.sets[id]; });
+var after = tally();
+print(JSON.stringify({before: before, after: after, asked: asked,
+                      again: APP.passageSetsToFetch(DATA.conv, ST.passages)}));
+""", {"digest": R.get_digest("latest"), "conv": conv, "sets": sets})
+    before, after = got["before"], got["after"]
+    CHIPS_RELOAD.append((sum(b["chips"] for b in before), sum(a["chips"] for a in after),
+                         sum(a["cites"] for a in after), len(citing)))
+    check("I5 · after a reload every stored answer's cites all draw real chips",
+          [[a["chips"], a["dead"]] for a in after], [[a["cites"], 0] for a in after])
+    check("I5 · and before the sets were merged some did not (the merge is what fixed it)",
+          sum(b["dead"] for b in before) > 0, True)
+    check("I5 · chips + markers = cites, before and after, for every answer",
+          [b["chips"] + b["dead"] == b["cites"] for b in before + after],
+          [True] * (len(before) + len(after)))
+    check("I5 · every chip names the paper of the row it came from (no stand-in rows)",
+          sum(x["wrong"] for x in before + after), 0)
+    check("I5 · the page asks for each set once, and not again once read",
+          [sorted(got["asked"]), got["again"]], [sorted(sets), []])
+
+
 def one_page():
     """I4 · `/api/page` cuts ONE page out of an archive PDF, and refuses everything else.
 
@@ -4336,7 +4517,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, js_logic, contrast, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, js_logic, contrast, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -4351,6 +4532,9 @@ def main():
     print(f"search ran with {'/'.join(SEARCH_MODE) or 'unknown'}: results that depend on "
           f"meaning search (verdicts, suggestions) were seen in this mode")
     print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
+    for was, now, cites, n in CHIPS_RELOAD:
+        print(f"I5 chips after a reload, {n} stored answers: {was}/{cites} cites resolved "
+              f"before the passage sets, {now}/{cites} after")
     print(f"{len(SKIPS)} checks skipped on real data, each with its reason "
           f"(`--skips` lists them)")
     if "--skips" in sys.argv:

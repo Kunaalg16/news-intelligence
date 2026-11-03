@@ -703,6 +703,16 @@ def conversation():
     return data.current_conversation()
 
 
+@app.get("/api/passages/{passage_set_id}")
+def passages(passage_set_id: str):
+    """(I5) What one answer was allowed to cite, one row per article, so a reloaded
+    conversation's chips resolve whichever digest is on screen. Read only; an id that was
+    never stored is a 404 (`LookupError`)."""
+    with _mapped():
+        return {"passage_set_id": passage_set_id,
+                "passages": data.passages(passage_set_id)}
+
+
 @app.post("/api/conversation/new")
 def conversation_new():
     return {"conversation_id": data.new_conversation()}
