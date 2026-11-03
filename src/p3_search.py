@@ -981,13 +981,31 @@ def _live_client():
     sdk = anthropic.Anthropic(max_retries=KNOBS["live_max_retries"],
                               timeout=KNOBS["live_timeout_s"])
 
+    forced_refused = set()          # models that answered 400 to a forced tool call
+
     def call(prompt, system, purpose, model, schema):
-        message = sdk.messages.create(
-            model=model, max_tokens=KNOBS["max_tokens"][purpose], system=system,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[{"name": "answer", "description": f"Return the {purpose}.",
-                    "input_schema": SCHEMAS[schema]}],
-            tool_choice={"type": "tool", "name": "answer"})
+        args = dict(model=model, max_tokens=KNOBS["max_tokens"][purpose],
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[{"name": "answer", "description": f"Return the {purpose}.",
+                            "input_schema": SCHEMAS[schema]}])
+        forced = dict(args, system=system, tool_choice={"type": "tool", "name": "answer"})
+        # Sonnet 5.5 refuses a FORCED tool call (400, "tool_choice ... not supported for
+        # this model"; first live Think harder, 3 Nov). A refused request is not
+        # charged, so the fallback is decided by the API's own answer rather than a
+        # model list: `auto`, with the instruction moved into the system prompt. A reply
+        # that still skips the tool is a MalformedReply -- logged as charged, never shown.
+        unforced = dict(args, system=system + "\n- Reply ONLY by calling the `answer` tool.",
+                        tool_choice={"type": "auto"})
+        if model in forced_refused:
+            message = sdk.messages.create(**unforced)
+        else:
+            try:
+                message = sdk.messages.create(**forced)
+            except anthropic.BadRequestError as e:
+                if "tool_choice" not in str(e):
+                    raise
+                forced_refused.add(model)
+                message = sdk.messages.create(**unforced)
         usage = message.usage
         block = next((b for b in message.content
                       if getattr(b, "type", "") == "tool_use"), None)
@@ -1024,8 +1042,12 @@ def _reason_of(exc):
     return "other"
 
 
-def _error_event(reason):
-    return {"type": "error", "code": "model_error", "reason": reason,
+def _error_event(reason, exc=None):
+    """`detail` names what actually failed (class and message, cut short), so a reason
+    of `other` is diagnosable instead of a dead end. SDK messages carry a status and a
+    request id, never the key."""
+    detail = f"{type(exc).__name__}: {exc}"[:300] if exc is not None else None
+    return {"type": "error", "code": "model_error", "reason": reason, "detail": detail,
             "retryable": ERROR_RETRYABLE[reason], "message": ERROR_MESSAGES[reason],
             "fixture": False}
 
@@ -1422,7 +1444,7 @@ def ask(question, scope=None, conversation_id=None):
         except Exception as e:                                # noqa: BLE001
             # A failed call is an EVENT, never a raise (contract §7); what it was
             # charged is already in cost_log via `_call`.
-            yield _error_event(_reason_of(e))
+            yield _error_event(_reason_of(e), e)
             return
     verdict = result["verdict"] if sentences or empty else "empty"
     cited = sorted({h for s in sentences for h in s["cites"]})
@@ -1474,7 +1496,7 @@ def think_harder(answer_id):
             sentences, attempts, drops = _write(parent["question"], chosen, memory,
                                                 "sonnet", "think_harder", spent)
         except Exception as e:                                # noqa: BLE001
-            yield _error_event(_reason_of(e))
+            yield _error_event(_reason_of(e), e)
             return
     cited = sorted({h for s in sentences for h in s["cites"]})
     cited_stories = {p["story_id"] for p in chosen if p["text_hash"] in cited}
@@ -1639,6 +1661,11 @@ def main():
     args = p.parse_args()
     if args.ask or args.think:
         events = ask(args.query) if args.ask else think_harder(args.think)
+        try:
+            events = list(events)
+        except LookupError as e:
+            print(f"no such answer: {args.think} ({e})")
+            return 1
         for e in events:
             if e["type"] == "results":
                 r = e["search"]
@@ -1647,7 +1674,8 @@ def main():
             elif e["type"] == "sentence":
                 print(f"  {e['text']}  {e['cites']}")
             elif e["type"] == "error":
-                print(f"error {e['code']} {e.get('reason', '')}: {e['message']}")
+                print(f"error {e['code']} {e.get('reason', '')}: {e['message']}"
+                      + (f" · {e['detail']}" if e.get("detail") else ""))
             else:
                 a = e["answer"]
                 print(f"answer {a['answer_id']} · {a['model']} · {a['verdict']} · "
