@@ -822,6 +822,130 @@ def ask_mock(tmp):
         os.environ.pop(k, None)
 
 
+# ================================================================= 3c. suggest + conversation (B2-6)
+#
+# PASS LINES (brief §4, fixed before the run): a 5-exchange conversation sends 3 in full
+# + 1 summary, and the summary is paid once · it survives a reload · a divider reaches
+# the model · each turn's cost is logged · suggest excludes its own thread, is never
+# padded, makes no call when nothing clears the bar, writes NOTHING to `links`, and a
+# second press is a cached $0 · the follow-up check runs on the real archive (real()).
+
+def suggest_mock(tmp):
+    import os
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query)
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    mode = {"v": "repo"}
+    S.embed_query = lambda q, **kw: VECS[mode["v"]]
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+
+    def links_rows():
+        return R._intel_ro().execute("SELECT COUNT(*) FROM links").fetchone()[0]
+
+    # --- the conversation ------------------------------------------------------------
+    cid = S.new_conversation()
+    S._CLIENT = fake = Fake(*[GOOD] * 5)
+    for i in range(4):
+        run(S.ask(f"Repo rate question number {i}?"))
+    S.add_divider(cid, "g2", "Monsoon withdraws from Kerala")
+    ev = run(S.ask("Repo rate question number 4?"))
+    last = fake.calls[-1]["prompt"]
+    check("[conv] the 5th question sends 3 exchanges in full + 1 summary",
+          (last.count("\nQ: ") + last.startswith("EARLIER IN THIS CONVERSATION (context "
+                                                 "only):\nQ: "),
+           last.count("Summary of earlier exchanges"), len(fake.summaries)), (3, 1, 1))
+    check("[conv] the divider reaches the model", "Monsoon withdraws" in last, True)
+    run(S.ask("Repo rate question number 5?")) if fake.replies else None
+    R.close_all()
+    conv = S.current_conversation()
+    check("[conv] survives a reload: same id, every turn back",
+          (conv["conversation_id"], [t["kind"] for t in conv["turns"]].count("answer"),
+           [t["kind"] for t in conv["turns"]].count("divider")), (cid, 5, 1))
+    check("[conv] each turn's cost is logged and on the answer",
+          all(t["answer"]["cost_usd"] > 0 for t in conv["turns"] if t["kind"] == "answer"),
+          True)
+    check("[conv] the summary is cached, not re-bought each turn",
+          R._json_or(R._intel_ro().execute("SELECT summary FROM conversations WHERE "
+                                           "conversation_id=?", (cid,)).fetchone()[0],
+                     {}).get("text"), "Earlier: repo rate questions.")
+    other = S.new_conversation()
+    check("[conv] new_conversation() switches; the old one stays stored",
+          (S.current_conversation()["conversation_id"], R._intel_ro().execute(
+              "SELECT COUNT(*) FROM turns WHERE conversation_id=?", (cid,)).fetchone()[0]
+           > 0), (other, True))
+
+    # --- suggest connections ----------------------------------------------------------
+    before_links = links_rows()
+    S._CLIENT = fake = Fake()
+    got = S.suggest_connections("g1")
+    check("[suggest] nothing clears the bar: [], no call, $0, not padded",
+          (got["suggestions"], len(fake.calls), got["cost_usd"]), ([], 0, 0.0))
+    mode["v"] = "rain"
+    S._CLIENT = fake = Fake(({"whys": [{"story_id": "g2", "why": "Same week, weather."}]},
+                             900, 60))
+    got = S.suggest_connections("g1")
+    ids = [s["story_id"] for s in got["suggestions"]]
+    check("[suggest] the story clearing the bar is offered, with its why",
+          (ids, got["suggestions"][0]["why"] if ids else None),
+          (["g2"], "Same week, weather."))
+    check("[suggest] its own thread is excluded (g4 hangs off g1)",
+          {"g1", "g4"} & set(ids), set())
+    check("[suggest] the response shape", sorted(got),
+          sorted(["story_id", "suggestions", "verdict", "model", "model_id", "cost_usd"]))
+    check("[suggest] 1-3 search article rows each",
+          all(1 <= len(s["articles"]) <= 3 for s in got["suggestions"]), True)
+    check("[suggest] Haiku-priced and logged as 'suggest'",
+          (got["cost_usd"], R._intel_ro().execute(
+              "SELECT purpose, usd FROM cost_log ORDER BY rowid DESC LIMIT 1").fetchone()),
+          (S.price("claude-haiku-5-5", 900, 60),
+           ("suggest", S.price("claude-haiku-5-5", 900, 60))))
+    S._CLIENT = fake = Fake()
+    again = S.suggest_connections("g1")
+    check("[suggest] a second press is the cache: same set, no call, $0",
+          (again["suggestions"] == got["suggestions"], len(fake.calls), again["cost_usd"]),
+          (True, 0, 0.0))
+    check("[suggest] NOTHING was written to links", links_rows(), before_links)
+    check("[suggest] an unknown story is LookupError",
+          raises(lambda: S.suggest_connections("nope"), LookupError), True)
+    check("[suggest] on demand only (suggest_auto false)", S.KNOBS["suggest_auto"], False)
+
+    S._CLIENT = None
+    R.close_all()
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
+    for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+        os.environ.pop(k, None)
+
+
+def followup_real():
+    """Contract §8's pass line on the REAL archive, read-only: after the Musk question
+    (Q10), the follow-up "what did the government say?" -- searched as `ask()` searches
+    it -- puts at least one of Q10's (b) articles (its thread's later days) into the
+    writer's passages. The same follow-up searched ALONE is the comparison."""
+    answers = json.loads((ROOT / "_work" / "k3_q17_answers.json").read_text())
+    q10 = next(q for q in answers["questions"] if q["q"] == "Q10")
+    part_b = {a["text_hash"] for a in q10["answers"] if a["part"] == "b"}
+    follow = "what did the government say?"
+    carried = f"{q10['question']} {follow}"
+
+    def writer_hashes(query):
+        ranked = []
+        S.search(query, limit=20, ranked_out=ranked)
+        return {p["text_hash"] for p in S._choose_passages(ranked)}
+    got = writer_hashes(carried)
+    alone = writer_hashes(follow)
+    mode = "service up" if S.embed_query("probe") is not None else "fts_only"
+    check(f"[conv · real · {mode}] the carried follow-up reaches Q10's (b) articles",
+          bool(got & part_b), True)
+    print(f"  follow-up ({mode}): carried {len(got & part_b)} of {len(part_b)} (b) "
+          f"articles in the writer's set · alone {len(alone & part_b)}")
+
+
 def D_last_line():
     import p3_digest
     return p3_digest.WRITER_RULES.strip().splitlines()[-1].strip()
@@ -847,12 +971,15 @@ def main():
         mock(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         ask_mock(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        suggest_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():
         print("the real archive: SKIPPED (data/search.db not found)")
     else:
         real()
+        followup_real()
     if before:
         untouched(before)
 
