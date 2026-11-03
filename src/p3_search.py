@@ -194,7 +194,9 @@ KNOBS = {
                               "background": 0.0002, "suggest": 0.0004},
     # Output ceilings per call purpose. A cut-off answer fails its checks, so these
     # sit well above what the rules ask for.
-    "max_tokens": {"ask": 1024, "think_harder": 1024, "ask_background": 400,
+    # Think harder runs on Sonnet 5.5, which THINKS by default and counts those tokens
+    # against this ceiling, so it gets room; only what is used is billed.
+    "max_tokens": {"ask": 1024, "think_harder": 8000, "ask_background": 400,
                    "summary": 400, "suggest": 600},
     # --- suggest connections (contract §8, B2-6) ----------------------------------
     "suggest_auto": False,           # on demand, by button only
@@ -992,20 +994,23 @@ def _live_client():
         # Sonnet 5.5 refuses a FORCED tool call (400, "tool_choice ... not supported for
         # this model"; first live Think harder, 3 Nov). A refused request is not
         # charged, so the fallback is decided by the API's own answer rather than a
-        # model list: `auto`, with the instruction moved into the system prompt. A reply
-        # that still skips the tool is a MalformedReply -- logged as charged, never shown.
-        unforced = dict(args, system=system + "\n- Reply ONLY by calling the `answer` tool.",
-                        tool_choice={"type": "auto"})
+        # model list. The fallback is a STRUCTURED OUTPUT, not tools: the documented
+        # route when a forced call
+        # existed only to get JSON back (output_config.format). The reply is one text
+        # block of JSON matching the schema; every object must close its properties.
+        structured = dict(model=model, max_tokens=KNOBS["max_tokens"][purpose],
+                          system=system, messages=args["messages"],
+                          output_config={"format": {"type": "json_schema",
+                                                    "schema": _closed(SCHEMAS[schema])}})
         if model in forced_refused:
-            message = sdk.messages.create(**unforced)
-        else:
-            try:
-                message = sdk.messages.create(**forced)
-            except anthropic.BadRequestError as e:
-                if "tool_choice" not in str(e):
-                    raise
-                forced_refused.add(model)
-                message = sdk.messages.create(**unforced)
+            return _from_text(sdk.messages.create(**structured))
+        try:
+            message = sdk.messages.create(**forced)
+        except anthropic.BadRequestError as e:
+            if "tool_choice" not in str(e):
+                raise
+            forced_refused.add(model)
+            return _from_text(sdk.messages.create(**structured))
         usage = message.usage
         block = next((b for b in message.content
                       if getattr(b, "type", "") == "tool_use"), None)
@@ -1013,6 +1018,32 @@ def _live_client():
             raise MalformedReply(usage.input_tokens, usage.output_tokens)
         return block.input, usage.input_tokens, usage.output_tokens
     return call
+
+
+def _closed(schema):
+    """The schema with `additionalProperties: false` on every object, as structured
+    outputs require."""
+    if isinstance(schema, dict):
+        out = {k: _closed(v) for k, v in schema.items()}
+        if out.get("type") == "object":
+            out["additionalProperties"] = False
+        return out
+    if isinstance(schema, list):
+        return [_closed(v) for v in schema]
+    return schema
+
+
+def _from_text(message):
+    """(reply, in, out) from a structured-output message: its text block is the JSON."""
+    usage = message.usage
+    text = next((b.text for b in message.content if getattr(b, "type", "") == "text"), None)
+    try:
+        reply = json.loads(text) if text else None
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        raise MalformedReply(usage.input_tokens, usage.output_tokens)
+    return reply, usage.input_tokens, usage.output_tokens
 
 
 def _client():
