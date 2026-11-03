@@ -505,7 +505,11 @@ def _wait_collect(step, runner, capture, sleep, root=ROOT, log=print):
         if waited >= limit:
             log(f"  batch still out after {KNOBS['batch_wait_hours']} h; stopping cleanly. "
                 f"Nothing is lost and nothing is re-paid — resume with:")
-            log(f"      .venv/bin/python src/p3_daily.py --date {step.get('day', '')}".rstrip())
+            # The PLAIN command, never `--date <day>`: a named date re-extracts that day
+            # even when it is done (paying the referee again), and points a multi-day
+            # catch-up at one day. Without it, every day is already extracted, extract
+            # has nothing to do, and tag collects the open batch (found 3 Nov).
+            log("      .venv/bin/python src/p3_daily.py")
             return "paused"
         log(f"  batch still out ({waited / 60:.0f} min); checking again in "
             f"{KNOBS['batch_poll_minutes']} min")
@@ -612,7 +616,12 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
             f"{len(ran)} of {len(steps)} steps done · {mins:.0f} min · "
             f"the tag batch is out and paid for; re-run to collect it and finish.")
         return 2
-    log(f"\nDaily run finished · paper-day {day} · {len(ran)} steps ran, "
+    extract = next((s for s in steps if s.get("needs_date")), {})
+    done = extract.get("days") or []
+    what = (f"extracted {done[0]}" if len(done) == 1 else
+            f"extracted {len(done)} days, {done[0]} – {done[-1]}" if done else
+            "no day needed extracting")
+    log(f"\nDaily run finished · {what} · {len(ran)} steps ran, "
         f"1 skipped (judge) · {mins:.0f} min · paid steps ran: "
         f"{', '.join(n for n in ran if n in PAID) or 'none'} · estimated ≈ ${total:.2f} "
         f"(real spend: cost_log and each command's own log)")

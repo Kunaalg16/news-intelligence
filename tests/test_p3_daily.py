@@ -323,6 +323,8 @@ def catch_up(tmp):
     check("[catch-up] a non-core edition (International) is not reported",
           "Mint_International" in out, False)
     check("[catch-up] the run finishes", code, 0)
+    check("[catch-up] the final line names the days extracted, not one paper-day",
+          "extracted 4 days, 2026-10-28 – 2026-11-04" in out, True)
     stub = FilingStub(root, "2026-11-05", fail_on="archive/2026-10-30")
     code, out = go(root, stub)
     check("[catch-up] a failing day stops the run and is named",
@@ -446,6 +448,8 @@ def batch(tmp):
           (len(stub.slept), set(stub.slept)), (72, {300}))
     check("6 h of 5-minute waits is 72 checks", 72 * 5 / 60, 6.0)
     check("it says how to resume", "resume with" in out, True)
+    check("and the resume is the plain command -- a --date would re-extract (and re-pay) "
+          "a day that is done", "p3_daily.py --date" in out.split("resume with")[1], False)
     check("it says the batch is paid for", "out and paid for" in out, True)
     check("the steps after tagging did not run", stub.ran("p2_embed.py"), [])
     check("and the lock is gone even after a pause", P.LOCK.exists(), False)
