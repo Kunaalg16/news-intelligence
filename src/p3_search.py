@@ -1039,9 +1039,10 @@ def _live_client():
             except anthropic.BadRequestError as e2:
                 # Name WHICH request failed and what it carried, so a second refusal is
                 # evidence rather than a repeat of the first one's message.
-                raise type(e2)(f"structured fallback ALSO refused (request had keys "
-                               f"{sorted(structured)}): {e2}", response=e2.response,
-                               body=e2.body) from e
+                # The SDK prints its own message format, so the stage travels as an
+                # attribute that _error_event reads, not inside the message.
+                e2.p3_stage = "structured fallback (forced call was refused first)"
+                raise
         usage = message.usage
         block = next((b for b in message.content
                       if getattr(b, "type", "") == "tool_use"), None)
@@ -1108,7 +1109,9 @@ def _error_event(reason, exc=None):
     """`detail` names what actually failed (class and message, cut short), so a reason
     of `other` is diagnosable instead of a dead end. SDK messages carry a status and a
     request id, never the key."""
-    detail = f"{type(exc).__name__}: {exc}"[:300] if exc is not None else None
+    stage = getattr(exc, "p3_stage", None)
+    detail = (f"{stage + ': ' if stage else ''}{type(exc).__name__}: {exc}"[:300]
+              if exc is not None else None)
     return {"type": "error", "code": "model_error", "reason": reason, "detail": detail,
             "retryable": ERROR_RETRYABLE[reason], "message": ERROR_MESSAGES[reason],
             "fixture": False}
