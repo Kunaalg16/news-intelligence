@@ -1476,3 +1476,29 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   padding: 10px 0 0;
   border-top: 1px solid var(--rule);
 }
+
+/* L-4 · a story outside the digest on screen: a plain page, no write-up (K-8 option A). */
+.outside-meta {
+  margin: 4px 0 0;
+  font-size: var(--s125);
+  color: var(--text-muted);
+}
+.outside-note {
+  margin: 10px 0 18px;
+  font-size: var(--s125);
+  color: var(--text-secondary);
+}
+.outside-articles {
+  margin: 6px 0 22px;
+  padding: 0;
+  list-style: none;
+}
+.outside-articles li { margin: 0 0 12px; }
+.outside-open {
+  font-family: var(--serif);
+  font-size: var(--s16);
+  font-weight: 600;
+  text-align: left;
+  color: var(--ink);
+}
+.outside-open:hover { text-decoration: underline; }

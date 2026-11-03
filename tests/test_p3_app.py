@@ -4776,6 +4776,132 @@ main().then(function () { print(JSON.stringify(OUT)); },
           "never gets a value the page made up)", got["menu"], ["Papers ▾", "Mint", "The Hindu"])
 
 
+def _thread_of(story_id):
+    """The thread the route answers for a story (the thread itself), or None (H3).
+    The id goes in as it is: `_get` hands the path to the app undecoded (a browser's
+    server decodes it), and a story id is a date, a colon and hex."""
+    st, _h, raw = _get("/api/thread/" + story_id)
+    body = json.loads(raw) if st == 200 else {}
+    return body if body.get("entries") else None
+
+
+def l4_outside():
+    """S4 · L-4, K-8 option A: a story in no digest in memory opens as a plain, free page.
+
+    Pass lines, written before the run:
+    - Opening a real archive story that is not in the live digest sends ONE GET
+      /api/search (a browse limited to that story) and no paid route; opening it again
+      sends none (kept in memory).
+    - The page shows its real headline, "Not in this digest", its dates, papers and
+      article count as the search counts them, each listed article's headline with its
+      page link, and "the best-placed 3 of N" when the story has more than it lists.
+    - Its thread is drawn when /api/thread has one; a single-day story draws none.
+    - The pane's scope becomes that story by id with NO text_hashes (hashes would narrow
+      a question to the listed few).
+    - Leaving it marks nothing read (no POST /api/read).
+    - An id the archive does not have says "That story could not be found."; nothing
+      answering says the app isn't running.
+    What would pass while broken: a page that drew a canned headline -> compared with the
+    real row read through the ASGI app; a count read from the listed articles -> a story
+    with more than it lists is chosen on purpose.
+    """
+    digest = R.get_digest("latest")
+    in_digest = {s["story_id"] for s in digest["stories"]}
+    _st, _h, raw = _get("/api/search", b"q=&sort=newest&limit=200")
+    candidates = [s["story_id"] for s in json.loads(raw)["stories"]
+                  if s["story_id"] not in in_digest]
+    big = small = None
+    for sid in candidates:
+        q = ("q=&sort=newest&limit=1&story_ids=" + urllib.parse.quote(sid)).encode()
+        _st, _h, raw = _get("/api/search", q)
+        reply = json.loads(raw)
+        if big is None and reply["total_articles"] > len(reply["stories"][0]["articles"]) \
+                and len(reply["stories"][0]["dates"]) >= 2 \
+                and _thread_of(sid):
+            big = (sid, reply)
+        if small is None and reply["total_articles"] == 1:
+            small = (sid, reply)
+        if big and small:
+            break
+    check("L-4 · the archive has an outside story with a thread listing fewer articles "
+          "than it counts, and a one-article one", [big is not None, small is not None],
+          [True, True])
+    if not (big and small):
+        return
+    threads = {}
+    for sid, _r in (big, small):
+        threads[sid] = _thread_of(sid)
+    got = _jsc(I6_HARNESS + r"""
+async function main() {
+  ST.digest = DATA.digest; ST.flags.assistant = true;
+  ST.scope = {story_id: null, text_hashes: [], filters: {}};
+  function world(sid) {
+    REPLIES['/api/search'] = [200, DATA.replies[sid]];
+    REPLIES['/api/thread/' + encodeURIComponent(sid)] =
+      [200, DATA.threads[sid] || {thread_id: sid, thread: null}];
+  }
+  world(DATA.big);
+  await APP.openStory(DATA.big);
+  OUT.big_text = textOf(document.byId.reading);
+  OUT.big_search = sent('/api/search').length;
+  OUT.paid = CALLS.filter(function (c) {
+    return /\/api\/(ask|think_harder|background|suggest|reask)$/.test(c[1]); }).length;
+  OUT.scope = [ST.scope.story_id, ST.scope.text_hashes];
+  OUT.links = nodesOf(document.byId.reading, "a").map(function (a) { return a.attrs.href; });
+  OUT.thread_drawn = classesOf(document.byId.reading).indexOf("thread") >= 0;
+  await APP.openStory(DATA.big);
+  OUT.again_search = sent('/api/search').length;
+  world(DATA.small);
+  await APP.openStory(DATA.small);
+  OUT.small_text = textOf(document.byId.reading);
+  OUT.small_thread = classesOf(document.byId.reading).indexOf("thread") >= 0;
+  OUT.read_posts = sent('/api/read').length;
+  REPLIES['/api/search'] = [200, {stories: [], total_articles: 0}];
+  await APP.openStory("2000-01-01:never");
+  OUT.gone = textOf(document.byId.reading);
+  REPLIES['/api/search'] = 'down';
+  await APP.openStory("2000-01-02:never");
+  OUT.down = textOf(document.byId.reading);
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"digest": digest, "big": big[0], "small": small[0],
+      "replies": {big[0]: big[1], small[0]: small[1]}, "threads": threads})
+    check("L-4 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    row, total = big[1]["stories"][0], big[1]["total_articles"]
+    text = got["big_text"]
+    check("[behaviour] L-4 · an outside story opens with its real headline, not 'Choose a story.'",
+          [row["headline"] in text, "Choose a story." in text], [True, False])
+    check("[behaviour] L-4 · it says it is not in this digest and has no write-up",
+          ["Not in this digest" in text, "no write-up" in text], [True, True])
+    check("[behaviour] L-4 · papers and articles as the search counts them, and 'of N'",
+          [f"{row['papers']} paper" in text, f"{total} articles" in text,
+           f"the best-placed {len(row['articles'])} of {total}" in text], [True] * 3)
+    check("[behaviour] L-4 · every listed article's headline is there, with its page link",
+          [[a["headline"] in text, any("/api/page?" in (h or "") and
+                                       urllib.parse.quote(a["page_link"]["pdf"], safe="") in (h or "")
+                                       for h in got["links"])]
+           for a in row["articles"] if a.get("page_link")],
+          [[True, True] for a in row["articles"] if a.get("page_link")])
+    check("[behaviour] L-4 · its thread is drawn when it has one, and not when it has none",
+          [threads[big[0]] is not None, got["thread_drawn"], got["small_thread"]],
+          [True, True, threads[small[0]] is not None])
+    check("[page] L-4 · one free read: one search, nothing paid, none on opening it again",
+          [got["big_search"], got["paid"], got["again_search"]], [1, 0, 1])
+    check("[page] L-4 · the pane asks about it by story id, with no text_hashes",
+          got["scope"], [big[0], []])
+    check("[page] L-4 · a one-article story says so, with no 'of N'",
+          ["1 article" in got["small_text"], "best-placed" in got["small_text"]],
+          [True, False])
+    check("[page] L-4 · leaving an outside story marks nothing read", got["read_posts"], 0)
+    check("[page] L-4 · an id the archive does not have says it could not be found",
+          "That story could not be found." in got["gone"], True)
+    check("[page] L-4 · with nothing answering it says the app isn't running",
+          "The app isn't running" in got["down"], True)
+
+
 def i6_routes():
     """I6 · the routes behind it, through the ASGI app, on the section's copy.
 
@@ -6381,7 +6507,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, i8_page, i8_routes, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",

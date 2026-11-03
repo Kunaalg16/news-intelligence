@@ -54,6 +54,7 @@ const S = {
   boards: [],
   prefs: {},
   threads: {},           /* thread_id -> thread | null (null = this story has none) */
+  outside: {},           /* L-4 · story_id -> a story outside the digests in memory | null */
   newSince: {},          /* story_id -> [text_hash] that arrived since the last read */
   keepUnread: new Set(),  /* story ids the reader is holding unread */
   pins: [],
@@ -1642,7 +1643,12 @@ function renderReading() {
   if (S.screen === 'past') { pastScreen(pane); return; }
   const story = findStory(S.openStoryId);
   if (story) renderStory(pane, story);
-  else pane.append(el('p', { class: 'drawer-note', text: 'Choose a story.' }));
+  else if (S.outside[S.openStoryId]) renderOutsideStory(pane, S.outside[S.openStoryId]);
+  else if (S.openStoryId && S.openStoryId in S.outside) {
+    pane.append(el('p', { class: 'drawer-note', text: OUTSIDE_WORDS.gone }));
+  } else if (S.openStoryId && !S.reachable) {
+    pane.append(el('p', { class: 'drawer-note', text: NOT_RUNNING }));
+  } else pane.append(el('p', { class: 'drawer-note', text: 'Choose a story.' }));
 }
 
 /* Leaving a story is what marks it read: opening another one, going to another screen,
@@ -1666,6 +1672,66 @@ function render() {
   renderAssistant();
 }
 
+/* ------------------------------------------------------------ L-4 · outside stories */
+
+/* K-8 option A (Kunaal, 4 Nov): a story that is in no digest in memory opens as a
+   plain, free page -- headline, dates, papers, its articles, its thread if it has one.
+   It is read through a browse search limited to that one story, the only per-story read
+   the data layer has; that search names a story's best-placed few articles (K3's
+   `articles_per_story`) and counts them all, so the page says "3 of 7". */
+const OUTSIDE_WORDS = {
+  label: 'Not in this digest',
+  note: 'A plain page: this story has no write-up because it is not in the digest on screen.',
+  gone: 'That story could not be found.',
+};
+
+async function loadOutsideStory(storyId) {
+  const got = await api.search(searchQueryString('', { story_ids: [storyId] }, 'newest', 1));
+  const row = got && (got.stories || []).find((s) => s.story_id === storyId);
+  if (!row) return null;
+  return Object.assign({}, row, { outside: true, total_articles: got.total_articles });
+}
+
+/* The pane asks about it by its story id alone: a scope's text_hashes narrow the search
+   to exactly those articles, and the page knows only the few it was shown. */
+function outsideScope(story) {
+  S.scope.story_id = story.story_id;
+  S.scope.headline = story.headline;
+  S.scope.text_hashes = [];
+}
+
+function outsideDates(dates) {
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  if (!first) return '';
+  return first === last ? dateWithDay(first) : dateShort(first) + ' – ' + dateShort(last);
+}
+
+function renderOutsideStory(pane, story) {
+  const articles = story.articles || [];
+  const total = story.total_articles || articles.length;
+  pane.append(el('p', { class: 'block-label', text: OUTSIDE_WORDS.label }));
+  pane.append(el('h2', { class: 'story-headline', text: story.headline }));
+  pane.append(el('p', { class: 'outside-meta',
+    text: [outsideDates(story.dates || []), count(story.papers, 'paper'),
+           count(total, 'article')].filter(Boolean).join(' · ') }));
+  pane.append(el('p', { class: 'outside-note', text: OUTSIDE_WORDS.note }));
+  pane.append(el('p', { class: 'block-label',
+    text: articles.length < total
+      ? 'Articles · the best-placed ' + articles.length + ' of ' + total
+      : 'Articles' }));
+  pane.append(el('ul', { class: 'outside-articles' }, articles.map((a) => el('li', {},
+    el('button', { class: 'reset outside-open', type: 'button',
+                   onclick: () => openArticle(a.text_hash) }, a.headline),
+    el('p', { class: 'outside-meta' }, paperCode(a.paper) + ' ',
+      pageLink(a.page_link, a.page_link ? a.page_link.label : ''),
+      ' · ' + dateWithDay(a.date))))));
+  const thread = threadSection(story);
+  if (thread) pane.append(thread);
+  pane.append(el('p', { class: 'page-footer',
+    text: "Charts and photos aren't read. Use the page link to see them." }));
+}
+
 /* Opening a story: the read-on-leave rule and the rest of the reader's actions arrive
    with A6; A3 only moves which story is open. */
 async function openStory(storyId) {
@@ -1684,11 +1750,19 @@ async function openStory(storyId) {
      drawn rather than appearing a moment later: what arrived since this story was last
      read (R4), and whether its "story so far" has been seen before. */
   const story = findStory(storyId);
+  /* L-4 · a story in no digest in memory (a suggestion, a pin, an Explore row) is read
+     once through a browse search limited to it; nothing answering is not remembered. */
+  if (!story && !S.outside[storyId]) {
+    const outsider = await loadOutsideStory(storyId);
+    if (outsider || S.reachable) S.outside[storyId] = outsider;
+    else delete S.outside[storyId];
+  }
+  const outside = story ? null : (S.outside[storyId] || null);
   if (story && !(storyId in S.newSince)) {
     const since = await api.newSince(storyId, S.ref);
     S.newSince[storyId] = (since && since.new_since_read) || [];
   }
-  if (story && !(storyId in S.threads)) {
+  if ((story || outside) && !(storyId in S.threads)) {
     /* a story with no thread answers with no entries, and then no section is drawn (H3) */
     const got = await api.thread(storyId);
     S.threads[storyId] = (got && got.entries) ? got : null;
@@ -1701,6 +1775,7 @@ async function openStory(storyId) {
   /* The pane's scope follows the open story, and puts a divider in when the story
      changes under a conversation that already has turns (§8.3 state 7). */
   if (story && S.flags.assistant) await paneStoryOpened(story);
+  if (outside && S.flags.assistant) outsideScope(outside);
   /* R13 · the reader's own links are part of the thread, so they are read before the
      story is drawn rather than appearing a moment later. */
   if (story && S.flags.user_links && !(storyId in S.userLinks)) {
@@ -3871,7 +3946,8 @@ const EXPORTS = {
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */
   answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
-  backgroundBlock, resultRow, sonnetLabel, foldState, workingWords, renderAssistant, collapsedRail,
+  backgroundBlock, resultRow, sonnetLabel, foldState, workingWords, loadOutsideStory,
+  renderOutsideStory, outsideScope, renderAssistant, collapsedRail,
   keepLiveAfterStream,
   suggestSection, suggestionsBox, suggestionRow, icon, userLinkTo, suggestionPinned,
   exploreChips, exploreCounts, exploreArticleRows, exploreRow, exploreScreen,
