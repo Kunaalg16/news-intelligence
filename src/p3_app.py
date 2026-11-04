@@ -55,6 +55,7 @@ KNOBS AND FLAGS
 """
 
 import contextlib
+import hashlib
 import itertools
 import json
 import os
@@ -236,9 +237,45 @@ def flags():
             "knobs": {"paragraph_words": KNOBS["paragraph_words"]}}
 
 
+# F3 · the version line. After a build the open Safari tab kept running the old page (the
+# launcher brings the tab forward and never reloads it, T-14), so the page asks which
+# version is being served. Short hashes of the files' contents, not a number someone has
+# to remember to bump. The page files are read as they are served (per request, so an
+# edit is live at once); this file is hashed as loaded at start and again on disk, which
+# tells a route change that needs a restart from one a reload can fix.
+PAGE_FILES = ("index.html", "app.js", "app.css")
+SERVER_FILE = Path(__file__).resolve()
+
+
+def _short_hash(*blobs):
+    h = hashlib.sha256()
+    for blob in blobs:
+        h.update(len(blob).to_bytes(8, "big"))
+        h.update(blob)
+    return h.hexdigest()[:12]
+
+
+def app_version():
+    return _short_hash(*[(APP_DIR / n).read_bytes() if (APP_DIR / n).is_file() else b""
+                         for n in PAGE_FILES])
+
+
+def server_on_disk():
+    try:
+        return _short_hash(SERVER_FILE.read_bytes())
+    except OSError:
+        return None
+
+
+SERVER_VERSION = server_on_disk()
+
+
 @app.get("/api/status")
 def status():
-    return data.run_status()
+    got = dict(data.run_status() or {})
+    got.update(app_version=app_version(), server_version=SERVER_VERSION,
+               server_on_disk=server_on_disk())
+    return got
 
 
 @app.get("/api/cost")

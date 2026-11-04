@@ -200,6 +200,30 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--text-muted);
 }
 
+/* F3 · the version line, under the header, the width of the main area. Italic grey,
+   no border, no fill (Kunaal, 4 Nov). A fixed height, because the panes below take the
+   window's height less the header's (78 px); while the line shows they give up its 22. */
+.version-line {
+  height: 22px;
+  margin: 0;
+  padding: 0 20px;
+  line-height: 22px;
+  font-size: var(--s125);
+  font-style: italic;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.version-line[hidden] { display: none; }
+.version-act {
+  font-style: italic;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.version-act:hover { color: var(--ink); }
+.version-line:not([hidden]) + .panes { height: calc(100% - 78px - 22px); }
+
 /* ------------------------------------------------------------------ the panes */
 
 .panes {

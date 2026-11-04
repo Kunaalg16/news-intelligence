@@ -1770,6 +1770,36 @@ PS.live.answer = answerFixture({answer_id: "a9"});
 eq("[page] L-13 · and by its answer's id once done (the stored answer takes its place)",
    APP.liveKey(), "a9");
 PS.live = null;
+
+// S5 · F3: the version line
+var V = {app_version: "aaa", server_version: "s1", server_on_disk: "s1"};
+eq("[page] F3 · versions match: no line", APP.versionNotice("aaa", V), null);
+eq("[page] F3 · the page files changed: Reload",
+   APP.versionNotice("old", V), "reload");
+eq("[page] F3 · only the server file changed: quit and open again",
+   APP.versionNotice("aaa", {app_version: "aaa", server_version: "s1", server_on_disk: "s2"}),
+   "restart");
+eq("[page] F3 · both changed: quit first (a reload cannot bring the new routes)",
+   APP.versionNotice("old", {app_version: "aaa", server_version: "s1", server_on_disk: "s2"}),
+   "restart");
+eq("[page] F3 · a failed status call shows nothing", APP.versionNotice("aaa", null), null);
+document.byId["version-line"] = document.createElement("p");
+var vline = document.byId["version-line"];
+APP.renderVersionLine("reload");
+eq("[page] F3 · the Reload line: its words, shown",
+   [textOf(vline), vline.hidden], ["App updated · Reload", false]);
+var reloads = 0, keptLocation = globalThis.location;
+globalThis.location = {reload: function () { reloads += 1; }};
+nodesOf(vline, "button")[0].handlers.click[0]({});
+globalThis.location = keptLocation;
+eq("[page] F3 · Reload reloads the page", reloads, 1);
+APP.renderVersionLine("restart");
+eq("[page] F3 · the quit line has no action",
+   [textOf(vline), nodesOf(vline, "button").length, vline.hidden],
+   ["App updated · quit News Intelligence from the Dock and open it again", 0, false]);
+APP.renderVersionLine(null);
+eq("[page] F3 · and nothing when the versions match", [textOf(vline), vline.hidden], ["", true]);
+delete document.byId["version-line"];
 eq("[page] both answers are in it",
    whole.indexOf("what happened in Delhi?") > 0 && whole.indexOf("and then?") > 0, true);
 eq("[page] the composer invites a question about your papers",
@@ -6588,13 +6618,57 @@ def run_section(fn, *args):
             os.environ.pop("P3_READER_INTEL_DB", None)
 
 
+def s5_server():
+    """S5 · F3 (version fields), through the ASGI app (rule 2). The page files and the
+    server file are redirected to copies in a temp dir (rule 7), so nothing real changes.
+
+    What would make these pass while broken: a hash of the file NAMES (it would not move
+    when app.js changes: checked by changing only the copy's contents)."""
+    import p3_app as A
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        apps = tmp / "app"
+        shutil.copytree(A.APP_DIR, apps)
+        server = tmp / "p3_app.py"
+        shutil.copy2(A.SERVER_FILE, server)
+        kept = A.APP_DIR, A.SERVER_FILE
+        try:
+            A.APP_DIR, A.SERVER_FILE = apps, server
+            status, _h, raw = _get("/api/status")
+            got = json.loads(raw)
+            check("[page] F3 · /api/status carries the three versions, the run state kept",
+                  [status, "state" in got] + [bool(got.get(k)) for k in
+                   ("app_version", "server_version", "server_on_disk")],
+                  [200, True, True, True, True])
+            check("[page] F3 · the server as loaded is the server on disk",
+                  got["server_version"] == got["server_on_disk"], True)
+            again = json.loads(_get("/api/status")[2])["app_version"]
+            check("[page] F3 · the page version is stable while nothing changes",
+                  again, got["app_version"])
+            (apps / "app.js").write_text((apps / "app.js").read_text() + "\n// changed\n")
+            moved = json.loads(_get("/api/status")[2])
+            check("[page] F3 · app.js changed (on the copy): app_version changes, the "
+                  "server's does not",
+                  [moved["app_version"] != got["app_version"],
+                   moved["server_on_disk"] == got["server_on_disk"]], [True, True])
+            served = _get("/app.js")[2].decode()
+            check("[page] F3 · and the copy is what is served (the redirect took)",
+                  served.endswith("// changed\n"), True)
+            server.write_text(server.read_text() + "\n# changed\n")
+            moved = json.loads(_get("/api/status")[2])
+            check("[page] F3 · p3_app.py changed on disk: server_on_disk differs from "
+                  "server_version", moved["server_on_disk"] != moved["server_version"], True)
+        finally:
+            A.APP_DIR, A.SERVER_FILE = kept
+
+
 def main():
     before = _checksum(REAL_INTEL)
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
                     v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
-                    asgi, page_contract, ownership):
+                    asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
           _checksum(REAL_INTEL) == before, True)

@@ -19,7 +19,8 @@
 const S = {
   flags: {},
   knobs: {},
-  paneEvent: null,     /* L-13 · what the next pane redraw is for (paneScrollRule) */
+  paneEvent: null,
+  appVersion: null,    /* F3 · /api/status's app_version when this page loaded */     /* L-13 · what the next pane redraw is for (paneScrollRule) */
   /* --- v0.1, the ask pane --- */
   pane: 'open',                  /* open | collapsed | wide, remembered as a pref */
   conversation: null,            /* {conversation_id, started_at, turns} */
@@ -3903,6 +3904,54 @@ function startKeyboard() {
   });
 }
 
+/* ------------------------------------------------------------ the version line
+
+   F3 · after a build the open Safari tab kept running the old page (the launcher brings
+   the tab forward and never reloads it, T-14), so Kunaal saw bugs already fixed. The
+   page remembers /api/status's `app_version` at load and asks again on focus and every
+   few minutes. Look: italic grey, no border, no fill (Kunaal, 4 Nov). Wording PROPOSED,
+   confirmed at the run check. */
+
+/* KNOB · how long an open tab may run an old page unnoticed when it never loses focus.
+   5 minutes is the brief's number; what would change it is Kunaal seeing the line late. */
+const VERSION_CHECK_MINUTES = 5;
+
+const VERSION_WORDS = {
+  reload: ['App updated · ', 'Reload'],                        /* app_version differs */
+  restart: 'App updated · quit News Intelligence from the Dock and open it again',
+};                                     /* server_on_disk differs from server_version */
+
+/* Which line, if any: 'restart' when the route code changed and the server still runs
+   the old one (a reload cannot help, so it goes first), 'reload' when the page files
+   changed, null when both match or the status call failed (K-4 already says that). */
+function versionNotice(loaded, status) {
+  if (!status) return null;
+  if (status.server_version && status.server_on_disk
+      && status.server_version !== status.server_on_disk) return 'restart';
+  if (loaded && status.app_version && status.app_version !== loaded) return 'reload';
+  return null;
+}
+
+function reloadPage() { globalThis.location.reload(); }
+
+function renderVersionLine(kind) {
+  const line = document.getElementById('version-line');
+  if (!line) return;
+  clear(line);
+  line.hidden = !kind;
+  if (kind === 'reload') {
+    line.append(VERSION_WORDS.reload[0],
+      el('button', { class: 'reset version-act', type: 'button', onclick: reloadPage },
+         VERSION_WORDS.reload[1]));
+  } else if (kind === 'restart') {
+    line.append(VERSION_WORDS.restart);
+  }
+}
+
+async function checkVersion() {
+  renderVersionLine(versionNotice(S.appVersion, await api.status()));
+}
+
 /* --------------------------------------------------------------------- the boot */
 
 async function boot() {
@@ -3912,6 +3961,11 @@ async function boot() {
 
   const [status, digest, cost, follows] =
     await Promise.all([api.status(), api.digest(S.ref), api.cost(), api.follows()]);
+  S.appVersion = status ? status.app_version : null;     /* F3 · as loaded */
+  window.addEventListener('focus', checkVersion);
+  if (typeof setInterval === 'function') {        /* jsc (the suite's boot) has none */
+    setInterval(checkVersion, VERSION_CHECK_MINUTES * 60 * 1000);
+  }
   if (!digest) { S.digest = null; render(); return; }
   S.status = status;
   S.digest = digest;
@@ -4050,6 +4104,7 @@ const EXPORTS = {
   threadSection, timelineView, graphView, removeLinkButton,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
   keyAction, KEYS, CHEAT_SHEET, CHEAT_MARKS, FLAG_ELEMENTS, render, remember, undoLast,
+  versionNotice, renderVersionLine, checkVersion, VERSION_WORDS, VERSION_CHECK_MINUTES,
   paneScrollRule, PANE_SCROLL_LATEST, liveKey, holdPane, placePane,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
