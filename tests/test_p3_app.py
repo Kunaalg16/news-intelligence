@@ -1577,6 +1577,66 @@ eq("[page] L-2 · pressing the open switch folds it again (both ways)", PS.folde
 PS.folded = {};
 eq("[page] L-2 · an answer with nothing under it has no Haiku label",
    textOf(APP.answerTurn(answerFixture(), {})).indexOf("Haiku answer") < 0, true);
+
+// F3 (fo-1) · not covered inside a story (sheet item 6 B)
+var F3_SCOPE = {story_id: "s_nc", text_hashes: ["n1", "n2", "n3"], filters: {}};
+function f3NotCovered(over) {
+  return answerFixture(Object.assign({answer_id: "nc1", verdict: "empty", not_covered: true,
+    sentences: [], cited: [], scope: F3_SCOPE, passage_set_id: "ps_nc", cost_usd: 0.0008,
+    searched_days: 4, fixture: false,
+    closest: [{story_id: "s9", headline: "A nearby story", dates: ["2026-11-01"]}]}, over));
+}
+PS.passages.ps_nc = [{text_hash: "n1"}, {text_hash: "n1"}, {text_hash: "n2"},
+                     {text_hash: "n3"}];
+var f3nc = APP.answerTurn(f3NotCovered(), {noResults: true});
+var f3ncText = textOf(f3nc);
+eq("[page] F3 · not covered: 'Not in this story' in place of sentences",
+   f3ncText.indexOf("Not in this story") > 0, true);
+eq("[page] F3 · then the grey line counting the story's articles in its passage set "
+   + "(distinct text_hash: 3 from 4 rows)",
+   f3ncText.indexOf("The story's 3 articles were read; none says this.") > 0, true);
+eq("[page] F3 · that line is the small grey line's own class",
+   classesOf(f3nc).indexOf("answer-hint") >= 0, true);
+eq("[page] F3 · the answer line names the model and its real cost, never 'no model call'",
+   [f3ncText.indexOf("Haiku · 0.08¢") > 0, f3ncText.indexOf("no model call") < 0],
+   [true, true]);
+eq("[page] F3 · no closest list and no 'searched N days' inside a story",
+   [f3ncText.indexOf("Closest stories") < 0, f3ncText.indexOf("A nearby story") < 0,
+    f3ncText.indexOf("searched") < 0], [true, true, true]);
+eq("[page] F3 · the free 'Ask all papers instead' is offered",
+   controlsOf(f3nc).filter(function (c) { return c.label === "Ask all papers instead"; })
+     .length, 1);
+delete PS.passages.ps_nc;
+eq("[page] F3 · with the passage set not yet read, the count is left out",
+   textOf(APP.answerTurn(f3NotCovered(), {noResults: true}))
+     .indexOf("The story's articles were read; none says this.") > 0, true);
+PS.passages.ps_nc = [{text_hash: "n1"}];
+eq("[page] F3 · one article reads 'was', not 'were'",
+   textOf(APP.answerTurn(f3NotCovered(), {noResults: true}))
+     .indexOf("The story's 1 article was read; none says this.") > 0, true);
+delete PS.passages.ps_nc;
+eq("[page] F3 · a not-covered answer's passage set is fetched though it cites nothing",
+   APP.passageSetsToFetch({turns: [{kind: "answer", answer: f3NotCovered()}]}, {}),
+   ["ps_nc"]);
+eq("[page] F3 · never 'Weak match' on a story-scoped answer",
+   textOf(APP.answerTurn(answerFixture({verdict: "thin", scope: F3_SCOPE}), {noResults: true}))
+     .indexOf("Weak match") < 0, true);
+eq("[page] F3 · but a thin answer of all papers still says it",
+   textOf(APP.answerTurn(answerFixture({verdict: "thin", scope: {}}), {noResults: true}))
+     .indexOf("Weak match") >= 0, true);
+
+// F3 · an empty answer that paid only for reading the follow-up (D-2 a, sheet item 7 B)
+eq("[page] F3 · empty with a cost: 'No answer written · 0.02¢ to read your follow-up'",
+   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.0002,
+                                        fixture: false}))),
+   "No answer written · 0.02¢ to read your follow-up");
+eq("[page] F3 · the cost there is the page's one cost format",
+   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.00007,
+                                        fixture: false}))),
+   "No answer written · " + APP.moneyFine(0.00007) + " to read your follow-up");
+eq("[page] F3 · empty at 0 keeps 'no model call · 0¢'",
+   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0,
+                                        fixture: false}))), "no model call · 0¢");
 var keptConv = PS.conversation, keptLive = PS.live;
 PS.conversation = {turns: [{kind: "answer", answer: answerFixture()},
   {kind: "answer", answer: answerFixture({answer_id: "a2", parent_answer_id: "a1",
@@ -2159,9 +2219,10 @@ eq("[page] Q3 b · filters on screen",
      .indexOf("Not in your papers for these filters · searched 3 days") > 0, true);
 eq("[page] Q3 b · and an unscoped one is unchanged from build 2",
    emptyText(SCOPES.none).indexOf("Not in your papers · searched 3 days") > 0, true);
-eq("[page] Q3 b · the thin note on screen, with its article count",
-   thinText(SCOPES.oneOpen).indexOf("Weak match in this story · 4 articles found") > 0,
-   true);
+// F3 (fo-1, sheet item 6 B): never "Weak match" inside a story -- there the verdict is
+// the outcome, so a story-scoped answer has no weak note at all.
+eq("[page] Q3 b/F3 · no thin note on an answer asked inside one story",
+   thinText(SCOPES.oneOpen).indexOf("Weak match") < 0, true);
 eq("[page] Q3 b · and unscoped it is the build-2 wording",
    thinText(SCOPES.none).indexOf("Weak match · 4 articles found") > 0, true);
 
@@ -2270,7 +2331,8 @@ eq("[page] I7 · nothing in an answer is a bordered tag or a cost chip any more"
    classesOf(i7Turn).filter(function (c) {
      return c === "fixture-tag" || c === "answer-cost"; }), []);
 eq("[page] I7 · an empty answer's line says no model was asked",
-   textOf(nodesWith(APP.answerTurn(answerFixture({verdict: "empty", scope: SCOPES.none}), {}),
+   textOf(nodesWith(APP.answerTurn(answerFixture({verdict: "empty", scope: SCOPES.none,
+                                                  cost_usd: 0}), {}),
                     "answer-info")[0]),
    "no model call · 0¢ · sample data");
 PS.results.a1 = resultsFixture;
@@ -4899,9 +4961,16 @@ async function main() {
   // --- fts_only note on results
   OUT.note_fts = textOf(APP.searchModeNote({mode: "fts_only", stories: []}));
   OUT.note_both = APP.searchModeNote({stories: []});
+  // F3 (fo-1) · the turn reads `mode` from the STORED answer (survives a reload); the
+  // in-memory results' mode alone no longer draws it.
   ST.results.a1 = {mode: "fts_only", stories: [], total_stories: 0};
-  OUT.note_in_turn = textOf(APP.answerTurn(answer, {})).indexOf(APP.WORDS_ONLY) >= 0;
+  OUT.note_results_only = textOf(APP.answerTurn(answer, {})).indexOf(APP.WORDS_ONLY) >= 0;
   delete ST.results.a1;
+  answer.mode = "fts_only";
+  OUT.note_in_turn = textOf(APP.answerTurn(answer, {})).indexOf(APP.WORDS_ONLY) >= 0;
+  answer.mode = "both";
+  OUT.note_both_answer = textOf(APP.answerTurn(answer, {})).indexOf(APP.WORDS_ONLY) >= 0;
+  delete answer.mode;
 
   // --- dividers on ask only (call 8)
   CALLS = [];
@@ -4998,9 +5067,13 @@ main().then(function () { print(JSON.stringify(OUT)); },
           [True, True])
     check("[page] I6 · fts_only results carry the grey note, word for word",
           got["note_fts"], "Word search only: meaning search isn't running")
-    check("[page] I6 · and results without the field carry none (F-3: absent = both)",
+    check("[page] I6 · and results without the field carry none (absent → no note)",
           got["note_both"], None)
-    check("[page] I6 · the note is drawn in the answer's turn", got["note_in_turn"], True)
+    check("[page] I6/F3 · the note is drawn in the answer's turn from the stored answer's "
+          "mode", got["note_in_turn"], True)
+    check("[page] F3 · an answer with mode 'both' or none carries no note, even when the "
+          "results in memory said fts_only",
+          [got["note_both_answer"], got["note_results_only"]], [False, False])
     check("[page] I6 · call 8 · browsing three stories adds no divider", got["div_browse"], 0)
     check("[page] I6 · call 8 · asking in another story adds exactly one, naming it",
           got["div_ask_new"], [{"conversation_id": "c1", "story_id": third["story_id"],

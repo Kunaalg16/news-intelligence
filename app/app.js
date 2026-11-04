@@ -2021,7 +2021,8 @@ function paneHashes() {
 }
 
 /* The passage sets this conversation still needs: one per id, only for answers that
-   cite something, never one already read. Think harder's answer carries its parent's
+   cite something or are not covered (F3: the set is what "N articles were read"
+   counts), never one already read. Think harder's answer carries its parent's
    id, so the pair costs one request. */
 function passageSetsToFetch(conversation, have) {
   const ids = [];
@@ -2029,7 +2030,7 @@ function passageSetsToFetch(conversation, have) {
     const answer = turn.kind === 'answer' ? turn.answer : null;
     if (!answer || !answer.passage_set_id) continue;
     const cites = (answer.sentences || []).some((s) => (s.cites || []).length);
-    if (!cites || ids.includes(answer.passage_set_id)) continue;
+    if (!(cites || answer.not_covered) || ids.includes(answer.passage_set_id)) continue;
     if (Object.prototype.hasOwnProperty.call(have || {}, answer.passage_set_id)) continue;
     ids.push(answer.passage_set_id);
   }
@@ -2386,12 +2387,35 @@ function costTag(usd) {
    one plain line. An empty answer cost nothing because no model was asked, and saying
    "Haiku · 0¢" would imply one was (§8.3 state 5). */
 function answerInfo(answer) {
-  const none = answer.verdict === 'empty';
-  const bits = [none ? 'no model call · 0¢'
-                     : (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
-                       + ' · ' + moneyFine(answer.cost_usd)];
+  /* F3 · a not-covered answer was written by a model that said "not here", so it names
+     the model and its cost like any answer. An empty answer that still cost something
+     paid only for reading a follow-up (contract §12.3 #22, D-2 a): no writer ran. */
+  const none = answer.verdict === 'empty' && !answer.not_covered;
+  const model = (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
+                + ' · ' + moneyFine(answer.cost_usd);
+  const bits = [!none ? model
+                : answer.cost_usd > 0 ? EMPTY_PAID_WORDS(moneyFine(answer.cost_usd))
+                : 'no model call · 0¢'];
   if (answer.fixture) bits.push('sample data');
   return el('p', { class: 'answer-info', text: bits.join(' · ') });
+}
+
+const EMPTY_PAID_WORDS = (cost) => 'No answer written · ' + cost + ' to read your follow-up';
+
+/* F3 (sheet item 6 B) · not covered inside a story. N is the story's articles the
+   writer was given: distinct text_hash in the answer's passage set, once it is read
+   (I5); until then the count is left out rather than guessed. */
+const NOT_COVERED_WORDS = {
+  head: 'Not in this story',
+  read: (n) => n ? "The story's " + count(n, 'article') + (n === 1 ? ' was' : ' were')
+                   + ' read; none says this.'
+                 : "The story's articles were read; none says this.",
+};
+
+function notCoveredCount(answer) {
+  const rows = S.passages[answer.passage_set_id];
+  if (!rows || !rows.length) return null;
+  return new Set(rows.map((r) => r.text_hash)).size;
 }
 
 /* In the order the brief gives: paid, then free, then save. "Ask all papers instead"
@@ -2469,6 +2493,12 @@ function searchModeNote(result) {
   return el('p', { class: 'mode-note', text: WORDS_ONLY });
 }
 
+/* F3 · on a finished answer the note is read from the STORED answer, so it survives a
+   reload; an answer stored before K3's FP-2 has no `mode` and gets no note (T-11). */
+function answerModeNote(answer) {
+  return searchModeNote({ mode: (answer || {}).mode });
+}
+
 /* I7 · the turn layout (brief §4.5, always): a marker column, Q beside the question and
    A beside the answer. The marker letters are real text, so a screen reader hears
    "Q, what happened…" and "A, …" in the order they are drawn. */
@@ -2503,7 +2533,12 @@ function answerTurn(answer, opts) {
     if (o.folded) return block;
   }
 
-  if (answer.verdict === 'empty') {
+  if (answer.not_covered) {
+    body.append(el('p', { class: 'answer-none' },
+      el('strong', { text: NOT_COVERED_WORDS.head })));
+    body.append(el('p', { class: 'answer-hint',
+                          text: NOT_COVERED_WORDS.read(notCoveredCount(answer)) }));
+  } else if (answer.verdict === 'empty') {
     /* The number comes from the answer itself, falling back to the results while they
        are still in memory. If neither has it, the clause is left off rather than
        printed as "searched 0 days", which would be a claim about the archive that the
@@ -2524,7 +2559,8 @@ function answerTurn(answer, opts) {
                        text: ' · ' + dateShort(story.dates[story.dates.length - 1]) })))));
     }
   } else {
-    if (answer.verdict === 'thin') {
+    /* Never "Weak match" inside a story (F3): there the verdict is the outcome. */
+    if (answer.verdict === 'thin' && !(answer.scope || {}).story_id) {
       body.append(el('p', { class: 'answer-weak',
                              text: scopeWords(answer.scope).weak + ' · '
                                    + count(answer.found_count, 'article') + ' found' }));
@@ -2553,7 +2589,7 @@ function answerTurn(answer, opts) {
 
   if (!o.noResults) {
     const result = S.results[answer.answer_id] || storedResults(answer);
-    const note = searchModeNote(result);
+    const note = answerModeNote(answer);
     if (note) body.append(note);
     const list = resultsList(answer.answer_id, result, answer);
     if (list) body.append(list);
@@ -4159,6 +4195,7 @@ const EXPORTS = {
   atCap, searchQueryString, paneWidth, PANE_WIDTHS, PANE_RESULTS_SHOWN,
   paneHashes, passageSetsToFetch, chipsFor, deadChip, DEAD_WORDS,
   dividerFor, lastAskedStory, ALL_PAPERS, suggestSection, refusedBox, searchModeNote,
+  answerModeNote, NOT_COVERED_WORDS, notCoveredCount, EMPTY_PAID_WORDS,
   WORDS_ONLY, SUGGEST_NO_MEANING, NOT_RUNNING, BOARD_GONE, pinRefused, openBoard,
   askForSuggestions, askBackground, openArticle, exploreMenu, streamAnswer, api,
   openStory, askNow, openExplore,
