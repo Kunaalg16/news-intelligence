@@ -65,6 +65,26 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
   - `similarity_verdict` / `top_similarity` stored and returned after a reload;
   - the live client sends the `not_covered` schema for the Haiku ask only, never for
     Think harder (Sonnet), and the story rules keep the injection line last.
+  FP-4 · follow-ups (fixed 4 Nov before the run, brief fp-1 §6 FP-4; fake rewriter):
+  - the rewriter is never called on a first question, and once on each later one;
+  - its prompt holds the earlier answers' text, their dates and the scope, and NO
+    hidden turn;
+  - every safety-net case: rewrite worse -> as typed, safety_net_used · tie -> the
+    rewrite · one of two halves empty -> dropped · all halves empty -> as typed ·
+    rewriter error -> as typed, rewrite_failed, the answer still written;
+  - two searches: 4 + 4 passages, spare slots moving to the other search; each results
+    row's `group` is one of `search_query`'s strings;
+  - each mode behaves as written; `as_typed` makes 0 rewriter calls; a bad mode is a
+    ValueError before any event;
+  - the answer fields survive a reload;
+  - "police" after EPFO (real archive, read-only search, fake rewriter that carries):
+    carried search `empty`, as typed `thin` -> searched as typed;
+  - gap 6: ask, hide it, ask again -> topic "first", searched as typed;
+  - no code path reads `followup_carry_words`; `conversation_new_each_day` is False;
+  - the summary is cut to `summary_max_chars` (TC-10);
+  - added time before `results` and added cost per follow-up measured with the fake.
+  (Q17 fused recall@5 = 100%: `_work/k3_q17_score.py`, run separately; the real
+  intel.db fingerprint: `_work/k3_fp_out/fp.py` before and after.)
   A failed line is answered by error analysis, not by moving the line.
 
 WHEN TO RUN
@@ -571,16 +591,37 @@ def real():
 # answer's cost equals its cost_log rows and cost_today() exactly · passages() (a)-(c).
 # The fake client is the only "model": ZERO API calls.
 
-class Fake:
-    """Replies in order; an Exception instance is raised instead of returned."""
+def _new_question(prompt):
+    return prompt.rsplit("NEW QUESTION: ", 1)[1].strip()
 
-    def __init__(self, *replies):
+
+def as_typed_rewrite(prompt):
+    """The default fake rewriter: a new topic, searched exactly as typed."""
+    return {"decision": "new_topic", "queries": [_new_question(prompt)]}, 1200, 40
+
+
+class Fake:
+    """Replies in order; an Exception instance is raised instead of returned. Memory
+    summaries and follow-up rewrites (FP-4) are answered on the side and recorded in
+    `summaries` / `rewrites`, so they never use up the writer's replies. `rewrite` is a
+    reply, an Exception, or a function of the prompt."""
+
+    def __init__(self, *replies, rewrite=as_typed_rewrite,
+                 summary="Earlier: repo rate questions."):
         self.replies, self.calls, self.summaries = list(replies), [], []
+        self.rewrites, self.rewrite, self.summary = [], rewrite, summary
 
     def __call__(self, prompt, system, purpose, model, schema):
         if schema == "text" and purpose == "ask":      # a memory summary, not the answer
             self.summaries.append(prompt)
-            return {"text": "Earlier: repo rate questions."}, 300, 40
+            return {"text": self.summary}, 300, 40
+        if schema == "rewrite":
+            self.rewrites.append({"prompt": prompt, "system": system, "purpose": purpose,
+                                  "model": model})
+            r = self.rewrite(prompt) if callable(self.rewrite) else self.rewrite
+            if isinstance(r, Exception):
+                raise r
+            return r
         self.calls.append({"prompt": prompt, "system": system, "purpose": purpose,
                            "model": model, "schema": schema})
         r = self.replies.pop(0)
@@ -651,7 +692,8 @@ def ask_mock(tmp):
               "found", "closest", "passage_set_id", "cost_usd", "attempts", "drops",
               "at", "searched_days", "passage_count", "results", "results_total",
               "mode", "not_covered", "similarity_verdict", "top_similarity",
-              "fixture"]))
+              "topic", "search_query", "carried_from", "safety_net_used",
+              "rewrite_failed", "fixture"]))
     check("[ask] no background line inside ask()", a1["background"], None)
     check("[ask] the writer saw at most 8 passages, at most 2 per article",
           (a1["passage_count"] <= 8,
@@ -738,7 +780,12 @@ def ask_mock(tmp):
     mode["v"] = "none"
     S._CLIENT = fake = Fake()
     before = logged()
+    # a FIRST question (a follow-up would pay its rewrite, FP-4), in a conversation of its
+    # own; the running one is put back after, as the later checks read it
+    keep_cid = S.current_conversation()["conversation_id"]
+    S.new_conversation()
     ev = run(S.ask("Who won the Melbourne Cup?"))
+    R.set_pref(S.CURRENT_KEY, keep_cid)
     a = ev[-1]["answer"]
     check("[ask] empty: results then done, nothing else",
           [e["type"] for e in ev], ["results", "done"])
@@ -747,8 +794,8 @@ def ask_mock(tmp):
     check("[ask] empty: verdict empty, up to 3 closest stories, no sentences",
           (a["verdict"], 0 < len(a["closest"]) <= 3, a["sentences"]),
           ("empty", True, []))
-    check("[ask] a short question with nothing behind it carries NO earlier question",
-          "search_query" in ev[0]["search"], False)
+    check("[ask] a question with nothing behind it is searched as typed (FP-4)",
+          ev[0]["search"]["search_query"], "Who won the Melbourne Cup?")
 
     # --- thin: answered as usual (CONSTRUCTED: the thin band is placed, not measured)
     mode["v"] = "thin"
@@ -851,12 +898,12 @@ def ask_mock(tmp):
     check("[estimate] the fixed estimate until 5 rows (Sonnet: 1 row so far)",
           S.estimate_cost("think_harder"), S.KNOBS["estimate_fallback_usd"]["think_harder"])
     n_ask = R._intel_ro().execute("SELECT COUNT(*) FROM cost_log WHERE purpose='ask' "
-                                  "AND (note IS NULL OR note != ?)",
-                                  (S.SUMMARY_NOTE,)).fetchone()[0]
+                                  "AND (note IS NULL OR note NOT IN (?, ?))",
+                                  (S.SUMMARY_NOTE, S.REWRITE_NOTE)).fetchone()[0]
     avg = R._intel_ro().execute("SELECT AVG(in_tokens), AVG(out_tokens) FROM cost_log "
                                 "WHERE purpose='ask' AND model='claude-haiku-5-5' "
-                                "AND (note IS NULL OR note != ?)", (S.SUMMARY_NOTE,)
-                                ).fetchone()
+                                "AND (note IS NULL OR note NOT IN (?, ?))",
+                                (S.SUMMARY_NOTE, S.REWRITE_NOTE)).fetchone()
     check("[estimate] from the logged average once 5 rows exist",
           (n_ask >= 5, S.estimate_cost("ask")),
           (True, S.price("claude-haiku-5-5", avg[0], avg[1])))
@@ -1225,6 +1272,7 @@ def trace_mock(tmp):
 
         # --- a timeout attempt -------------------------------------------------------
         wire.update(sleep=0.0, fail=["timeout"])
+        S.new_conversation()            # a first question: no rewrite call on the wire
         run(S.ask("What did the banks do on rates?"))
         check("[trace] a timed-out attempt is recorded as 'timeout'",
               (S.LAST_TRACE["attempts"], S.LAST_TRACE["retry_reasons"],
@@ -1614,7 +1662,10 @@ def fp3_mock(tmp):
         mode["v"] = "none"
         S._CLIENT = fake = Fake()
         before = cost_rows()
+        keep_cid = S.current_conversation()["conversation_id"]
+        S.new_conversation()    # a FIRST question: a follow-up pays its rewrite (FP-4)
         ev = run(S.ask("Who won the Melbourne Cup?"))
+        R.set_pref(S.CURRENT_KEY, keep_cid)
         a = ev[-1]["answer"]
         check("[fp3] all papers + empty -> 0 calls, $0, nothing logged (unchanged)",
               (len(fake.calls), a["cost_usd"], cost_rows() - before, a["verdict"],
@@ -1689,6 +1740,341 @@ def fp3_mock(tmp):
             os.environ.pop(k, None)
 
 
+# ================================================================= FP-4 · follow-ups
+
+def fp4_mock(tmp):
+    import os
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query)
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    # the vector each query gets: by its exact text, so two queries of ONE ask can land
+    # in different verdict bands (the safety net's whole subject)
+    qv = {}
+    S.embed_query = lambda q, **kw: VECS[qv.get(q, "repo")]
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+    first_q = "Did the repo rate go up?"
+
+    def rewrite_to(*queries, decision="follow_up", carried=1, **labels):
+        def fn(prompt):
+            return dict({"decision": decision, "queries": list(queries),
+                         "carried_from": carried}, **labels), 1200, 40
+        return fn
+
+    def fresh(question=first_q):
+        """A new conversation holding one answered exchange; returns its answer."""
+        S.new_conversation()
+        S._CLIENT = Fake(GOOD)
+        return run(S.ask(question))[-1]["answer"]
+
+    try:
+        # --- 1 · never on a first question, once on each later one ----------------
+        S.new_conversation()
+        S._CLIENT = fake = Fake(GOOD, GOOD, GOOD, rewrite=rewrite_to("repo rate banks"))
+        a0 = run(S.ask(first_q))[-1]["answer"]
+        n_first = len(fake.rewrites)
+        a1 = run(S.ask("Why did they do it?"))[-1]["answer"]
+        a2 = run(S.ask("And the banks?"))[-1]["answer"]
+        check("[fp4] rewriter: 0 calls on the first question, 1 on each later one",
+              (n_first, len(fake.rewrites)), (0, 2))
+        check("[fp4] a first question: topic first, as typed, no labels",
+              (a0["topic"], a0["search_query"], a0["carried_from"],
+               "topic_label" in a0, a0["safety_net_used"], a0["rewrite_failed"]),
+              ("first", first_q, None, False, False, False))
+        check("[fp4] the rewriter is Haiku, sent as 'rewrite', logged as ask/rewrite",
+              (fake.rewrites[0]["model"], fake.rewrites[0]["purpose"],
+               R._intel_ro().execute("SELECT COUNT(*) FROM cost_log WHERE purpose='ask' "
+                                     "AND note='rewrite'").fetchone()[0]),
+              ("claude-haiku-5-5", "rewrite", 2))
+        check("[fp4] a follow-up: carried, searched as rewritten, from the first exchange",
+              (a1["topic"], a1["search_query"], a1["carried_from"]),
+              ("follow_up", "repo rate banks", a0["answer_id"]))
+        rw_rows = R._intel_ro().execute(
+            "SELECT usd FROM cost_log WHERE note='rewrite' AND target_id=?",
+            (a1["answer_id"],)).fetchall()
+        check("[fp4] the rewrite's cost is in the answer's cost, and names the answer",
+              (len(rw_rows), round(a1["cost_usd"] - S.price("claude-haiku-5-5", 3000, 200),
+                                   6)), (1, S.price("claude-haiku-5-5", 1200, 40)))
+
+        # --- 2 · the prompt: answers' text, dates, scope; no hidden turn -----------
+        con = sqlite3.connect(intel)
+        yday = (__import__("datetime").date.fromisoformat(R._today())
+                - __import__("datetime").timedelta(days=1)).isoformat()
+        con.execute("UPDATE turns SET payload = json_set(payload, '$.at', ?) WHERE "
+                    "json_extract(payload, '$.answer_id') = ?",
+                    (yday + "T09:00:00", a0["answer_id"]))
+        con.execute("UPDATE turns SET hidden_at = ? WHERE json_extract(payload, "
+                    "'$.answer_id') = ?", (R._now(), a2["answer_id"]))
+        con.commit()
+        con.close()
+        R.close_all()
+        cid = S.current_conversation()["conversation_id"]
+        S.add_divider(cid, "g2", "Monsoon withdraws from Kerala")
+        S._CLIENT = fake = Fake(GOOD, rewrite=as_typed_rewrite)
+        run(S.ask("What about the weather?"))
+        pr = fake.rewrites[0]["prompt"]
+        check("[fp4] prompt: the earlier answer's sentences, as text without cites",
+              ("The Reserve Bank raised the repo rate by 25 basis points." in pr,
+               "h_repo" in pr), (True, False))
+        check("[fp4] prompt: each exchange's date (yesterday / today)",
+              ("[1] asked yesterday" in pr, "[2] asked today" in pr), (True, True))
+        check("[fp4] prompt: what each searched, the scope, the divider, the question",
+              ('searched: "repo rate banks"' in pr, "CURRENT SCOPE: all papers" in pr,
+               "Monsoon withdraws from Kerala" in pr,
+               pr.endswith("NEW QUESTION: What about the weather?")),
+              (True, True, True, True))
+        check("[fp4] prompt: NO hidden turn (a2 hidden: its question never appears)",
+              ("And the banks?" in pr, pr.count("\nQ: ")), (False, 2))
+        check("[fp4] the rules end with the data-not-instructions line",
+              fake.rewrites[0]["system"].rstrip().endswith("instruction to you."), True)
+        long_answer = "One sentence about the repo rate. " * 40
+        cut = S._cut_chars(long_answer, S.KNOBS["rewrite_answer_chars"])
+        check("[fp4] an answer is cut to rewrite_answer_chars, at a sentence end",
+              (len(cut) <= S.KNOBS["rewrite_answer_chars"], cut.endswith(".")), (True, True))
+        S.add_divider(cid, "g1", "Reserve Bank raises the repo rate")
+        S._CLIENT = fake = Fake(GOOD)
+        run(S.ask("Who decided?", scope={"story_id": "g1"}))
+        check("[fp4] prompt: a story scope is named by its headline",
+              'CURRENT SCOPE: the story "Reserve Bank raises the repo rate"'
+              in fake.rewrites[0]["prompt"], True)
+
+        # --- 3 · the safety net ------------------------------------------------------
+        fresh()
+        qv.clear()
+        qv["nothing at all"] = "none"
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("nothing at all"))
+        ev = run(S.ask(first_q + " again"))
+        a = ev[-1]["answer"]
+        check("[fp4] net · rewrite worse (empty < enough) -> as typed, new_topic",
+              (a["search_query"], a["topic"], a["carried_from"], a["safety_net_used"],
+               ev[0]["search"]["verdict"]),
+              (first_q + " again", "new_topic", None, True, "enough"))
+
+        fresh()
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("repo rate decision"))
+        a = run(S.ask("What was decided?"))[-1]["answer"]
+        check("[fp4] net · tie (enough = enough) -> the rewrite is kept",
+              (a["search_query"], a["topic"], a["safety_net_used"]),
+              ("repo rate decision", "follow_up", False))
+
+        fresh()
+        qv["monsoon nothing"] = "none"
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("repo rate", "monsoon nothing",
+                                                         decision="new_topic"))
+        a = run(S.ask("Repo rate and the other thing?"))[-1]["answer"]
+        check("[fp4] net · one of two halves empty (as typed not) -> that half dropped",
+              (a["search_query"], a["topic"], a["safety_net_used"]),
+              ("repo rate", "new_topic", True))
+
+        fresh()
+        qv.update({"void one": "none", "void two": "none"})
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("void one", "void two"))
+        a = run(S.ask("Repo rate news, both parts?"))[-1]["answer"]
+        check("[fp4] net · all halves empty -> as typed",
+              (a["search_query"], a["topic"], a["safety_net_used"]),
+              ("Repo rate news, both parts?", "new_topic", True))
+
+        fresh()
+        S._CLIENT = fake = Fake(GOOD, rewrite=RateLimitError("busy"))
+        ev = run(S.ask("Why did it rise?"))
+        a = ev[-1]["answer"]
+        check("[fp4] net · rewriter error -> as typed, rewrite_failed, still answered",
+              ([e["type"] for e in ev], a["search_query"], a["topic"], a["rewrite_failed"],
+               len(a["sentences"])),
+              (["results", "sentence", "sentence", "done"], "Why did it rise?",
+               "new_topic", True, 2))
+        fresh()
+        S._CLIENT = fake = Fake(GOOD, rewrite=({"text": "not a rewrite"}, 200, 100))
+        a = run(S.ask("Why did it rise?"))[-1]["answer"]
+        check("[fp4] net · an unusable rewrite reply -> as typed, rewrite_failed, logged",
+              (a["rewrite_failed"], a["search_query"], a["cost_usd"] >
+               S.price("claude-haiku-5-5", 3000, 200)), (True, "Why did it rise?", True))
+
+        # --- 4 · two searches: 4 + 4, spare slots move, rows grouped ----------------
+        def ps(prefix, n, per_article=1):
+            return [{"passage_id": f"{prefix}{i}", "text_hash": f"{prefix}h{i // per_article}",
+                     "story_id": "s", "text": "", "score": 1.0 - i / 100, "article": {}}
+                    for i in range(n)]
+        two = S._choose_two(ps("a", 10), ps("b", 10))
+        check("[fp4] 4 + 4 when both searches have plenty",
+              ([p["passage_id"][0] for p in two].count("a"),
+               [p["passage_id"][0] for p in two].count("b")), (4, 4))
+        two = S._choose_two(ps("a", 2), ps("b", 10))
+        check("[fp4] spare slots move to the other search (2 + 6)",
+              ([p["passage_id"][0] for p in two].count("a"),
+               [p["passage_id"][0] for p in two].count("b")), (2, 6))
+        shared = ps("a", 6, per_article=3)
+        two = S._choose_two(shared, [dict(p, passage_id="x" + p["passage_id"])
+                                     for p in shared])
+        check("[fp4] the per-article cap holds across both searches",
+              max(sum(1 for p in two if p["text_hash"] == h)
+                  for h in {p["text_hash"] for p in two}), 2)
+        fresh()
+        qv.update({"repo rate": "repo", "monsoon Kerala": "rain"})
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("repo rate", "monsoon Kerala",
+                                                         decision="new_topic"))
+        ev = run(S.ask("Compare the repo rate and the monsoon."))
+        a = ev[-1]["answer"]
+        groups = {r.get("group") for r in ev[0]["search"]["stories"]}
+        check("[fp4] two searches: topic, both queries, every row grouped by its query",
+              (a["topic"], a["search_query"], groups <= set(a["search_query"]),
+               len(groups)),
+              ("two_searches", ["repo rate", "monsoon Kerala"], True, 2))
+        check("[fp4] two searches: the stored rows keep their group",
+              all(r.get("group") in a["search_query"] for r in a["results"]), True)
+        check("[fp4] two searches: the writer saw passages from both",
+              {"h_rain", "h_repo"} <= {p["text_hash"] for p in
+                                       S._load_passage_set(a["passage_set_id"])}, True)
+
+        # --- 5 · modes ----------------------------------------------------------------
+        fresh()
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("repo rate banks"))
+        a = run(S.ask("Why?", mode="as_typed"))[-1]["answer"]
+        check("[fp4] as_typed: 0 rewriter calls, never carries, new_topic",
+              (len(fake.rewrites), a["topic"], a["carried_from"], a["search_query"]),
+              (0, "new_topic", None, "Why?"))
+        prev = fresh()
+        qv["carried nothing"] = "none"
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("carried nothing",
+                                                         decision="new_topic"))
+        a = run(S.ask("And the banks?", mode="carry"))[-1]["answer"]
+        check("[fp4] carry: decision fixed to follow_up, told so, no safety net",
+              (a["topic"], a["carried_from"], a["search_query"], a["safety_net_used"],
+               "IS a follow-up" in fake.rewrites[0]["prompt"]),
+              ("follow_up", prev["answer_id"], "carried nothing", False, True))
+        fresh()
+        S._CLIENT = fake = Fake(GOOD, rewrite=rewrite_to("repo rate", "monsoon Kerala"))
+        a = run(S.ask("Repo and monsoon?", mode="one_search"))[-1]["answer"]
+        check("[fp4] one_search: one query only, topic one_search, told so",
+              (a["topic"], a["search_query"], "exactly one query" in
+               fake.rewrites[0]["prompt"]), ("one_search", "repo rate", True))
+        S._CLIENT = fake = Fake(GOOD)
+        check("[fp4] a bad mode is ValueError on the first next(), before any event",
+              (raises(lambda: next(S.ask("x", mode="two_searches")), ValueError),
+               len(fake.calls), len(fake.rewrites)), (True, 0, 0))
+
+        # --- 6 · the fields survive a reload ---------------------------------------
+        S.new_conversation()
+        S._CLIENT = Fake(GOOD, GOOD, rewrite=rewrite_to(
+            "repo rate banks", topic_label="Banks after repo", earlier_label="Repo hike"))
+        run(S.ask(first_q))
+        a = run(S.ask("And the banks?"))[-1]["answer"]
+        R.close_all()
+        back = S.current_conversation()["turns"][-1]["answer"]
+        keys = ("topic", "search_query", "carried_from", "topic_label", "earlier_label",
+                "safety_net_used", "rewrite_failed", "mode")
+        check("[fp4] the answer fields survive a reload",
+              {k: back.get(k) for k in keys}, {k: a.get(k) for k in keys})
+        check("[fp4] labels as the rewriter gave them (TC-13)",
+              (back["topic_label"], back["earlier_label"]), ("Banks after repo", "Repo hike"))
+        check("[fp4] no plan internals stored", [k for k in back if k.startswith("_")], [])
+
+        # --- 7 · gap 6: every earlier turn hidden -> a first question ---------------
+        S.new_conversation()
+        S._CLIENT = fake = Fake(GOOD, GOOD, rewrite=rewrite_to("repo rate unions"))
+        first = run(S.ask(first_q))[-1]["answer"]
+        con = sqlite3.connect(intel)
+        con.execute("UPDATE turns SET hidden_at = ?, hidden_by = 'hide' WHERE "
+                    "json_extract(payload, '$.answer_id') = ?", (R._now(), first["answer_id"]))
+        con.commit()
+        con.close()
+        a = run(S.ask("What did unions say?"))[-1]["answer"]
+        check("[fp4] gap 6 · hidden earlier answer -> topic first, as typed, no rewrite",
+              (a["topic"], a["search_query"], len(fake.rewrites)),
+              ("first", "What did unions say?", 0))
+
+        # --- 8 · retired knob, day knob, summary cap --------------------------------
+        src = (ROOT / "src" / "p3_search.py").read_text()
+        check("[fp4] no code path reads followup_carry_words (only its register line)",
+              (src.count("followup_carry_words"), 'KNOBS["followup_carry_words"]' in src,
+               hasattr(S, "_search_query")), (1, False, False))
+        check("[fp4] conversation_new_each_day stays False (call 1)",
+              S.KNOBS["conversation_new_each_day"], False)
+        S.new_conversation()
+        long = ("The earlier exchanges were about the repo rate and the banks. " * 40).strip()
+        S._CLIENT = fake = Fake(*[GOOD] * 5, summary=long)
+        for i in range(5):
+            run(S.ask(f"Repo rate question number {i}?"))
+        cid = S.current_conversation()["conversation_id"]
+        stored = R._json_or(R._intel_ro().execute(
+            "SELECT summary FROM conversations WHERE conversation_id=?", (cid,)
+        ).fetchone()[0], {}).get("text", "")
+        check("[fp4] TC-10 · the summary is cut to summary_max_chars, at a sentence end",
+              (len(fake.summaries) >= 1, len(stored) <= S.KNOBS["summary_max_chars"],
+               stored.endswith(".")), (True, True, True))
+
+        # --- 9 · measured with the fake: added time before results, added cost ------
+        S.new_conversation()
+        S._CLIENT = Fake(GOOD, GOOD, rewrite=rewrite_to("repo rate banks"))
+        run(S.ask(first_q))
+        t_first = S.LAST_TRACE
+        run(S.ask("And the banks?"))
+        t_next = S.LAST_TRACE
+        before_results = lambda t: sum(v for k, v in t["phases_ms"].items()  # noqa: E731
+                                       if k in ("search", "embed", "rewrite_call", "cap"))
+        print(f"  fp4 (mock, fake rewriter): before results first {before_results(t_first)} "
+              f"ms, follow-up {before_results(t_next)} ms (rewrite_call "
+              f"{t_next['phases_ms'].get('rewrite_call', 0)} ms); added cost per follow-up "
+              f"${S.price('claude-haiku-5-5', 1200, 40):.6f} at the fake's 1,200 / 40 tokens")
+        check("[fp4] the follow-up's trace names rewrite_call",
+              "rewrite_call" in t_next["phases_ms"], True)
+    finally:
+        S._CLIENT = None
+        R.close_all()
+        S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
+        for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+            os.environ.pop(k, None)
+
+
+def fp4_real():
+    """K3's 3 Nov line on the REAL archive: "police" after the EPFO question. A fake
+    rewriter carries (the old joining's query); the search is read-only; the rewrite's
+    cost row lands in a temp COPY of intel.db, never the real file."""
+    import os
+    import shutil
+    import time
+    epfo = "why do employers welcome the move of the EPFO wage ceiling being raised?"
+    view = [("answer", {"answer_id": "ans_epfo", "question": epfo, "search_query": epfo,
+                        "at": "2026-11-03T20:00:00", "parent_answer_id": None,
+                        "sentences": [{"text": "Employers expect lower costs.",
+                                       "cites": []}]})]
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / "intel.db"
+        shutil.copy2(S.REAL_INTEL_DB, copy)
+        os.environ["P3_READER_INTEL_DB"] = str(copy)
+        import p3_reader as R
+        R.close_all()
+        S._CLIENT = fake = Fake(rewrite=lambda prompt: (
+            {"decision": "follow_up", "queries": [f"{epfo} police"], "carried_from": 1},
+            1200, 40))
+        try:
+            t0 = time.monotonic()
+            plan, result, _chosen = S._plan_search("police", {}, {}, view)
+            took = time.monotonic() - t0
+            t0 = time.monotonic()
+            S.search("police", limit=S.KNOBS["ask_search_limit"], ranked_out=[])
+            alone = time.monotonic() - t0
+        finally:
+            S._CLIENT = None
+            R.close_all()
+            os.environ.pop("P3_READER_INTEL_DB", None)
+    mode = "service up" if S.embed_query("probe") is not None else "fts_only"
+    v = plan["_verdicts"]
+    print(f"  fp4 police after EPFO ({mode}): carried {v.get('rewrite')} · as typed "
+          f"{v.get('as_typed')} · final {v.get('final')} · plan {took:.2f} s vs one "
+          f"search {alone:.2f} s")
+    check(f"[fp4 · real · {mode}] police after EPFO: carried empty, as typed thin -> "
+          "searched as typed",
+          (v.get("rewrite"), v.get("as_typed"), plan["search_query"], plan["topic"],
+           plan["safety_net_used"], len(fake.rewrites)),
+          (["empty"], "thin", "police", "new_topic", True, 1))
+
+
 # ================================================================= 4. nothing written
 
 def untouched(before):
@@ -1718,6 +2104,8 @@ def main():
         fp2_mock(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         fp3_mock(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        fp4_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():
@@ -1726,6 +2114,7 @@ def main():
         real()
         followup_real()
         fp2_real()
+        fp4_real()
     if before:
         untouched(before)
 
