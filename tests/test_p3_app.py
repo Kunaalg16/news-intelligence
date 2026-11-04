@@ -568,18 +568,28 @@ def real():
     with tempfile.TemporaryDirectory() as tmp:
         R.WORK = Path(tmp)              # §3 rule 7, as in routes() below
 
-        refs = [d["ref"] for d in R.list_digests()]
-        check("both real digests are found", sorted(refs),
-              ["digest_live", "k3_b1_3_digest_2026-10-11"])
-        check("the live digest is the latest", refs[0], "digest_live")
+        # F1 (fo-1) · by rule, not by a pinned list: every daily run adds a digest, so
+        # "the latest" is the first row of list_digests() and the two old digests are
+        # checked as still found among however many there are (X10 moved them).
+        listed = R.list_digests()
+        refs = [d["ref"] for d in listed]
+        check("the two old digests are still found among the real ones",
+              sorted({"digest_live", "k3_b1_3_digest_2026-10-11"} - set(refs)), [])
+        check("and the list is newest first",
+              [d["built_at"] for d in listed],
+              sorted((d["built_at"] for d in listed), reverse=True))
         live = R.get_digest("latest")
+        check("the latest digest is the first row of list_digests()",
+              live["built_at"], listed[0]["built_at"])
         check("the live digest has ten stories", len(live["stories"]), 10)
 
         cost = R.cost_today()
         check("today's spend is every paid call of the day in cost_log (contract v2 §3), "
               "not a number pinned on the day this was written",
               round(cost["spent_usd"], 6), todays_cost_log())
-        check("the cap comes from the live digest's own knob", cost["cap_usd"], 0.5)
+        check("the cap comes from the latest digest's own knob (plus today's override)",
+              round(cost["cap_usd"], 6),
+              round(live["knobs"]["daily_cost_cap_usd"] + cost["override_usd"], 6))
 
         day = R.get_digest("k3_b1_3_digest_2026-10-11")
         check("the day digest has no cap knob", "daily_cost_cap_usd" in day["knobs"], False)
@@ -684,7 +694,11 @@ def routes():
         check("[fixture] B1 · Q3 B took the earlier-coverage knob off the page with it",
               sorted(f["knobs"]), ["paragraph_words"])
 
-        live = A.digest(ref="digest_live")
+        # F1 (fo-1) · the latest digest is the first row of /api/digests, found through
+        # it rather than by the old live digest's name: each daily run adds one.
+        listed = A.digests()["digests"]
+        latest_ref = listed[0]["ref"]
+        live = A.digest(ref=latest_ref)
         day = A.digest(ref="k3_b1_3_digest_2026-10-11")
         with_links = [st for st in day["stories"] if st.get("links")]
         check("[fixture] B1 · one 11 Oct story carries printed see-also pointers",
@@ -702,19 +716,21 @@ def routes():
               "headline here could be a link (hand-off F1)",
               [it["to_headline"] for it in with_links[0]["links"]
                if it["to_story_id"] in {st["story_id"] for st in day["stories"]}], [])
-        check("[fixture] B1 · the live digest's ten stories have no printed pointers",
-              [st["story_id"] for st in live["stories"] if st.get("links")], [])
+        check("[fixture] B1 · the old live digest's ten stories have no printed pointers",
+              [st["story_id"] for st in A.digest(ref="digest_live")["stories"]
+               if st.get("links")], [])
 
-        # --- the digests, both of them --------------------------------------------
-        for ref in ("digest_live", "k3_b1_3_digest_2026-10-11"):
+        # --- the digests, every one the reader lists -------------------------------
+        for ref in [d["ref"] for d in listed]:
             got = A.digest(ref=ref)
             check(f"/api/digest serialises for {ref}", bool(json.dumps(got)), True)
             check(f"/api/digest returns ten stories for {ref}", len(got["stories"]), 10)
-        check("/api/digest with no ref is the latest",
-              A.digest()["built_at"], "2026-11-01T16:38:51")
+        check("/api/digest with no ref is the latest (the first row of /api/digests)",
+              A.digest()["built_at"], listed[0]["built_at"])
         check("an unknown digest ref is 404, not another digest",
               status_of(A.digest, ref="nope"), 404)
-        check("/api/digests lists both", len(A.digests()["digests"]), 2)
+        check("/api/digests lists every digest the reader finds, in its order",
+              [d["ref"] for d in listed], [d["ref"] for d in R.list_digests()])
         check("/api/status is ready", A.status()["state"], "ready")
         check("/api/cost is every paid call of the day in cost_log",
               round(A.cost()["spent_usd"], 6), todays_cost_log())
@@ -728,7 +744,7 @@ def routes():
               status_of(A.set_fixtures, payload={"nope": True}), 400)
 
         # --- one article, and its paragraphs --------------------------------------
-        live = A.digest(ref="digest_live")
+        live = A.digest(ref=latest_ref)
         row = live["stories"][0]["coverage"]["rows"][0]
         art = A.article(row["text_hash"])
         check("the article's headline is the row's own", art["headline"], row["headline"])
@@ -740,8 +756,12 @@ def routes():
         check("every paragraph but the last reaches the knob's word count",
               [len(p.split()) >= A.KNOBS["paragraph_words"] for p in paras[:-1]],
               [True] * len(paras[:-1]))
+        # F1 (fo-1) · the splitter's own sentence end: . ! or ?, a closing quote allowed
+        # after it (`_SENTENCE_END`). Only "." was wanted while the article checked was
+        # the old live digest's; the latest's ends `.”`.
         check("every paragraph ends on sentence punctuation",
-              sorted({p.strip()[-1] for p in paras}), ["."])
+              [p for p in paras
+               if not re.search(r"[.!?][\"'”’]?$", p.strip())], [])
 
         # --- threads --------------------------------------------------------------
         shown = [s for s in live["stories"] if (s.get("story_so_far") or {}).get("shown")][0]
@@ -799,7 +819,7 @@ def routes():
         pin_id = A.pin(payload={"board_id": board_id, "item_type": "story",
                                 "payload": {"story_id": shown["story_id"],
                                             "text_hashes": hashes},
-                                "source": {"digest_ref": "digest_live"}})["pin_id"]
+                                "source": {"digest_ref": latest_ref}})["pin_id"]
         check("the board now holds one pin",
               len(A.board_pins(board_id)["pins"]), 1)
         check("the Boards screen can count pins without a call each",
@@ -807,7 +827,7 @@ def routes():
         # §8.6: one article can be pinned on its own, from the article view
         art_pin = A.pin(payload={"board_id": board_id, "item_type": "article",
                                  "payload": {"text_hash": hashes[0]},
-                                 "source": {"digest_ref": "digest_live"}})["pin_id"]
+                                 "source": {"digest_ref": latest_ref}})["pin_id"]
         kinds = sorted(p["item_type"] for p in A.board_pins(board_id)["pins"])
         check("a board holds a story and a single article side by side",
               kinds, ["article", "story"])
@@ -844,12 +864,12 @@ def routes():
         # first and read after would answer with this visit's own time instead.
         before_visit = R.last_visit()
         check("/api/visit answers with the visit BEFORE this one",
-              A.visit(payload={"digest_ref": "digest_live",
+              A.visit(payload={"digest_ref": latest_ref,
                                "window": live["window"]})["last_visit"], before_visit)
-        A.visit(payload={"digest_ref": "digest_live", "window": live["window"],
+        A.visit(payload={"digest_ref": latest_ref, "window": live["window"],
                          "opened_story": True})
         check("and then that visit is the last one",
-              bool(A.visit(payload={"digest_ref": "digest_live",
+              bool(A.visit(payload={"digest_ref": latest_ref,
                                     "window": live["window"]})["last_visit"]), True)
 
         # --- the PDF route, which is the one route that names a file ---------------
@@ -3339,13 +3359,20 @@ def v01_ask():
         # needs, all logged for K3: `searched_days` (without it a reloaded empty answer
         # said "searched 0 days" about a search that covered one) and D12's `results`,
         # `results_total` and `passage_count` (without them a reloaded answer lost its
-        # results list and Think harder's label lost its number).
-        check("[fixture] an answer carries the contract's keys", sorted(answer),
-              ["answer_id", "at", "attempts", "background", "cited", "closest",
-               "conversation_id", "cost_usd", "drops", "fixture", "found",
-               "found_count", "model", "model_id", "parent_answer_id",
-               "passage_count", "passage_set_id", "question", "results",
-               "results_total", "scope", "searched_days", "sentences", "verdict"])
+        # results list and Think harder's label lost its number). F1 (fo-1): plus the
+        # ten of contract §12.3 #15 that every new answer carries; the rewriter's
+        # `topic_label` / `earlier_label` come only when it gave them, so they are
+        # allowed, never required.
+        check("[fixture] an answer carries the contract's keys",
+              sorted(set(answer) - {"topic_label", "earlier_label"}),
+              sorted(["answer_id", "at", "attempts", "background", "cited", "closest",
+                      "conversation_id", "cost_usd", "drops", "fixture", "found",
+                      "found_count", "model", "model_id", "parent_answer_id",
+                      "passage_count", "passage_set_id", "question", "results",
+                      "results_total", "scope", "searched_days", "sentences", "verdict",
+                      "mode", "not_covered", "similarity_verdict", "top_similarity",
+                      "topic", "search_query", "carried_from", "safety_net_used",
+                      "rewrite_failed", "replaces_answer_id"]))
         check("[fixture] and searched_days matches the search behind it",
               answer["searched_days"], result["searched_days"])
         check("[fixture] it is Haiku, named by its model id",
@@ -3370,6 +3397,10 @@ def v01_ask():
              "decides how many sentences come back")
 
         # --- rule 3 · the empty verdict ----------------------------------------
+        # F1 (fo-1) · asked as the FIRST question of a fresh conversation: contract
+        # §12.3 #22 (D-2 a) -- a follow-up still pays its rewrite, so only a first
+        # question that finds nothing is $0, which is what rule 3 means here.
+        PS.new_conversation()
         before = R.cost_today()["spent_usd"]
         empty = list(R.ask("Norway", None))[-1]["answer"]
         check("[behaviour] 3 · an empty answer has no sentences", empty["sentences"], [])
@@ -4206,10 +4237,22 @@ def v01_states():
         check("[fixture] state 3 · Think harder on it gives a Sonnet answer",
               harder["model"], "sonnet")
 
-        # 4 · weak match, from the query "GST"
-        thin = list(R.ask("GST", None))[-1]["answer"]
-        check("[fixture] state 4 · 'GST' gives a thin answer with a count to show",
-              [thin["verdict"], thin["found_count"] > 0], ["thin", True])
+        # 4 · weak match. F1 (fo-1): no single word stays thin while the archive grows
+        # and the word index is rebuilt ('GST' was thin until K3's FP-2 rebuild and the
+        # 3-4 Nov days; asked fresh it is 'enough' now). So the state is reached by
+        # rule: the first of these words that the reader calls thin, each asked as a
+        # first question (no rewrite joining it to an earlier one), and the word that
+        # reached it is printed for the report's manual list.
+        thin = None
+        for word in STATE4_WORDS:
+            PS.new_conversation()
+            got = list(R.ask(word, None))[-1]["answer"]
+            if got["verdict"] == "thin":
+                thin = got
+                STATE4_SEEN.append(word)
+                break
+        check("[fixture] state 4 · a real query gives a thin answer with a count to show",
+              [thin is not None, bool(thin and thin["found_count"] > 0)], [True, True])
 
         # 5 and 6 · nothing found, then background on request
         empty = list(R.ask("Norway", None))[-1]["answer"]
@@ -4411,15 +4454,20 @@ def asgi():
               [got[0], got[1].get("content-type", "").split(";")[0]], [200, "text/css"])
 
         # The thing a direct call cannot show: a query string becoming filters.
+        # F1 (fo-1) · "narrows" = only the asked-for papers come back, and something
+        # does. It used to want BOTH papers in the newest 20, which held only while Mint
+        # had recent days (its newest is 2 Nov; The Hindu has 3 and 4 Nov). 200 rows,
+        # so the same browse without the filter reaches other papers and the check can
+        # fail when the filter is ignored.
         status, _h, chunks = asyncio.run(
-            request("GET", "/api/search", b"q=&papers=Mint&papers=The+Hindu"))
+            request("GET", "/api/search", b"q=&papers=Mint&papers=The+Hindu&limit=200"))
         body = json.loads(b"".join(chunks))
         check("[fixture] a repeated query parameter arrives as a list",
               [status, sorted(body["filters"].get("papers", []))],
               [200, ["Mint", "The Hindu"]])
-        check("[fixture] and really narrows what comes back",
-              sorted({a["paper"] for s in body["stories"] for a in s["articles"]}),
-              ["Mint", "The Hindu"])
+        papers_back = {a["paper"] for s in body["stories"] for a in s["articles"]}
+        check("[fixture] and really narrows what comes back: only those papers, and some",
+              [sorted(papers_back - {"Mint", "The Hindu"}), bool(papers_back)], [[], True])
         status, _h, chunks = asyncio.run(
             request("GET", "/api/search", b"q=police&sort=newest&limit=3"))
         body = json.loads(b"".join(chunks))
@@ -6440,10 +6488,19 @@ def one_page():
         A.ARCHIVE, A.pymupdf = real_archive, real_lib
 
     # --- the dateline, taken off the body only where the body starts with it ---
-    hashes = [r["text_hash"] for s in live["stories"] for r in s["coverage"]["rows"]]
-    datelined = [h for h in hashes if (R.article(h) or {}).get("dateline")]
-    check("I4 · the live digest has datelined articles to check against",
-          len(datelined) > 0, True)
+    # F1 (fo-1) · from whichever digest has them (newest first), not the latest alone:
+    # a day's front pages may carry no dateline at all, which says nothing about the rule.
+    datelined = []
+    for entry in R.list_digests():
+        hashes = [r["text_hash"] for s in R.get_digest(entry["ref"])["stories"]
+                  for r in s["coverage"]["rows"]]
+        datelined = [h for h in hashes if (R.article(h) or {}).get("dateline")]
+        if datelined:
+            break
+    if not datelined:
+        skip("I4 · the served paragraphs are the body minus a leading dateline",
+             "no listed digest has a datelined article to check against")
+        return
     wrong = []
     for h in datelined:
         raw = R.article(h)
@@ -6461,6 +6518,9 @@ def one_page():
 
 
 PAGE_MS = []
+# F1 (fo-1) · state 4's candidate words, tried in order; the one that reached "thin".
+STATE4_WORDS = ("GST", "police", "EPFO", "Manipur", "pension")
+STATE4_SEEN = []
 
 
 def page_contract():
@@ -6770,6 +6830,7 @@ def main():
     print(f"search ran with {'/'.join(SEARCH_MODE) or 'unknown'}: results that depend on "
           f"meaning search (verdicts, suggestions) were seen in this mode")
     print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
+    print(f"state 4 (weak match) reached with: {STATE4_SEEN or 'none of ' + str(STATE4_WORDS)}")
     for n in I8_COUNTS:
         print(f"I8 flag off: {n} pane buttons pressed, none reached reask or hide_turn")
     for pressed, distinct, found, disabled, moves, states in I9_COUNTS:
