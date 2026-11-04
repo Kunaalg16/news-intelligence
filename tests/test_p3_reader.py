@@ -263,6 +263,55 @@ def on_mock(tmp):
     (work / "digest_older.json").unlink()
     (work / "digest_undated.json").unlink()
 
+    # --- FP-7 · the daily run's folder, data/digests/, read with _work/ (TC-15, X10) ----
+    daily = Path(tmp) / "digests"
+    daily.mkdir()
+    check("FP-7 · a test world (P3_READER_WORK set) never reads a data/digests folder",
+          R._daily_dir(), None)
+    os.environ["P3_READER_DIGESTS"] = str(daily)
+    try:
+        (daily / "2026-10-04_week.json").write_text(json.dumps(dict(
+            MOCK_DIGEST, built_at="2026-10-05T06:00:00",
+            window={"kind": "week", "from": "2026-09-28", "to": "2026-10-04"})))
+        (daily / "2026-10-01_day.json").write_text(json.dumps(dict(
+            MOCK_DIGEST, built_at="2026-10-01T06:00:00",
+            window={"kind": "day", "from": "2026-10-01", "to": "2026-10-01"})))
+        (daily / "2026-10-05_day.json.tmp").write_text('{"stories": [')
+        got = R.list_digests()
+        check("FP-7 · list_digests merges both folders, newest built_at first",
+              [d["ref"] for d in got], ["2026-10-04_week", "digest_mock", "2026-10-01_day"])
+        check("FP-7 · each row carries its kind",
+              [d["kind"] for d in got], ["week", MOCK_DIGEST["window"]["kind"], "day"])
+        check("FP-7 · a digest still being written (.tmp) is never listed",
+              any("tmp" in d["ref"] for d in got), False)
+        check("FP-7 · get_digest('latest') is the newest of both folders, shape unchanged",
+              (R.get_digest("latest")["window"]["kind"],
+               sorted(R.get_digest("latest")) == sorted(dict(MOCK_DIGEST, built_at="x",
+                                                             window={}))), ("week", True))
+        check("FP-7 · run_status follows the newest digest of both folders",
+              R.run_status()["latest_ready"], "2026-10-04")
+        (daily / "digest_mock.json").write_text(json.dumps(dict(
+            MOCK_DIGEST, built_at="2026-09-01T06:00:00")))
+        check("FP-7 · a stem in both folders is listed once, the daily folder's copy",
+              [(d["ref"], d["built_at"]) for d in R.list_digests() if d["ref"] == "digest_mock"],
+              [("digest_mock", "2026-09-01T06:00:00")])
+    finally:
+        os.environ.pop("P3_READER_DIGESTS", None)
+    check("FP-7 · without P3_READER_DIGESTS the mock world is as before",
+          [d["ref"] for d in R.list_digests()], ["digest_mock"])
+    kept_env = os.environ.pop("P3_READER_WORK")
+    kept_root = R.ROOT
+    try:
+        R.ROOT = Path(tmp)
+        check("FP-7 · outside a test world the daily folder is ROOT/data/digests",
+              R._daily_dir(), Path(tmp) / "data" / "digests")
+    finally:
+        R.ROOT = kept_root
+        os.environ["P3_READER_WORK"] = kept_env
+    check("F-2 · no file in src/ or app/ names the test double any more",
+          [str(f) for d in ("src", "app") for f in (ROOT / d).rglob("*") if f.is_file() and f.suffix != ".pyc"
+           if "p3_app_double" in f.read_text(encoding="utf-8", errors="ignore")], [])
+
     # --- run_status (R6) --------------------------------------------------------
     check("run_status is ready with no lock file", R.run_status()["state"], "ready")
     check("run_status carries the latest window and build time",

@@ -3,9 +3,9 @@
   against the real databases, with the names and shapes of K1's test double.
 
 WHAT IT DOES
-  This is the module `src/p3_app.py` imports instead of `src/p3_app_double.py` at
-  integration — one line, `p3_app.py:67`. Everything a screen shows and everything a
-  reader does goes through here:
+  This is the module `src/p3_app.py` imports as its data layer. It replaced K1's test
+  double at integration (K1 `4be91dd`); the double is gone. Everything a screen shows
+  and everything a reader does goes through here:
 
       R6   run_status · get_digest · list_digests      what there is to read
       R3   article                                     one article, with its real body
@@ -19,8 +19,9 @@ WHAT IT DOES
 
   Reads  data/news.db, data/vectors.db   READ-ONLY (`file:...?mode=ro`)
          data/intel.db                   K2's tables read-only, through p3_store
-         _work/*.json                    the digests p3_digest.py builds
-  Writes data/intel.db                   K3's own tables ONLY (p3_store, schema 2)
+         data/digests/*.json             the digests the daily run builds (FP-7, 4 Nov)
+         _work/*.json                    the two older digests, until they are moved
+  Writes data/intel.db                   K3's own tables ONLY (p3_store, K3 schema 3)
 
 WHY ITS SHAPES ARE NOT NEGOTIABLE
   K1 built eleven screens against the double's signatures before these functions
@@ -56,7 +57,9 @@ HOW TO RUN
 
   Three environment variables move the files it reads, so a test (or K1's suite) can run
   it against a COPY of intel.db without editing anything:
-      P3_READER_INTEL_DB · P3_READER_NEWS_DB · P3_READER_WORK
+      P3_READER_INTEL_DB · P3_READER_NEWS_DB · P3_READER_WORK · P3_READER_DIGESTS
+  P3_READER_WORK set and P3_READER_DIGESTS not = a test world: `data/digests/` is not
+  read, so a mock never picks up a real digest.
 
 KNOBS
   One block below, each with its reason and the measurement that would change it.
@@ -142,6 +145,13 @@ KNOBS = {
                       "ask_background", "suggest"),
 
     # --- digests (R6) -------------------------------------------------------
+    # Where the daily run writes its day and week digests (FP-7, TC-15). Read FIRST; a
+    # stem found here hides the same stem in `digest_dir`. A rule, not a tuned number.
+    "digest_dir_daily": "data/digests",
+    # The two digests built before the daily run did it live here until Kunaal moves
+    # them (X10). Kept, and read second, so "Past digests" loses nothing meanwhile; K1's
+    # suite also aims its mock world at `ROOT / digest_dir`. What would change it: both
+    # files moved -- then this folder holds no digest and costs one empty glob.
     "digest_dir": "_work",
     # A JSON file in `_work/` is a digest only with all three of these keys -- the guard
     # that keeps a stray JSON file out of "Past digests" (behaviour rule 14).
@@ -187,6 +197,16 @@ def _work_dir():
     """
     from_env = os.environ.get("P3_READER_WORK")
     return Path(from_env) if from_env else (Path(ROOT) / KNOBS["digest_dir"])
+
+
+def _daily_dir():
+    """Where the daily run's digests are, or None in a test world (see HOW TO RUN)."""
+    from_env = os.environ.get("P3_READER_DIGESTS")
+    if from_env:
+        return Path(from_env)
+    if os.environ.get("P3_READER_WORK"):
+        return None
+    return Path(ROOT) / KNOBS["digest_dir_daily"]
 
 
 def _news_path():
@@ -272,25 +292,30 @@ def close_all():
 # ------------------------------------------------------------------------- digests
 
 def _digest_files():
-    """Every digest JSON in the work directory, newest `built_at` first.
+    """Every digest JSON in `data/digests/` and the work directory, newest `built_at` first.
 
     Same guard and same order as the double: a file is a digest only with `stories`,
     `window` and `built_at` (rule 14), and a missing `built_at` sorts last (rule 15).
+    The daily run's folder is read first and wins a stem both folders hold. Its
+    temporary files end in `.tmp`, so a digest still being written is never listed.
     """
-    out = []
-    work = _work_dir()
-    if not work.is_dir():
-        return out
-    for path in sorted(work.glob("*.json")):
-        try:
-            obj = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+    out, seen = [], set()
+    for folder in (_daily_dir(), _work_dir()):
+        if folder is None or not folder.is_dir():
             continue
-        if not isinstance(obj, dict):
-            continue
-        if not all(k in obj for k in KNOBS["digest_required_keys"]):
-            continue
-        out.append((path.stem, path, obj))
+        for path in sorted(folder.glob("*.json")):
+            if path.stem in seen:
+                continue
+            try:
+                obj = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if not all(k in obj for k in KNOBS["digest_required_keys"]):
+                continue
+            seen.add(path.stem)
+            out.append((path.stem, path, obj))
     out.sort(key=lambda t: t[2].get("built_at") or "", reverse=True)
     return out
 
@@ -309,8 +334,10 @@ def get_digest(ref):
 
 
 def list_digests():
-    """[{ref, window, built_at}], newest first (R6)."""
-    return [{"ref": stem, "window": obj.get("window"), "built_at": obj.get("built_at")}
+    """[{ref, window, built_at, kind}], newest first (R6). `kind` = the window's kind:
+    `day` · `week` · `since_last` (contract v2.5 line 13), None if the file has none."""
+    return [{"ref": stem, "window": obj.get("window"), "built_at": obj.get("built_at"),
+             "kind": (obj.get("window") or {}).get("kind")}
             for stem, _path, obj in _digest_files()]
 
 

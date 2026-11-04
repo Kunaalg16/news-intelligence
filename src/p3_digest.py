@@ -252,7 +252,11 @@ def stored_dates(news):
 def window_dates(news, date, kind, last_visit=None):
     """The dates this digest covers, and what they are called (Q3p: one rule per window)."""
     every = stored_dates(news)
-    if date not in every:
+    # A week is named by its Sunday, and a Sunday paper can be missing (27 Sep and 4 Oct
+    # are): the week is still there if any of its seven days is stored (FP-7, 4 Nov).
+    in_week = kind == "week" and any(
+        _back(date, KNOBS["window_week_days"] - 1) <= d <= date for d in every)
+    if date not in every and not in_week:
         sys.exit(f"no stored papers for {date} (stored: {every[0]}..{every[-1]})")
     if kind == "day":
         days = [date]

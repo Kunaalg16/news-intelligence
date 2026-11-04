@@ -25,6 +25,10 @@ WHAT IT DOES
                        override a --date given by hand
       5. the batch   : submit -> wait -> collect; a batch already out is resumed and not
                        re-submitted; a batch that never comes back pauses cleanly
+      6. the digests : step 10 (FP-7, 4 Nov) -- day files per processed day, the week
+                       file once per new week, never overwritten, atomic (no partial
+                       file on failure), its own ceiling, the TC-18 health line, and
+                       the page reads `processing` while it runs
 
 WHY IT EXISTS
     This wrapper's whole job is to be trusted with one "y". Three of its nine steps cost
@@ -40,6 +44,16 @@ PASS LINES (fixed before the run, K3 brief 2 §B2-8)
         names that step.
     (3) The lock file appears while the run is going and is gone afterwards, including
         after a failure.
+    FP-7 (K3 final-pass brief, fixed before the run):
+    (4) `--dry-run` lists the digest step and its estimate, runs nothing.
+    (5) A stubbed run over 2 new paper-days writes 2 day files into a temp
+        `data/digests/`, skips one that exists, and writes 1 week file when a new week
+        starts, 0 on a second run.
+    (6) An injected digest failure leaves no partial file, the last good digest still
+        listed, earlier steps' outputs intact, and the closing line names the step.
+    (7) Cap refusal: nothing built, said in one line.
+    (8) The health line has the five numbers and the right `clean` / `check`.
+    (9) Nothing is written into `_work/` (other than the test's own lock).
     A failed line is answered by error analysis, not by moving the line.
 
 WHEN TO RUN
@@ -101,14 +115,32 @@ class Stub:
     guessed at afterwards.
     """
 
-    def __init__(self, fail_on=None, status="batch_abc: ended · processing 0, succeeded 312"):
+    def __init__(self, fail_on=None, status="batch_abc: ended · processing 0, succeeded 312",
+                 digest=None, half_digest_on=None):
         self.fail_on, self.status = fail_on, status
         self.calls, self.lock_seen, self.slept = [], [], []
+        self.lock_steps = []
+        # What a stubbed `p3_digest.py build` writes at its --out path: a whole digest,
+        # or (half_digest_on) a cut-off file and a failing exit, as a crash would leave.
+        self.digest = digest or fake_digest()
+        self.half_digest_on = half_digest_on
 
     def runner(self, cmd, root=None):
         line = " ".join(cmd)
         self.calls.append(line)
         self.lock_seen.append(P.LOCK.exists())
+        lock = P.read_lock() or {}
+        self.lock_steps.append(lock.get("step"))
+        if "p3_digest.py build" in line:
+            out = Path(root) / cmd[cmd.index("--out") + 1]
+            if self.half_digest_on and self.half_digest_on in line:
+                out.write_text('{"stories": [', encoding="utf-8")
+                return 1
+            if not (self.fail_on and self.fail_on in line):
+                obj = dict(self.digest, window={"kind": cmd[cmd.index("--window") + 1],
+                                                "from": cmd[cmd.index("--date") + 1],
+                                                "to": cmd[cmd.index("--date") + 1]})
+                out.write_text(json.dumps(obj), encoding="utf-8")
         return 1 if (self.fail_on and self.fail_on in line) else 0
 
     def capture(self, cmd, root=None):
@@ -122,6 +154,22 @@ class Stub:
 
     def ran(self, needle):
         return [c for c in self.calls if needle in c]
+
+
+def fake_digest(stories=10, fallen=0, drops=0, missing=0, cost=0.001):
+    """A digest as p3_digest.build returns it, with the TC-18 numbers chosen by the test.
+
+    `cost` is per story (write-up only); `drops` are spread one per story from the first.
+    """
+    rows = []
+    for i in range(stories):
+        rows.append({"story_id": f"s{i}",
+                     "writeup": {"sentences": [] if i < fallen else [{"text": "x", "cites": ["A1"]}],
+                                 "drops": [{"reason": "cite"}] if i < drops else [],
+                                 "cost_usd": cost},
+                     "story_so_far": None})
+    return {"stories": rows, "window": {}, "built_at": "2026-11-04T07:00:00",
+            "report": {"page_links_missing_pdf": missing}}
 
 
 def go(root, stub, **kw):
@@ -139,13 +187,13 @@ def go(root, stub, **kw):
 def the_plan(root):
     day, steps = P.plan(root=root)
     check("the paper-day is the newest folder in archive/", day, DAY)
-    check("nine steps, in the designed order",
+    check("ten steps, in the designed order (digest last, FP-7)",
           [s["name"] for s in steps],
           ["archive", "extract", "tag", "store check", "embed", "index",
-           "group run", "group track", "judge"])
-    check("step numbers are 1..9", [s["n"] for s in steps], list(range(1, 10)))
-    check("three paid steps, and they are the three that call a model",
-          [s["name"] for s in steps if s["paid"]], ["archive", "extract", "tag"])
+           "group run", "group track", "judge", "digest"])
+    check("step numbers are 1..10", [s["n"] for s in steps], list(range(1, 11)))
+    check("four paid steps, and they are the four that call a model",
+          [s["name"] for s in steps if s["paid"]], ["archive", "extract", "tag", "digest"])
     check("the judge step exists and is skipped",
           (steps[8]["kind"], "SKIPPED" in steps[8]["what"]), ("skipped", True))
 
@@ -194,10 +242,19 @@ def dry(root):
                                  "index", "group run", "group track", "judge")), True)
     check("dry run prints the steps in order",
           out.index("1. archive") < out.index("3. tag") < out.index("9. judge"), True)
+    # 0.02 archive + 0.13 extract + 0.20 tag + digest (day 0.011 + the week 0.011: 3 Nov
+    # is the first day of a new week in this project, so last week's digest is due).
     check("dry run prints the paid estimate per step and the total",
-          ("PAID ≈ $0.20" in out, "estimated total ≈ $0.35" in out), (True, True))
+          ("PAID ≈ $0.20" in out, "estimated total ≈ $0.37" in out), (True, True))
     check("dry run names which steps are paid",
-          "Paid steps: archive, extract, tag" in out, True)
+          "Paid steps: archive, extract, tag, digest" in out, True)
+    check("FP-7 (4) · dry run lists the digest step, its estimate and both commands",
+          ("10. digest" in out, "PAID ≈ $0.02" in out,
+           f"src/p3_digest.py build --date {DAY} --window day --live "
+           f"--out data/digests/{DAY}_day.json" in out,
+           "--date 2026-11-01 --window week --live --out data/digests/2026-11-01_week.json" in out),
+          (True, True, True, True))
+    check("FP-7 (4) · dry run writes no digest", (root / "data" / "digests").exists(), False)
     check("dry run prints the exact commands",
           (f"src/p2_extract.py archive/{DAY} --pipeline" in out,
            "src/p2_tag.py submit --model haiku-5.5" in out,
@@ -467,6 +524,199 @@ def batch(tmp):
     check("output we cannot read = not finished", P.batch_finished("something else\n"), False)
 
 
+# ---------------------------------------------------------------- 6. the digests
+
+def two_day_project(tmp, name):
+    """Stored up to Sun 25 Oct; Mon 26 and Tue 27 Oct filed and waiting (a catch-up)."""
+    root = Path(tmp) / name
+    for d in ("2026-10-24", "2026-10-25", "2026-10-26", "2026-10-27"):
+        (root / "archive" / d).mkdir(parents=True, exist_ok=True)
+    (root / "_work").mkdir(parents=True, exist_ok=True)
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(root / "data" / "news.db")
+    con.execute("CREATE TABLE batches (batch_id TEXT, model TEXT, prompt_version TEXT, "
+                "submitted_at TEXT, requests INTEGER, status TEXT, collected_at TEXT)")
+    con.execute("CREATE TABLE placements (date TEXT, publisher TEXT, source_file TEXT)")
+    for d in ("2026-10-24", "2026-10-25"):
+        con.execute("INSERT INTO placements VALUES (?, 'Mint', ?)", (d, f"{d}/{d}_Mint.json"))
+    con.commit()
+    con.close()
+    return root
+
+
+def store(root, day):
+    """What extraction does to news.db for the purpose of this test: the day is stored."""
+    con = sqlite3.connect(root / "data" / "news.db")
+    con.execute("INSERT INTO placements VALUES (?, 'Mint', ?)", (day, f"{day}/{day}_Mint.json"))
+    con.commit()
+    con.close()
+
+
+def digests(tmp):
+    import p3_reader as R
+    kept_lock = P.LOCK
+
+    # (5) two new paper-days, one of which already has its file; the first opens a new
+    # week (Mon 26 Oct), so the week ending Sun 25 Oct is built once.
+    root = two_day_project(tmp, "dig")
+    P.LOCK = root / "_work" / "daily.lock"
+    ddir = root / "data" / "digests"
+    ddir.mkdir(parents=True)
+    (ddir / "2026-10-27_day.json").write_text(json.dumps(
+        dict(fake_digest(), built_at="2026-10-27T07:00:00",
+             window={"kind": "day", "from": "2026-10-27", "to": "2026-10-27"})))
+    work_before = sorted(p.name for p in (root / "_work").iterdir())
+    jobs = P.digest_jobs(["2026-10-26", "2026-10-27"], root)
+    check("FP-7 · jobs: 2 day digests + the finished week (Sun 25 Oct), once",
+          [(k, d) for k, d, _p in jobs],
+          [("day", "2026-10-26"), ("day", "2026-10-27"), ("week", "2026-10-25")])
+    stub = Stub()
+    code, out = go(root, stub)
+    built = sorted(p.name for p in ddir.iterdir())
+    check("FP-7 (5) · the run finishes", code, 0)
+    check("FP-7 (5) · 2 day files + 1 week file in data/digests/, no temp file left",
+          built, ["2026-10-25_week.json", "2026-10-26_day.json", "2026-10-27_day.json"])
+    check("FP-7 (5) · the existing day file was skipped, said, and not overwritten",
+          ("2026-10-27_day.json exists; skipped" in out,
+           len(stub.ran("--date 2026-10-27 --window day")),
+           json.loads((ddir / "2026-10-27_day.json").read_text())["built_at"]),
+          (True, 0, "2026-10-27T07:00:00"))
+    check("FP-7 (5) · the week digest is asked for by its Sunday, window week",
+          len(stub.ran("--date 2026-10-25 --window week --live")), 1)
+    check("FP-7 · each build is the paid --live command, writing to a temp name",
+          all("--live" in c and c.endswith(".json.tmp") for c in stub.ran("p3_digest.py")), True)
+    check("FP-7 · the digest step runs last, after group track",
+          stub.calls.index(stub.ran("p3_digest.py")[0]) > stub.calls.index(stub.ran("p3_group.py track")[0]),
+          True)
+    steps_seen = {s for c, s in zip(stub.calls, stub.lock_steps) if "p3_digest.py" in c}
+    check("FP-7 · the lock says step 10 digest while it builds", steps_seen, {"10 digest"})
+    # run_status reads `processing` while the digest step runs: the reader's own check
+    # against the lock the step holds.
+    P.write_lock("2026-10-27", "10 digest")
+    check("FP-7 · run_status() is `processing` during the digest step",
+          R.run_status()["state"], "processing")
+    P.drop_lock()
+    check("FP-7 · and `ready` once it is over", R.run_status()["state"], "ready")
+    check("FP-7 (8) · one health line per built digest, five numbers and `clean`",
+          [ln.strip() for ln in out.splitlines() if ln.strip().startswith("digest day 2026-10-26") and "stories shown" in ln],
+          ["digest day 2026-10-26 · 10 stories shown · write-ups 10 written / 0 fallen back · "
+           "0 sentences dropped · 0 page links missing · $0.0100 · clean"])
+    check("FP-7 (8) · the health line is kept in data/logs/digest_<date>.txt",
+          "· clean" in (root / "data" / "logs" / "digest_2026-10-26.txt").read_text(), True)
+    check("FP-7 · the closing line says what the digest step did",
+          "2 digest(s) built ($0.0200), 1 skipped (exists)" in out, True)
+    check("FP-7 (9) · nothing written into _work/",
+          sorted(p.name for p in (root / "_work").iterdir()), work_before)
+
+    # (5) a second run in the same week: the days are stored now; nothing new.
+    store(root, "2026-10-26"); store(root, "2026-10-27")
+    (root / "archive" / "2026-10-28").mkdir()
+    check("FP-7 (5) · a second run in the same week: a day file, 0 week files",
+          [(k, d) for k, d, _p in P.digest_jobs(["2026-10-28"], root)],
+          [("day", "2026-10-28")])
+    stub = Stub()
+    code, out = go(root, stub)
+    check("FP-7 (5) · and that run builds exactly that one",
+          (code, len(stub.ran("p3_digest.py")), len(stub.ran("--window week"))), (0, 1, 0))
+    check("FP-7 · a Tuesday run never backfills the older week (no week job at all)",
+          [k for k, _d, _p in P.digest_jobs(["2026-10-28"], root)].count("week"), 0)
+
+    # (6) an injected failure: the build crashes half-way through writing its file.
+    root = two_day_project(tmp, "dig_fail")
+    P.LOCK = root / "_work" / "daily.lock"
+    ddir = root / "data" / "digests"
+    ddir.mkdir(parents=True)
+    good = dict(fake_digest(), built_at="2026-10-25T07:00:00",
+                window={"kind": "day", "from": "2026-10-25", "to": "2026-10-25"})
+    (ddir / "2026-10-25_day.json").write_text(json.dumps(good))
+    stub = Stub(half_digest_on="--date 2026-10-27 --window day")
+    code, out = go(root, stub)
+    check("FP-7 (6) · the run stops with exit 1 at step 10, named",
+          (code, "STOPPED at step 10 · digest" in out, "day digest 2026-10-27 failed" in out),
+          (1, True, True))
+    check("FP-7 (6) · no partial file: neither the target nor its temp file exists",
+          sorted(p.name for p in ddir.iterdir()),
+          ["2026-10-25_day.json", "2026-10-26_day.json"])
+    check("FP-7 (6) · the earlier steps all ran (their outputs are theirs to keep)",
+          [bool(stub.ran(n)) for n in ("p2_extract.py", "p2_tag.py collect", "p2_embed.py",
+                                       "p3_index.py", "p3_group.py track")], [True] * 5)
+    check("FP-7 (6) · the lock is gone after the failure", P.LOCK.exists(), False)
+    kept_env = os.environ.get("P3_READER_WORK")
+    kept_dig = os.environ.get("P3_READER_DIGESTS")
+    os.environ["P3_READER_WORK"] = str(root / "_work")
+    os.environ["P3_READER_DIGESTS"] = str(ddir)
+    try:
+        check("FP-7 (6) · the last good digest is still listed, the failed one is not",
+              [d["ref"] for d in R.list_digests()], ["2026-10-26_day", "2026-10-25_day"])
+    finally:
+        for k, v in (("P3_READER_WORK", kept_env), ("P3_READER_DIGESTS", kept_dig)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # (7) cap refusal: the estimate is above the ceiling -> nothing built, one line.
+    root = two_day_project(tmp, "dig_cap")
+    P.LOCK = root / "_work" / "daily.lock"
+    kept_cap = P.KNOBS["digest_cap_usd"]
+    P.KNOBS["digest_cap_usd"] = 0.03       # 2 days (0.022) + a week (0.011) = 0.033
+    try:
+        stub = Stub()
+        code, out = go(root, stub)
+    finally:
+        P.KNOBS["digest_cap_usd"] = kept_cap
+    refused = [ln for ln in out.splitlines() if "REFUSED" in ln]
+    check("FP-7 (7) · cap refusal: no build started, no file, one line",
+          (len(stub.ran("p3_digest.py")), (root / "data" / "digests").exists()
+           and any((root / "data" / "digests").iterdir()), len(refused)), (0, False, 1))
+    check("FP-7 (7) · the line names the estimate and the ceiling",
+          "estimated $0.033, above its ceiling $0.03" in refused[0], True)
+    check("FP-7 (7) · and gives the hand commands", out.count("p3_digest.py build") >= 3, True)
+    check("FP-7 (7) · the run still finishes, saying the digest was refused",
+          (code, "digest refused" in out), (0, True))
+
+    # (8) health: each of the four count lines and the cost line can say `check`.
+    check("FP-7 (8) · a clean digest is clean", P.digest_health(fake_digest())["verdict"], "clean")
+    for name, kw, want in (
+            ("stories", {"stories": 4}, "check: stories"),
+            ("fallen back", {"fallen": 3}, "check: fallen back"),
+            ("page links", {"missing": 1}, "check: page links"),
+            ("dropped", {"drops": 6}, "check: dropped"),
+            ("cost", {"cost": 0.011}, "check: cost")):
+        check(f"FP-7 (8) · health line `{name}`", P.digest_health(fake_digest(**kw))["verdict"], want)
+    h = P.digest_health(fake_digest(fallen=2, drops=5))
+    check("FP-7 (8) · exactly at the lines is still clean (2 fallen back, 5 dropped)",
+          (h["writeups_fallen_back"], h["sentences_dropped"], h["verdict"]), (2, 5, "clean"))
+    check("FP-7 (8) · two failing lines are both named",
+          P.digest_health(fake_digest(stories=3, missing=2))["verdict"],
+          "check: stories, page links")
+
+    # --health: the same line for a digest built by hand (L4), free, nothing else run.
+    hand = Path(tmp) / "hand_day.json"
+    hand.write_text(json.dumps(dict(fake_digest(fallen=3), window={"kind": "day", "to": "2026-11-03"})))
+    kept_argv, buf = sys.argv, io.StringIO()
+    sys.argv = ["p3_daily.py", "--health", str(hand)]
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = P.main()
+    finally:
+        sys.argv = kept_argv
+    check("FP-7 · --health prints the line for a hand-built digest and runs nothing",
+          (code, buf.getvalue().strip().startswith("digest day 2026-11-03 · 10 stories shown"),
+           buf.getvalue().strip().endswith("check: fallen back")), (0, True, True))
+
+    # A week can be named by a Sunday with no paper (27 Sep, 4 Oct are missing): the
+    # job is still made when any day of that week is stored.
+    root = two_day_project(tmp, "dig_nosun")
+    con = sqlite3.connect(root / "data" / "news.db")
+    con.execute("DELETE FROM placements WHERE date = '2026-10-25'")
+    con.commit(); con.close()
+    check("FP-7 · a week whose Sunday has no paper still gets its week job",
+          [(k, d) for k, d, _p in P.digest_jobs(["2026-10-26"], root)],
+          [("day", "2026-10-26"), ("week", "2026-10-25")])
+    P.LOCK = kept_lock
+
+
 def main():
     real_lock = P.LOCK
     check("the real lock file is not sitting there before the test",
@@ -483,6 +733,7 @@ def main():
             catch_up(tmp)
             after_filing(tmp)
             batch(tmp)
+            digests(tmp)
     finally:
         P.LOCK = real_lock
 

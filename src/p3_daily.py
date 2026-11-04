@@ -15,10 +15,27 @@ WHAT IT DOES
       7 group run    stage 1: today's day-groups                                   free
       8 group track  stage 2: join today's groups to earlier days                  free
       9 judge        SKIPPED — K2 has not built it yet                             —
+     10 digest       a day digest per paper-day this run processed, and the week     PAID
+                     digest once when a new Mon-Sun week starts (FP-7, 4 Nov)
 
   It stops at the first failure and names the step. It prints one summary line at the
-  end. The digest is NOT in this run: it is built when the page is opened, under K1's
-  daily cap, so the morning run never writes a digest nobody read.
+  end.
+
+  THE DIGEST STEP (FP-7, item 13, TC-15 - TC-19). Kunaal's call, 4 Nov: the morning run
+  builds the digests, so the page always has today's and "Past digests" grows by itself.
+  Files: `data/digests/<date>_day.json` for each paper-day this run processed, and
+  `data/digests/<sunday>_week.json` for the Mon-Sun week just finished, the first time a
+  run processes a day of a NEW week (a week with no stored day before this run). A file
+  that exists is never overwritten: it is skipped and said so. Older weeks are never
+  backfilled here; build one by hand with
+      .venv/bin/python src/p3_digest.py build --date <sunday> --window week --live \
+          --out data/digests/<sunday>_week.json
+  The step has its own ceiling (`digest_cap_usd`): its estimate is in the one start
+  approval, and above the ceiling it builds nothing and says so in one line. Each file is
+  written to a temporary name in the same folder and renamed over the target only once
+  it is whole (atomic write: a reader sees the old state or the new file, never half of
+  one). One health line per digest goes to the screen and to
+  `data/logs/digest_<date>.txt`.
 
 WHY ONE COMMAND, AND WHY IT WAITS BY ITSELF
   Nine commands typed by hand in the right order, with the right interpreter and the
@@ -52,6 +69,8 @@ WHY ONE COMMAND, AND WHY IT WAITS BY ITSELF
 
 DATA (one owner per file)
   writes  _work/daily.lock        while the run is going; removed on the way out, always
+          data/digests/*.json     step 10, through p3_digest.py --out, temp file + rename
+          data/logs/digest_<date>.txt   step 10's health lines (appended)
   reads   data/news.db (read-only, `mode=ro`)   only to see whether a batch is open
   Everything else is written by the commands it calls. This wrapper CALLS other strands'
   commands exactly as they exist and never changes them, and it never touches
@@ -62,6 +81,9 @@ HOW TO RUN (from ~/news-intel)
                                                  the exact commands; run NOTHING
   .venv/bin/python src/p3_daily.py               the real run; asks once, then goes
   .venv/bin/python src/p3_daily.py --date 2026-11-03     a particular paper-day
+  .venv/bin/python src/p3_daily.py --health data/digests/2026-11-03_day.json
+                                                 free: the TC-18 health line of a digest
+                                                 built by hand; reads that file only
   There is deliberately no flag that skips the question. The one approval is the design
   (Q9a): one `y` covers the whole run, and nothing paid starts without a person there.
   `run(assume_yes=True)` exists so the tests can drive it without stdin; it is not a
@@ -92,7 +114,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,9 +178,39 @@ KNOBS = {
     # A lock older than this whose process is gone is treated as a crash and taken over.
     # It only has to be longer than the gap between writing the file and the first step.
     "stale_lock_minutes": 1,
+
+    # --- step 10, the digests (FP-7) --------------------------------------------
+    # The digest step's own ceiling (TC-16): above it the step builds nothing. PLACED.
+    # Measured: one live day digest $0.011 (1 Nov), so $0.10 is a normal morning (one day
+    # + sometimes a week) several times over, and a catch-up of many days stops to be
+    # looked at instead of spending quietly. It is checked on the estimate before the
+    # first build and on the real spend (the files' own cost) before each next one.
+    # Change it if: the week of use shows a normal morning's digests above $0.05.
+    "digest_cap_usd": 0.10,
+    "digest_estimate_usd": {
+        # MEASURED 1 Nov: one live day digest, 10 stories, $0.011.
+        "day": 0.011,
+        # MEASURED 4 Nov from the file: the live week digest of 15 Oct (`_work/
+        # digest_live.json`, d0.1) cost $0.0109 -- the same 10 write-ups as a day. Change
+        # it with the first d0.2 week digest's health line.
+        "week": 0.011,
+    },
+    # TC-18 health lines, per digest. PLACED, calibrated in the week of use: a digest
+    # outside any of them ends its line with `check: <which>` instead of `clean`.
+    # Change any of them if: the week of use shows normal days crossing it (too tight)
+    # or a bad digest passing it (too loose).
+    "digest_health": {
+        "min_stories_shown": 5,          # fewer means a short day or a grouping gap
+        "max_writeups_fallen_back": 2,   # of 10: more means the writer or its checks fail
+        "max_page_links_missing": 0,     # every coverage row should open its PDF page
+        "max_sentences_dropped": 5,      # by the citation / number checks, write-ups + so far
+        # and cost <= digest_cap_usd (the fifth line; the ceiling itself, not a copy)
+    },
 }
 
-PAID = ("archive", "extract", "tag")
+PAID = ("archive", "extract", "tag", "digest")
+DIGESTS = ROOT / "data" / "digests"
+DIGEST_KEYS = ("stories", "window", "built_at")       # what p3_reader calls a digest
 
 
 # ---------------------------------------------------------------- the plan
@@ -275,13 +327,172 @@ def plan(date=None, root=ROOT):
         {"n": 9, "name": "judge", "what": "SKIPPED — K2 has not built the judge yet",
          "python": None, "args": [], "paid": False, "estimate": 0.0, "kind": "skipped"},
     ]
+    jobs = digest_jobs(days, root)
+    steps.append(
+        {"n": 10, "name": "digest", "what": "day digest per paper-day processed, week "
+         "digest when a new week starts (temp file, then renamed)",
+         "python": VENV, "args": [], "jobs": jobs,
+         # Nothing waiting yet (a normal morning, before step 1 files today's papers)
+         # still means one day digest, as extract counts at least one day.
+         "paid": True, "kind": "digest",
+         "estimate": digest_estimate(jobs) if jobs else KNOBS["digest_estimate_usd"]["day"]})
     return day, steps
+
+
+# ---------------------------------------------------------------- step 10, the digests
+
+def _monday(date):
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    return d - timedelta(days=d.weekday())
+
+
+def digest_jobs(days, root=ROOT):
+    """[(kind, date, path)] that step 10 would build for these processed paper-days.
+
+    One day digest per day. A week digest for the Mon-Sun week just finished, but only
+    when a processed day opens a NEW week: no stored day of its week other than the
+    days this run processes (TC-19). So the Monday run builds last week's once, a
+    Tuesday run builds none, and a catch-up builds each week it crosses into -- never an
+    older week (no backfill). Days with no stored paper in the finished week: no file.
+    Existing files stay in the list; `run_digests` skips them out loud.
+    """
+    have, _stems, _pubs = _stored(root)
+    days = sorted(set(days or []))
+    out = [("day", d, Path(root) / "data" / "digests" / f"{d}_day.json") for d in days]
+    weeks = []
+    for d in days:
+        mon = _monday(d)
+        week = {(mon + timedelta(days=i)).isoformat() for i in range(7)}
+        if (have & week) - set(days):
+            continue                                   # not a new week
+        sunday = (mon - timedelta(days=1)).isoformat()
+        prev = {(mon - timedelta(days=i)).isoformat() for i in range(1, 8)}
+        if sunday not in weeks and (have | set(days)) & prev:
+            weeks.append(sunday)
+    out += [("week", w, Path(root) / "data" / "digests" / f"{w}_week.json") for w in weeks]
+    return out
+
+
+def digest_estimate(jobs):
+    est = KNOBS["digest_estimate_usd"]
+    return round(sum(est[kind] for kind, _d, path in jobs if not Path(path).exists()), 4)
+
+
+def digest_args(kind, date, out, root=ROOT):
+    try:
+        out = Path(out).relative_to(Path(root))
+    except ValueError:
+        pass
+    return ["src/p3_digest.py", "build", "--date", date, "--window", kind, "--live",
+            "--out", str(out)]
+
+
+def digest_health(obj):
+    """The five TC-18 numbers of one built digest, and `clean` or `check: <which>`."""
+    stories = obj.get("stories") or []
+    report = obj.get("report") or {}
+    shown_n = len(stories)
+    written = sum(1 for s in stories if (s.get("writeup") or {}).get("sentences"))
+    fallen = sum(1 for s in stories if s.get("writeup") and not s["writeup"].get("sentences"))
+    dropped = sum(len((s.get(k) or {}).get("drops") or [])
+                  for s in stories for k in ("writeup", "story_so_far"))
+    missing = int(report.get("page_links_missing_pdf") or 0)
+    cost = round(sum(float((s.get(k) or {}).get("cost_usd") or 0)
+                     for s in stories for k in ("writeup", "story_so_far")), 6)
+    lines = KNOBS["digest_health"]
+    bad = [name for name, failed in (
+        ("stories", shown_n < lines["min_stories_shown"]),
+        ("fallen back", fallen > lines["max_writeups_fallen_back"]),
+        ("page links", missing > lines["max_page_links_missing"]),
+        ("dropped", dropped > lines["max_sentences_dropped"]),
+        ("cost", cost > KNOBS["digest_cap_usd"])) if failed]
+    return {"stories_shown": shown_n, "writeups_written": written,
+            "writeups_fallen_back": fallen, "sentences_dropped": dropped,
+            "page_links_missing": missing, "cost_usd": cost,
+            "verdict": "clean" if not bad else "check: " + ", ".join(bad)}
+
+
+def health_line(kind, date, h):
+    return (f"digest {kind} {date} · {h['stories_shown']} stories shown · write-ups "
+            f"{h['writeups_written']} written / {h['writeups_fallen_back']} fallen back · "
+            f"{h['sentences_dropped']} sentences dropped · {h['page_links_missing']} page "
+            f"links missing · ${h['cost_usd']:.4f} · {h['verdict']}")
+
+
+def digest_log(date, root=ROOT):
+    return Path(root) / "data" / "logs" / f"digest_{date}.txt"
+
+
+def run_digests(step, runner, root=ROOT, log=print):
+    """Step 10. ("ok" | "refused" | "failed", what to say in the closing line).
+
+    Each digest is built into `<target>.tmp` in the same folder by p3_digest.py, read
+    back whole, checked to be a digest, and only then renamed over the target
+    (`os.replace`, atomic on one file system). A failure removes the temporary file, so
+    no half digest ever exists and the reader keeps showing the last good one.
+    """
+    jobs = step.get("jobs") or []
+    if not jobs:
+        log("  no paper-day processed in this run: no digest to build")
+        return "ok", "no digest needed"
+    todo = [(k, d, Path(p)) for k, d, p in jobs if not Path(p).exists()]
+    for _k, _d, p in jobs:
+        if Path(p).exists():
+            log(f"  {Path(p).name} exists; skipped (never overwritten)")
+    cap = KNOBS["digest_cap_usd"]
+    est = digest_estimate(jobs)
+    if est > cap:
+        log(f"  digest step REFUSED: {len(todo)} digest(s) estimated ${est:.3f}, above its "
+            f"ceiling ${cap:.2f} (digest_cap_usd); nothing built. By hand, one at a time:")
+        for k, d, p in todo:
+            log("      " + shown(dict(step, kind="command", args=digest_args(k, d, p, root)), root))
+        return "refused", f"digest refused (estimate ${est:.3f} > ${cap:.2f})"
+    spent, built = 0.0, []
+    for k, d, target in todo:
+        nxt = KNOBS["digest_estimate_usd"][k]
+        if spent + nxt > cap:
+            log(f"  digest step STOPPED at its ceiling: ${spent:.4f} spent, the next "
+                f"({k} {d}) would pass ${cap:.2f}; not built")
+            return "refused", f"{len(built)} digest(s) built, then the ceiling"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.unlink(missing_ok=True)
+        args = digest_args(k, d, tmp, root)
+        log(f"  digest {k} {d} · {shown(dict(step, kind='command', args=args), root)}")
+        try:
+            code = run_command(dict(step, args=args), runner, root)
+            obj = json.loads(tmp.read_text(encoding="utf-8")) if code == 0 else None
+            if not isinstance(obj, dict) or not all(key in obj for key in DIGEST_KEYS):
+                raise ValueError(f"exit {code}" if code != 0 else "not a whole digest")
+            os.replace(tmp, target)
+        except (OSError, ValueError) as e:
+            tmp.unlink(missing_ok=True)
+            return "failed", f"{k} digest {d} failed ({e}); no file written"
+        h = digest_health(obj)
+        spent += h["cost_usd"]
+        built.append(target.name)
+        line = health_line(k, d, h)
+        log("  " + line)
+        out = digest_log(d, root)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {line}\n")
+    skipped = len(jobs) - len(todo)
+    return "ok", (f"{len(built)} digest(s) built (${spent:.4f})"
+                  + (f", {skipped} skipped (exists)" if skipped else ""))
 
 
 def shown(step, root=ROOT):
     """One step's command exactly as it would be typed, from ~/news-intel."""
     if step["kind"] == "skipped":
         return "(nothing to run)"
+    if step["kind"] == "digest":
+        jobs = step.get("jobs") or []
+        if not jobs:
+            return "(a day digest for each paper-day step 1 files; none waiting now)"
+        return "\n     ".join(
+            shown(dict(step, kind="command", args=digest_args(k, d, p, root)), root)
+            + (" · exists, skipped" if Path(p).exists() else "") for k, d, p in jobs)
     if step["kind"] == "extract" and len(step.get("days") or []) != 1:
         if not step.get("days"):
             return "(no archived day is waiting to be extracted)"
@@ -319,6 +530,8 @@ def print_plan(day, steps, root=ROOT):
           f"(estimates, not quotes; each command caps and logs its own spend)")
     print(f"Tagging goes through the Batch API: submit, then check every "
           f"{KNOBS['batch_poll_minutes']} min for up to {KNOBS['batch_wait_hours']} h, then collect.")
+    print(f"Digests have their own ceiling ${KNOBS['digest_cap_usd']:.2f}; days filed by "
+          f"step 1 add a day digest each (≈ ${KNOBS['digest_estimate_usd']['day']:.3f}).")
     return total
 
 
@@ -555,7 +768,7 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
         return 1
 
     started = time.time()
-    ran, paused = [], None
+    ran, paused, digest_said = [], None, "digest step not reached"
     try:
         for step in steps:
             write_lock(day, f"{step['n']} {step['name']}")
@@ -578,6 +791,11 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
                         if s.get("needs_date"):
                             s["days"] = waiting
                             s["args"] = _extract_args(waiting[0]) if waiting else s["args"]
+                        if s["kind"] == "digest":
+                            # Worked out BEFORE extraction stores these days, so "a new
+                            # week" means a week with no stored day before this run.
+                            s["jobs"] = digest_jobs(waiting, root)
+                            s["estimate"] = digest_estimate(s["jobs"])
                     if waiting:
                         day = waiting[-1]
                         log(f"  papers filed: {len(waiting)} day(s) to extract, oldest first: "
@@ -596,6 +814,13 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
                         return stop(dict(step, what=f"{step['what']} · failed on {d}"),
                                     started, ran, log)
                 ran.append(step["name"])
+                continue
+            if step["kind"] == "digest":
+                outcome, digest_said = run_digests(step, runner, root, log)
+                if outcome == "failed":
+                    return stop(dict(step, what=digest_said), started, ran, log)
+                if outcome == "ok":
+                    ran.append(step["name"])
                 continue
             if step["kind"] == "tag":
                 outcome = run_tag(dict(step, day=day), runner, capture, sleep, root, log)
@@ -621,7 +846,7 @@ def run(date=None, dry_run=False, assume_yes=False, root=ROOT,
     what = (f"extracted {done[0]}" if len(done) == 1 else
             f"extracted {len(done)} days, {done[0]} – {done[-1]}" if done else
             "no day needed extracting")
-    log(f"\nDaily run finished · {what} · {len(ran)} steps ran, "
+    log(f"\nDaily run finished · {what} · {digest_said} · {len(ran)} steps ran, "
         f"1 skipped (judge) · {mins:.0f} min · paid steps ran: "
         f"{', '.join(n for n in ran if n in PAID) or 'none'} · estimated ≈ ${total:.2f} "
         f"(real spend: cost_log and each command's own log)")
@@ -645,8 +870,16 @@ def main():
     p.add_argument("--date", help="paper-day YYYY-MM-DD (default: newest folder in archive/)")
     p.add_argument("--dry-run", action="store_true",
                    help="print the steps, the estimate and the commands; run nothing")
+    p.add_argument("--health", metavar="DIGEST_JSON",
+                   help="free: print the TC-18 health line of a digest file built by hand; "
+                        "runs nothing else")
     # No --yes on purpose: see HOW TO RUN. The approval is the design, not a convenience.
     args = p.parse_args()
+    if args.health:
+        obj = json.loads(Path(args.health).read_text(encoding="utf-8"))
+        window = obj.get("window") or {}
+        print(health_line(window.get("kind"), window.get("to"), digest_health(obj)))
+        return 0
     try:
         return run(date=args.date, dry_run=args.dry_run)
     except KeyboardInterrupt:
