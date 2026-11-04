@@ -1231,8 +1231,9 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .result-row button.result-open:hover h4 { text-decoration: underline; }
 .result-meta { margin: 2px 0 0; font-size: var(--s11); color: var(--text-muted); }
 
-/* F5 · CITED / FOUND stay in capitals as a grey label, the small grey line style: no
-   box, no border (board "K1 (7)"); the word says whether the answer used the story. */
+/* F5 · CITED / FOUND stay in capitals in the small grey line style: no box, no border
+   (board "K1 (7)"). CITED keeps its ochre as ink, not fill (Kunaal, 5 Nov): that rule
+   sits after the style rule below, which would otherwise paint it grey. */
 .mark { letter-spacing: 0.06em; white-space: nowrap; }
 
 /* Nothing in your papers (state 5), and its closest stories. */
@@ -1530,6 +1531,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--text-muted);
 }
 .answer-working { font-style: italic; }
+.mark-cited { color: var(--ochre); }   /* after the rule above: ochre ink (Kunaal, 5 Nov) */
 .results-fold { display: block; text-align: left; }
 .results-fold:hover { color: var(--ink); }
 .pane-results.is-folded { margin-top: 6px; }

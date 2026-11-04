@@ -3088,6 +3088,17 @@ def look_i7():
     check("[page] F5 · style rule: only the in-progress line is italic",
           {k: _look(css, k).get("font-style") for k in F5_GREY_KINDS},
           {k: ("italic" if k == ".answer-working" else None) for k in F5_GREY_KINDS})
+    # Same specificity as the shared `.mark` rule, so it must come AFTER it to win (the
+    # first version came before and the browser drew CITED grey: caught by the run check).
+    rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
+    def last_colour(sel):
+        return max([i for i, (sl, b) in enumerate(rules)
+                    if sel in [x.strip() for x in sl.split(",")] and "color:" in b], default=-1)
+    check("[page] F5 · CITED is ochre ink (Kunaal, 5 Nov), set after the grey rule; FOUND "
+          "keeps the line's grey",
+          [_look(css, ".mark-cited").get("color"), last_colour(".mark-cited") > last_colour(".mark"),
+           _look(css, ".mark-found").get("color")],
+          ["var(--ochre)", True, None])
     check("[page] F5 · CITED / FOUND: no box, no border, no fill",
           [_look(css, k).get(p) for k in (".mark", ".mark-cited", ".mark-found")
            for p in ("background", "border", "padding")], [None] * 9)
