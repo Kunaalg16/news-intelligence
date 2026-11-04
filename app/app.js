@@ -48,7 +48,8 @@ const S = {
   ref: 'latest',
   digest: null,
   digests: [],
-  isPast: false,         /* the loaded digest is not the newest one */
+  isPast: false,         /* the loaded digest is not the newest of its own kind */
+  view: 'day',           /* F2 · Day | Week, the pref 'digest_view' */
   status: null,
   cost: null,
   read: {},              /* text_hash -> read_at | null */
@@ -361,6 +362,11 @@ function unreadCount() {
 function renderHeader() {
   document.getElementById('window-text').textContent =
     S.digest ? windowText(S.digest.window) : '';
+  const switchSlot = document.getElementById('digest-switch');
+  if (switchSlot) {
+    clear(switchSlot);
+    if (S.digest && S.digests.length) switchSlot.append(digestSwitch());
+  }
 
   const today = new Date();
   document.getElementById('today-date').textContent =
@@ -436,7 +442,8 @@ function renderDrawer() {
     drawer.append(el('p', { class: 'past-banner' },
       el('span', { class: 'past-banner-label', text: 'Past digest' }),
       el('button', { class: 'reset past-back', type: 'button',
-                     onclick: () => { S.screen = 'today'; loadDigest('latest', null); } },
+                     onclick: () => { S.screen = 'today';
+                                      loadDigest(viewRef(S.digests, S.view), null); } },
         'Back to today')));
   }
 
@@ -1579,7 +1586,7 @@ function isOpenDigest(d) {
 
 function pastScreen(pane) {
   pane.append(el('h2', { class: 'screen-title', text: 'Past digests' }));
-  pane.append(el('ul', { class: 'plain-list' }, S.digests.map((d) => el('li', {},
+  pane.append(el('ul', { class: 'plain-list' }, pastRows(S.digests).map((d) => el('li', {},
     el('button', {
       class: 'reset plain-row', type: 'button',
       /* "latest" is a request, not a name, so the open digest is the one whose build
@@ -1587,7 +1594,10 @@ function pastScreen(pane) {
       'aria-current': isOpenDigest(d) ? 'true' : null,
       onclick: () => { S.screen = 'today'; loadDigest(d.ref, null); },
     },
-      el('span', { class: 'plain-name', text: windowText(d.window) }),
+      el('span', { class: 'plain-name' }, windowText(d.window),
+        DIGEST_KIND_LABEL[digestKind(d)]
+          ? el('span', { class: 'kind-label', text: DIGEST_KIND_LABEL[digestKind(d)] })
+          : null),
       el('span', { class: 'plain-sub',
         text: 'built ' + (d.built_at ? dateWithDay(d.built_at) + ' '
                                        + timeOfDay(d.built_at) : '')
@@ -1610,12 +1620,77 @@ async function loadDigest(ref, thenOpenStoryId) {
   if (first) await openStory(first);
 }
 
-/* Whether what is loaded is the newest digest. The digests list is fetched at boot
-   rather than only when Past digests is opened, because this answer decides what the
-   drawer and the TODAY tab do, and it is one small request. */
+/* F2 (Q-F1 C) · Day | Week. Each half opens the newest digest of its `kind` (contract
+   §12.3 #17), picked by kind and never by ref or name; the choice is a pref. A week
+   digest older than every day digest is still Week's (its own dates in the header).
+   `since_last` digests are not shown in v1. */
+const DIGEST_VIEWS = ['day', 'week'];
+const DIGEST_VIEW_WORDS = { day: 'Day', week: 'Week' };
+const DIGEST_KIND_LABEL = { day: 'DAY', week: 'WEEK' };
+
+function digestKind(d) {
+  return d ? (d.kind || ((d.window || {}).kind) || null) : null;
+}
+
+function newestOfKind(list, kind) {
+  return (list || []).find((d) => digestKind(d) === kind) || null;
+}
+
+/* The ref the chosen view opens: the newest of that kind, else the newest listed digest
+   (a world with no digest of that kind still opens something), else K3's 'latest'. */
+function viewRef(list, view) {
+  const pick = newestOfKind(list, view) || pastRows(list)[0];
+  return pick ? pick.ref : 'latest';
+}
+
+function storedView(value) {
+  return DIGEST_VIEWS.includes(value) ? value : 'day';
+}
+
+/* Past digests: day and week rows (and any with no kind), server order, newest first. */
+function pastRows(list) {
+  return (list || []).filter((d) => digestKind(d) !== 'since_last');
+}
+
+/* Whether what is loaded is the newest digest OF ITS OWN KIND. The digests list is
+   fetched at boot rather than only when Past digests is opened, because this answer
+   decides what the drawer and the TODAY tab do, and it is one small request. Comparing
+   with the newest of any kind would call the week digest "past" on every Week visit. */
 function markIfPast() {
-  S.isPast = Boolean(S.digest) && S.digests.length > 0
-             && S.digest.built_at !== S.digests[0].built_at;
+  const kind = digestKind(S.digest);
+  const newest = newestOfKind(S.digests, kind) || S.digests[0];
+  S.isPast = Boolean(S.digest) && S.digests.length > 0 && Boolean(newest)
+             && S.digest.built_at !== newest.built_at;
+}
+
+/* The switch beside the digest's name. The pressed half is the open digest's kind (a
+   past day digest keeps Day pressed); pressing a half opens that kind's newest digest
+   and remembers the choice. A kind with no digest is drawn disabled, not hidden, so the
+   switch does not change shape from one morning to the next. */
+function digestSwitch() {
+  const open = digestKind(S.digest);
+  const pressed = DIGEST_VIEWS.includes(open) ? open : S.view;
+  const box = el('span', { class: 'digest-switch', role: 'group', 'aria-label': 'Digest' });
+  DIGEST_VIEWS.forEach((view, i) => {
+    if (i) box.append(el('span', { class: 'digest-switch-bar', 'aria-hidden': 'true',
+                                   text: '|' }));
+    const none = !newestOfKind(S.digests, view);
+    box.append(el('button', {
+      class: 'reset digest-switch-half', type: 'button',
+      'aria-pressed': view === pressed ? 'true' : 'false',
+      disabled: none ? true : null,
+      title: none ? 'No ' + DIGEST_VIEW_WORDS[view].toLowerCase() + ' digest yet' : null,
+      onclick: () => chooseView(view),
+    }, DIGEST_VIEW_WORDS[view]));
+  });
+  return box;
+}
+
+async function chooseView(view) {
+  S.view = view;
+  api.setPref('digest_view', view);
+  S.screen = 'today';
+  await loadDigest(viewRef(S.digests, view), null);
 }
 
 async function refreshRead() {
@@ -3958,8 +4033,14 @@ async function boot() {
   S.flags = (flags && flags.flags) || {};
   S.knobs = (flags && flags.knobs) || {};
 
-  const [status, digest, cost, follows] =
-    await Promise.all([api.status(), api.digest(S.ref), api.cost(), api.follows()]);
+  /* F2 · the list and the stored Day | Week choice come first: they pick the digest. */
+  const [status, list, viewPref, cost, follows] =
+    await Promise.all([api.status(), api.digests(), api.pref('digest_view'), api.cost(),
+                       api.follows()]);
+  S.digests = (list && list.digests) || [];
+  S.view = storedView(viewPref ? viewPref.value : null);
+  S.ref = viewRef(S.digests, S.view);
+  const digest = await api.digest(S.ref);
   S.appVersion = status ? status.app_version : null;     /* F3 · as loaded */
   window.addEventListener('focus', checkVersion);
   if (typeof setInterval === 'function') {        /* jsc (the suite's boot) has none */
@@ -3979,8 +4060,6 @@ async function boot() {
     S.read = (read && read.read) || {};
   }
 
-  const list = await api.digests();
-  S.digests = (list && list.digests) || [];
   markIfPast();
 
   const voted = await api.votes();
@@ -4022,7 +4101,7 @@ async function boot() {
       if (b.dataset.screen !== 'today') await leaveOpenStory();
       if (b.dataset.screen === 'today' && S.isPast) {
         S.screen = 'today';
-        await loadDigest('latest', null);
+        await loadDigest(viewRef(S.digests, S.view), null);
         return;
       }
       if (b.dataset.screen === 'boards') {
@@ -4102,6 +4181,8 @@ const EXPORTS = {
   exploreState, EXPLORE_LIMIT, FILTER_MENUS,
   threadSection, timelineView, graphView, removeLinkButton,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
+  DIGEST_VIEWS, DIGEST_VIEW_WORDS, DIGEST_KIND_LABEL, digestKind, newestOfKind, viewRef,
+  storedView, pastRows, digestSwitch, chooseView, pastScreen, renderHeader,
   keyAction, KEYS, CHEAT_SHEET, CHEAT_MARKS, FLAG_ELEMENTS, render, remember, undoLast,
   versionNotice, renderVersionLine, checkVersion, VERSION_WORDS, VERSION_CHECK_MINUTES,
   paneScrollRule, PANE_SCROLL_LATEST, liveKey, holdPane, placePane,

@@ -1183,6 +1183,76 @@ APP.S.digests = [];
 APP.markIfPast();
 eq("with nothing to compare against, nothing is called past", APP.S.isPast, false);
 
+// F2 (fo-1) · Day | Week, picked by kind. The refs are deliberately misleading (a "week"
+// in a day's name and the reverse), so a pick by name or ref fails here.
+var F2_LIST = [
+  {ref: "week_named_day", kind: "day", built_at: "2026-11-05T01:35:43",
+   window: {kind: "day", from: "2026-11-04", to: "2026-11-04"}},
+  {ref: "since_x", kind: "since_last", built_at: "2026-11-04T22:00:00",
+   window: {kind: "since_last", from: "2026-11-03", to: "2026-11-04"}},
+  {ref: "older_day", kind: "day", built_at: "2026-11-04T20:53:06",
+   window: {kind: "day", from: "2026-11-03", to: "2026-11-03"}},
+  {ref: "day_named_week", kind: "week", built_at: "2026-11-01T16:38:51",
+   window: {kind: "week", from: "2026-10-09", to: "2026-10-15"}},
+  {ref: "first_day", kind: "day", built_at: "2026-11-01T16:01:49",
+   window: {kind: "day", from: "2026-10-11", to: "2026-10-11"}}];
+eq("[page] F2 · Day opens the newest day digest, by kind",
+   APP.viewRef(F2_LIST, "day"), "week_named_day");
+eq("[page] F2 · Week opens the newest week digest, by kind, however old",
+   APP.viewRef(F2_LIST, "week"), "day_named_week");
+eq("[page] F2 · with no digest of the chosen kind, the newest listed one opens",
+   APP.viewRef(F2_LIST.filter(function (d) { return d.kind === "day"; }), "week"),
+   "week_named_day");
+eq("[page] F2 · and with no list at all, K3's 'latest'", APP.viewRef([], "day"), "latest");
+eq("[page] F2 · a stored view is day or week; anything else reads as day",
+   [APP.storedView("week"), APP.storedView("day"), APP.storedView("since_last"),
+    APP.storedView(null), APP.storedView("Week")], ["week", "day", "day", "day", "day"]);
+eq("[page] F2 · the kind is read from the row, or its window when the row has none",
+   [APP.digestKind({kind: "week"}), APP.digestKind({window: {kind: "day"}}),
+    APP.digestKind({}), APP.digestKind(null)], ["week", "day", null, null]);
+
+// past = not the newest of its OWN kind: the week digest is current under Week
+APP.S.digests = F2_LIST;
+APP.S.digest = {built_at: "2026-11-01T16:38:51", window: {kind: "week"}};
+APP.markIfPast();
+eq("[page] F2 · the newest week digest is not past, though day digests are newer",
+   APP.S.isPast, false);
+APP.S.digest = {built_at: "2026-11-04T20:53:06", window: {kind: "day"}};
+APP.markIfPast();
+eq("[page] F2 · an older day digest is past", APP.S.isPast, true);
+
+// Past digests: day and week rows, server order, each with its grey DAY / WEEK
+eq("[page] F2 · Past digests lists day and week rows, newest first, no since_last",
+   APP.pastRows(F2_LIST).map(function (d) { return d.ref; }),
+   ["week_named_day", "older_day", "day_named_week", "first_day"]);
+var F2_PANE = document.createElement("section");
+APP.S.digest = {built_at: "2026-11-05T01:35:43", window: {kind: "day"}};
+APP.pastScreen(F2_PANE);
+var f2Labels = [];
+(function walk(n) {
+  if (n && n.className === "kind-label") f2Labels.push(n.textContent);
+  ((n && n.children) || []).forEach(walk);
+})(F2_PANE);
+eq("[page] F2 · each Past digests row carries DAY or WEEK in capitals, in its own label",
+   f2Labels, ["DAY", "DAY", "WEEK", "DAY"]);
+eq("[page] F2 · and the rows are the four, not five",
+   nodesOf(F2_PANE, "button").length, 4);
+
+// the switch: two halves, the open digest's kind pressed, a missing kind disabled
+APP.S.view = "week";
+var f2Switch = APP.digestSwitch();
+eq("[page] F2 · the switch reads Day | Week", textOf(f2Switch), "Day|Week");
+eq("[page] F2 · the open digest's kind is the pressed half (a day digest open keeps Day "
+   + "pressed, whatever the stored view)",
+   nodesOf(f2Switch, "button").map(function (b) { return b.attrs["aria-pressed"]; }),
+   ["true", "false"]);
+APP.S.digests = F2_LIST.filter(function (d) { return d.kind === "day"; });
+var f2None = controlsOf(APP.digestSwitch());
+eq("[page] F2 · a kind with no digest is drawn disabled, not hidden",
+   f2None.map(function (c) { return [c.label, c.disabled]; }),
+   [["Day", false], ["Week", true]]);
+APP.S.digests = []; APP.S.digest = null; APP.S.view = "day";
+
 // the nine keys of §8.9, and the rule that none of them fires while typing
 var NINE = {j: "next", k: "previous", o: "open", Escape: "back", u: "keep_unread",
             f: "follow", p: "pin", t: "thread_view", "?": "help"};
@@ -5818,7 +5888,8 @@ var W = null;
 function newWorld() {
   return { flags: clone(DATA.get['/api/flags'][1]), conv: {conversation_id: 'c_i9',
            started_at: '2026-11-04T09:00:00', turns: []},
-           cost: clone(DATA.get['/api/cost'][1]), stream: null, down: false };
+           cost: clone(DATA.get['/api/cost'][1]), stream: null, down: false,
+           prefs: {} };
 }
 function answerLike(id, question) {
   var a = clone(DATA.conversation.turns[0].answer);
@@ -5845,7 +5916,8 @@ function route(method, url, body) {
     if (path.indexOf('/api/thread/') === 0) return DATA.threads[tail] || [200, {entries: []}];
     if (path.indexOf('/api/new_since/') === 0)
       return DATA.since[tail] || [200, {new_since_read: []}];
-    if (path.indexOf('/api/pref/') === 0) return [200, {key: tail, value: null}];
+    if (path.indexOf('/api/pref/') === 0)           /* F2 · a stored pref reads back */
+      return [200, {key: tail, value: tail in W.prefs ? W.prefs[tail] : null}];
     if (path.indexOf('/api/passages/') === 0) return [404, {detail: 'no such passage set'}];
     if (DATA.get[path]) return DATA.get[path];
     MISSING.push(path);
@@ -5853,6 +5925,11 @@ function route(method, url, body) {
   }
   if (path === '/api/read' || path === '/api/read_state' || path === '/api/keep_unread')
     return [200, {read: {}}];
+  if (path.indexOf('/api/pref/') === 0) {
+    var key = decodeURIComponent(path.split('/').slice(3).join('/'));
+    W.prefs[key] = body.value;
+    return [200, {key: key, value: body.value}];
+  }
   if (path === '/api/follow') return [200, {follows: []}];
   if (path === '/api/boards')
     return [200, {board_id: 'b2', boards: clone(DATA.boards).concat(
@@ -5900,8 +5977,8 @@ function restoreS() {
     APP.S[k2] = v && v.__set ? new Set(v.__set) : clone(v);
   }
 }
-var PAGE_IDS = ['window-text', 'today-date', 'unread-count', 'cost-header', 'status-line',
-                'drawer', 'reading', 'assistant', 'toast'];
+var PAGE_IDS = ['window-text', 'digest-switch', 'today-date', 'unread-count', 'cost-header',
+                'status-line', 'drawer', 'reading', 'assistant', 'toast'];
 function freshDom() {
   document.byId = {};
   document.body = new Node('body');
@@ -6059,6 +6136,68 @@ var STATES = [
       fn({key: '?', target: document.body, preventDefault: function () {}}); }); }},
 ];
 """
+
+
+def f2_page():
+    """F2 (fo-1) · Day | Week through the page's real boot, on the real server's answers.
+
+    Pass lines, written before the run: the first boot (nothing stored) opens the newest
+    day digest's ref; pressing Week stores 'week' with set_pref and opens the newest week
+    digest's ref; a second boot with 'week' stored opens the week ref again (remembered
+    across reload); pressing Day stores 'day'. The refs are the real list's, picked here
+    by `kind` (contract §12.3 #17). What would pass while broken: a page that opened the
+    week ref by name -- the expected refs are read from `kind`, not from names.
+    """
+    world, _threaded = _i9_world()
+    listed = world["get"]["/api/digests"][1]["digests"]
+    day = next((d["ref"] for d in listed if d.get("kind") == "day"), None)
+    week = next((d["ref"] for d in listed if d.get("kind") == "week"), None)
+    if not (day and week):
+        skip("[page] F2 · Day | Week through the boot",
+             "the real list lacks a day or a week digest")
+        return
+    got = _jsc(I6_HARNESS + I8_HARNESS + I9_HARNESS + r"""
+function half(word) {
+  return nodesOf(document.byId['digest-switch'], 'button')
+    .filter(function (b) { return textOf(b) === word; })[0];
+}
+function pressed() {
+  return nodesOf(document.byId['digest-switch'], 'button')
+    .map(function (b) { return textOf(b) + ':' + b.attrs['aria-pressed']; });
+}
+function prefPosts() {
+  return CALLS.filter(function (c) { return c[0] === 'POST' && c[1] === '/api/pref/digest_view'; })
+    .map(function (c) { return c[2].value; });
+}
+async function main() {
+  await enter({name: 'f2 first'});
+  OUT.first = [APP.S.ref, APP.S.view, pressed()];
+  var w = half('Week');
+  await Promise.all(w.handlers.click.map(function (fn) { return fn(EVT(w)); }));
+  await settle();
+  OUT.week = [APP.S.ref, APP.S.view, prefPosts(), W.prefs.digest_view];
+  var kept = W.prefs.digest_view;
+  await enter({name: 'f2 reload', world: function (x) { x.prefs = {digest_view: kept}; }});
+  OUT.reload = [APP.S.ref, APP.S.view];
+  var d = half('Day');
+  await Promise.all(d.handlers.click.map(function (fn) { return fn(EVT(d)); }));
+  await settle();
+  OUT.day = [APP.S.ref, prefPosts()];
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", world)
+    check("[page] F2 · the Day | Week boot ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    check("[page] F2 · a first boot (nothing stored) opens the newest day digest, Day drawn",
+          [got["first"][0], got["first"][1], got["first"][2][0]], [day, "day", "Day:true"])
+    check("[page] F2 · pressing Week opens the newest week digest and stores 'week' once",
+          got["week"], [week, "week", ["week"], "week"])
+    check("[page] F2 · a reload with 'week' stored opens the week digest again",
+          got["reload"], [week, "week"])
+    check("[page] F2 · pressing Day goes back to the newest day digest and stores 'day'",
+          got["day"], [day, ["day"]])
 
 
 def i9_every_button():
@@ -6844,7 +6983,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",

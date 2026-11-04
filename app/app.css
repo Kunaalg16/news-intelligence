@@ -159,6 +159,18 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--text-muted);
 }
 
+/* F2 · Day | Week beside the digest's name: two plain words, the open one in ink. */
+.window-row { display: flex; align-items: baseline; gap: 12px; margin: 2px 0 0; }
+.window-row .window { margin: 0; }
+.digest-switch { display: inline-flex; align-items: baseline; gap: 6px;
+                 font-size: var(--s125); }
+.digest-switch-half { color: var(--text-muted); font-weight: 500; text-decoration: underline;
+                      padding: 2px 0; }
+.digest-switch-half[aria-pressed="true"] { color: var(--ink); font-weight: 600;
+                                           text-decoration: none; }
+.digest-switch-half:disabled { text-decoration: none; cursor: default; }
+.digest-switch-bar { color: var(--rule); }
+
 .nav {
   grid-area: nav;
   display: flex;
@@ -861,6 +873,9 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .plain-row:hover { background: var(--drawer-ground); }
 .plain-name { font-family: var(--serif); font-size: var(--s19); display: block; }
 .plain-sub { font-size: var(--s125); color: var(--text-muted); }
+/* The small grey label (style rule §4.2): DAY / WEEK on a Past digests row. */
+.kind-label { margin-left: 10px; font-family: var(--sans); font-size: var(--s115);
+              font-weight: 500; letter-spacing: 0.06em; color: var(--text-muted); }
 .pin-source { font-size: var(--s125); color: var(--text-muted); display: block; }
 .empty-note { font-size: var(--s14); color: var(--text-muted); }
 
