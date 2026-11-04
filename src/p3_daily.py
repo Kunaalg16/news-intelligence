@@ -31,7 +31,9 @@ WHAT IT DOES
       .venv/bin/python src/p3_digest.py build --date <sunday> --window week --live \
           --out data/digests/<sunday>_week.json
   The step has its own ceiling (`digest_cap_usd`): its estimate is in the one start
-  approval, and above the ceiling it builds nothing and says so in one line. Each file is
+  approval. It builds oldest first and stops before a digest that would pass the
+  ceiling (real spend so far + that digest's estimate); the rest are listed as hand
+  commands in one STOPPED line (Kunaal, 4 Nov: build until the ceiling). Each file is
   written to a temporary name in the same folder and renamed over the target only once
   it is whole (atomic write: a reader sees the old state or the new file, never half of
   one). One health line per digest goes to the screen and to
@@ -180,11 +182,11 @@ KNOBS = {
     "stale_lock_minutes": 1,
 
     # --- step 10, the digests (FP-7) --------------------------------------------
-    # The digest step's own ceiling (TC-16): above it the step builds nothing. PLACED.
-    # Measured: one live day digest $0.011 (1 Nov), so $0.10 is a normal morning (one day
-    # + sometimes a week) several times over, and a catch-up of many days stops to be
-    # looked at instead of spending quietly. It is checked on the estimate before the
-    # first build and on the real spend (the files' own cost) before each next one.
+    # The digest step's own ceiling (TC-16). PLACED. Measured: live day digests $0.011
+    # (1 Nov) and $0.0059 (3 Nov, L4), so $0.10 is a normal morning (one day + sometimes
+    # a week) several times over. Build until the ceiling (Kunaal, 4 Nov): oldest first;
+    # before each build, real spend so far (the files' own cost) + this digest's estimate
+    # must stay within it, else the step stops and lists the rest as hand commands.
     # Change it if: the week of use shows a normal morning's digests above $0.05.
     "digest_cap_usd": 0.10,
     "digest_estimate_usd": {
@@ -439,21 +441,25 @@ def run_digests(step, runner, root=ROOT, log=print):
     for _k, _d, p in jobs:
         if Path(p).exists():
             log(f"  {Path(p).name} exists; skipped (never overwritten)")
+    # Build until the ceiling (Kunaal, 4 Nov; replaces "refuse the whole step when the
+    # estimate is over"): oldest first, real spend counted from each built file, and the
+    # step stops before a digest whose estimate would pass the ceiling. The rest are
+    # listed as hand commands. A catch-up so gets its oldest days without typing.
     cap = KNOBS["digest_cap_usd"]
-    est = digest_estimate(jobs)
-    if est > cap:
-        log(f"  digest step REFUSED: {len(todo)} digest(s) estimated ${est:.3f}, above its "
-            f"ceiling ${cap:.2f} (digest_cap_usd); nothing built. By hand, one at a time:")
-        for k, d, p in todo:
-            log("      " + shown(dict(step, kind="command", args=digest_args(k, d, p, root)), root))
-        return "refused", f"digest refused (estimate ${est:.3f} > ${cap:.2f})"
+    todo.sort(key=lambda job: (job[1], job[0]))
     spent, built = 0.0, []
-    for k, d, target in todo:
+    for i, (k, d, target) in enumerate(todo):
         nxt = KNOBS["digest_estimate_usd"][k]
         if spent + nxt > cap:
-            log(f"  digest step STOPPED at its ceiling: ${spent:.4f} spent, the next "
-                f"({k} {d}) would pass ${cap:.2f}; not built")
-            return "refused", f"{len(built)} digest(s) built, then the ceiling"
+            left = todo[i:]
+            log(f"  digest step STOPPED at its ceiling: {len(built)} built, ${spent:.4f} spent; "
+                f"the next ({k} {d}) would pass ${cap:.2f} (digest_cap_usd). "
+                f"{len(left)} not built; by hand, one at a time:")
+            for k2, d2, p2 in left:
+                log("      " + shown(dict(step, kind="command",
+                                          args=digest_args(k2, d2, p2, root)), root))
+            return "refused", (f"{len(built)} digest(s) built (${spent:.4f}), "
+                               f"{len(left)} left at the ceiling")
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".tmp")
         tmp.unlink(missing_ok=True)

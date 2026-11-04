@@ -636,7 +636,8 @@ def digests(tmp):
           (1, True, True))
     check("FP-7 (6) · no partial file: neither the target nor its temp file exists",
           sorted(p.name for p in ddir.iterdir()),
-          ["2026-10-25_day.json", "2026-10-26_day.json"])
+          # oldest first: the 25 Oct week is built before the 27 Oct day fails
+          ["2026-10-25_day.json", "2026-10-25_week.json", "2026-10-26_day.json"])
     check("FP-7 (6) · the earlier steps all ran (their outputs are theirs to keep)",
           [bool(stub.ran(n)) for n in ("p2_extract.py", "p2_tag.py collect", "p2_embed.py",
                                        "p3_index.py", "p3_group.py track")], [True] * 5)
@@ -647,7 +648,8 @@ def digests(tmp):
     os.environ["P3_READER_DIGESTS"] = str(ddir)
     try:
         check("FP-7 (6) · the last good digest is still listed, the failed one is not",
-              [d["ref"] for d in R.list_digests()], ["2026-10-26_day", "2026-10-25_day"])
+              [d["ref"] for d in R.list_digests()],
+              ["2026-10-25_week", "2026-10-26_day", "2026-10-25_day"])
     finally:
         for k, v in (("P3_READER_WORK", kept_env), ("P3_READER_DIGESTS", kept_dig)):
             if v is None:
@@ -655,25 +657,31 @@ def digests(tmp):
             else:
                 os.environ[k] = v
 
-    # (7) cap refusal: the estimate is above the ceiling -> nothing built, one line.
+    # (7) build until the ceiling (Kunaal, 4 Nov): oldest first, real spend counted,
+    # stop before the next would pass, the rest listed. Each fake digest costs $0.010.
     root = two_day_project(tmp, "dig_cap")
     P.LOCK = root / "_work" / "daily.lock"
     kept_cap = P.KNOBS["digest_cap_usd"]
-    P.KNOBS["digest_cap_usd"] = 0.03       # 2 days (0.022) + a week (0.011) = 0.033
+    P.KNOBS["digest_cap_usd"] = 0.03       # week 10-25 + day 10-26 = 0.020; +0.011 > 0.03
     try:
         stub = Stub()
         code, out = go(root, stub)
     finally:
         P.KNOBS["digest_cap_usd"] = kept_cap
-    refused = [ln for ln in out.splitlines() if "REFUSED" in ln]
-    check("FP-7 (7) · cap refusal: no build started, no file, one line",
-          (len(stub.ran("p3_digest.py")), (root / "data" / "digests").exists()
-           and any((root / "data" / "digests").iterdir()), len(refused)), (0, False, 1))
-    check("FP-7 (7) · the line names the estimate and the ceiling",
-          "estimated $0.033, above its ceiling $0.03" in refused[0], True)
-    check("FP-7 (7) · and gives the hand commands", out.count("p3_digest.py build") >= 3, True)
-    check("FP-7 (7) · the run still finishes, saying the digest was refused",
-          (code, "digest refused" in out), (0, True))
+    ddir = root / "data" / "digests"
+    made = sorted(p.name for p in ddir.glob("*.json")) if ddir.exists() else []
+    stopped = [ln for ln in out.splitlines() if "STOPPED at its ceiling" in ln]
+    check("FP-7 (7) · ceiling: the two oldest built, the newest not, one line",
+          (len(stub.ran("p3_digest.py")), made, len(stopped)),
+          (2, ["2026-10-25_week.json", "2026-10-26_day.json"], 1))
+    check("FP-7 (7) · the line names what was built, spent and the ceiling",
+          "2 built, $0.0200 spent" in stopped[0] and "$0.03" in stopped[0], True)
+    check("FP-7 (7) · and gives the hand command for the one left",
+          [ln.strip() for ln in out.split(stopped[0], 1)[1].splitlines()[1:2]
+           if "p3_digest.py build --date 2026-10-27 --window day" in ln].__len__(), 1)
+    check("FP-7 (7) · no temporary file left", list(ddir.glob("*.tmp")), [])
+    check("FP-7 (7) · the run still finishes, saying what the ceiling left",
+          (code, "2 digest(s) built ($0.0200), 1 left at the ceiling" in out), (0, True))
 
     # (8) health: each of the four count lines and the cost line can say `check`.
     check("FP-7 (8) · a clean digest is clean", P.digest_health(fake_digest())["verdict"], "clean")
