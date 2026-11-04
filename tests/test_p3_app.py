@@ -1559,8 +1559,8 @@ var live = APP.liveTurn.call(null);
 
 // State 3 · Think harder: the Haiku answer folds to one line
 var folded = APP.answerTurn(answerFixture(), {foldable: true, folded: true});
-eq("[page] state 3 · the Haiku answer folds to one line with its cost",
-   textOf(folded).indexOf("▸ Haiku answer · 0.05¢") > 0, true);
+eq("[page] state 3 · the Haiku answer folds to its answer line, with its cost (F5: '▸ Haiku · …')",
+   textOf(folded).indexOf("▸ Haiku · 0.05¢") > 0, true);
 eq("[page] state 3 · and its sentences are gone while folded",
    textOf(folded).indexOf("Sample answer · one.") > 0, false);
 eq("[page] state 3 · the Sonnet label names the passage count",
@@ -1568,15 +1568,19 @@ eq("[page] state 3 · the Sonnet label names the passage count",
 
 // S4 · L-2: the fold is a switch both ways, read from the conversation
 var foldOpen = APP.answerTurn(answerFixture(), {foldable: true, folded: false});
-eq("[page] L-2 · open, the Haiku answer keeps its label as the switch back, sentences shown",
-   [textOf(foldOpen).indexOf("▾ Haiku answer · 0.05¢") > 0,
+eq("[page] L-2 · open, the Haiku answer keeps its answer line as the switch back, sentences shown",
+   [textOf(foldOpen).indexOf("▾ Haiku · 0.05¢") > 0,
     textOf(foldOpen).indexOf("Sample answer · one.") > 0], [true, true]);
 nodesOf(foldOpen, "button").filter(function (b) {
-  return textOf(b).indexOf("▾ Haiku answer") === 0; })[0].handlers.click[0]({});
+  return textOf(b).indexOf("▾ Haiku") === 0; })[0].handlers.click[0]({});
 eq("[page] L-2 · pressing the open switch folds it again (both ways)", PS.folded.a1, true);
 PS.folded = {};
-eq("[page] L-2 · an answer with nothing under it has no Haiku label",
-   textOf(APP.answerTurn(answerFixture(), {})).indexOf("Haiku answer") < 0, true);
+eq("[page] F5 · an answer with nothing under it: a plain answer line, no fold switch",
+   [textOf(APP.answerTurn(answerFixture(), {})).indexOf("Haiku · 0.05¢") > 0,
+    /[▸▾]/.test(textOf(APP.answerTurn(answerFixture(), {}))),
+    nodesOf(APP.answerTurn(answerFixture(), {}), "button").filter(function (b) {
+      return (" " + b.className + " ").indexOf(" answer-line ") >= 0; }).length],
+   [true, false, 0]);
 
 // F3 (fo-1) · not covered inside a story (sheet item 6 B)
 var F3_SCOPE = {story_id: "s_nc", text_hashes: ["n1", "n2", "n3"], filters: {}};
@@ -1627,15 +1631,15 @@ eq("[page] F3 · but a thin answer of all papers still says it",
 
 // F3 · an empty answer that paid only for reading the follow-up (D-2 a, sheet item 7 B)
 eq("[page] F3 · empty with a cost: 'No answer written · 0.02¢ to read your follow-up'",
-   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.0002,
+   textOf(APP.answerLine(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.0002,
                                         fixture: false}))),
    "No answer written · 0.02¢ to read your follow-up");
 eq("[page] F3 · the cost there is the page's one cost format",
-   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.00007,
+   textOf(APP.answerLine(answerFixture({verdict: "empty", sentences: [], cost_usd: 0.00007,
                                         fixture: false}))),
    "No answer written · " + APP.moneyFine(0.00007) + " to read your follow-up");
 eq("[page] F3 · empty at 0 keeps 'no model call · 0¢'",
-   textOf(APP.answerInfo(answerFixture({verdict: "empty", sentences: [], cost_usd: 0,
+   textOf(APP.answerLine(answerFixture({verdict: "empty", sentences: [], cost_usd: 0,
                                         fixture: false}))), "no model call · 0¢");
 var keptConv = PS.conversation, keptLive = PS.live;
 PS.conversation = {turns: [{kind: "answer", answer: answerFixture()},
@@ -1660,8 +1664,8 @@ eq("[page] L-2 · it folds on the press, while Think harder runs",
 var thLive = APP.liveTurn();
 eq("[page] L-1 · Think harder's live turn draws no question row",
    classesOf(thLive).filter(function (c) { return c === "turn-row turn-q"; }).length, 0);
-eq("[page] L-1 · it opens with the Sonnet label, as the stored one will",
-   textOf(thLive).indexOf("Sonnet · same 6 passages"), 0);
+eq("[page] L-1 · F5: no label above it; the working line is its A row's first line",
+   [aBodyKids(thLive)[0], textOf(thLive).indexOf("Sonnet · same") < 0], ["answer-working", true]);
 eq("[page] L-3 · and says Sonnet is writing", textOf(thLive).indexOf("Sonnet is writing…") > 0, true);
 PS.live.error = {code: "model_error", reason: "other", retryable: true};
 eq("[page] L-2 · a failed Think harder leaves the Haiku answer open",
@@ -2243,7 +2247,7 @@ eq("[page] I7 · Q3 c · after the paid buttons, before Pin (paid, free, save)",
    actionLabels(SCOPES.oneOpen, "thin"),
    ["Think harder · ≈ " + APP.moneyFine(PS.estimates.think_harder),
     "Background · ≈ " + APP.moneyFine(PS.estimates.background),
-    "Ask all papers instead", "Pin to board"]);
+    "Ask all papers instead", "Pin"]);
 eq("[page] Q3 c · never when there was no scope to get out of",
    [actionLabels(SCOPES.none, "empty").indexOf("Ask all papers instead"),
     actionLabels(SCOPES.none, "thin").indexOf("Ask all papers instead")], [-1, -1]);
@@ -2304,7 +2308,7 @@ eq("[page] I7 · every answer's row runs paid, then free, then save",
    i7Rows.map(i7InOrder), [true, true, true, true, true]);
 eq("[page] I7 · a scoped thin answer's row holds all three roles",
    i7Rows[1], ["paid", "paid", "free", "save"]);
-eq("[page] I7 · Pin to board is the save button, on every row",
+eq("[page] I7 · Pin (F5: was 'Pin to board') is the save button, on every row",
    i7Rows.map(function (r) { return r[r.length - 1]; }),
    ["save", "save", "save", "save", "save"]);
 var i7Paid = nodesWith(APP.actionsRow(answerFixture({verdict: "thin", scope: SCOPES.oneOpen})),
@@ -2319,21 +2323,21 @@ eq("[page] I7 · so does Background on an empty answer",
      .map(function (b) { return textOf(b); }),
    ["Answer from background knowledge · ≈ " + APP.moneyFine(PS.estimates.background)]);
 var i7Turn = APP.answerTurn(answerFixture(), {});
-var i7Info = nodesWith(i7Turn, "answer-info");
+var i7Info = nodesWith(i7Turn, "answer-line");
 eq("[page] I7 · the model, its cost and 'sample data' are one plain line, not a button",
    [i7Info.length, i7Info[0].tagName, textOf(i7Info[0])],
    [1, "P", "Haiku · 0.05¢ · sample data"]);
-eq("[page] I7 · and the line sits above the row of buttons",
+eq("[page] F5 · the answer line opens the answer: before the text and the row of buttons",
    classesOf(i7Turn).filter(function (c) {
-     return c === "answer-info" || c === "answer-actions"; }),
-   ["answer-info", "answer-actions"]);
+     return c === "answer-line" || c === "answer-text" || c === "answer-actions"; }),
+   ["answer-line", "answer-text", "answer-actions"]);
 eq("[page] I7 · nothing in an answer is a bordered tag or a cost chip any more",
    classesOf(i7Turn).filter(function (c) {
      return c === "fixture-tag" || c === "answer-cost"; }), []);
 eq("[page] I7 · an empty answer's line says no model was asked",
    textOf(nodesWith(APP.answerTurn(answerFixture({verdict: "empty", scope: SCOPES.none,
                                                   cost_usd: 0}), {}),
-                    "answer-info")[0]),
+                    "answer-line")[0]),
    "no model call · 0¢ · sample data");
 PS.results.a1 = resultsFixture;
 eq("[page] I7 · Show all in Explore is a free button",
@@ -3000,6 +3004,23 @@ def contrast():
     check("every colour on the page comes from a token", stray, [])
 
 
+# F5 · the kinds of small grey line the style rule names (brief fo-1 §4.2), by class.
+F5_GREY_KINDS = (".answer-line", ".topic-line", ".answer-hint", ".answer-weak", ".mode-note",
+                 ".results-fold", ".mark", ".pane .block-label", ".kind-label",
+                 ".answer-working")
+
+
+def _look(css, selector):
+    """F5 · every declaration that applies to `selector` from rules naming it exactly in
+    their comma list, later rules winning (no other cascade: same-name rules only)."""
+    out = {}
+    for sel, body in re.findall(r"([^{}]+)\{([^}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.S)):
+        if selector in [x.strip() for x in sel.split(",")]:
+            out.update({k.strip(): v.strip() for k, v in
+                        (d.split(":", 1) for d in body.split(";") if ":" in d)})
+    return out
+
+
 def _rule(css, selector):
     """The declarations of the one rule whose selector is exactly `selector`, as a dict."""
     found = [b for sel, b in re.findall(r"([^{}]+)\{([^}]*)\}", css)
@@ -3035,9 +3056,10 @@ def look_i7():
     check("[page] L-5 · a long scope chip wraps (no nowrap, no ellipsis)",
           [chip.get("white-space"), chip.get("text-overflow"), chip.get("overflow-wrap"),
            chip.get("min-width")], [None, None, "anywhere", "0"])
-    check("[page] L-3 · the working words are muted 12.5 px",
-          [_rule(css, ".answer-working").get(k) for k in ("font-size", "color")],
-          ["var(--s125)", "var(--text-muted)"])
+    working = _look(css, ".answer-working")
+    check("[page] L-3 · F5: the working words are the small grey line, italic (was 12.5 px)",
+          [working.get(k) for k in ("font-size", "color", "font-style")],
+          ["var(--s115)", "var(--text-muted)", "italic"])
     btn = _rule(css, ".btn")
     check("[page] I7 · one button shape: 30 px tall, Plex 12.5 px 500, padding 0 12 px, "
           "radius 2 px, 1 px border",
@@ -3051,9 +3073,24 @@ def look_i7():
     check("[page] I7 · the cost on a paid button: 11.5 px, weight 600",
           [_rule(css, ".btn-cost").get(k) for k in ("font-size", "font-weight")],
           ["var(--s115)", "600"])
-    check("[page] I7 · the information line: 11.5 px muted, no border",
-          _rule(css, ".answer-info"),
-          {"margin": "8px 0 0", "font-size": "var(--s115)", "color": "var(--text-muted)"})
+    line = _look(css, ".answer-line")
+    check("[page] F5 · the answer line (was the information line): 11.5 px muted, no border",
+          [line.get(k) for k in ("font-size", "color", "border")],
+          ["var(--s115)", "var(--text-muted)", None])
+    # F5 · the style rule (§4.2): every small grey line kind gets the same four values,
+    # and only the in-progress kind is italic. What would pass while broken: a kind whose
+    # own later rule overrides a value (the merge below reads every rule naming it).
+    want = ["var(--sans)", "var(--s115)", "500", "var(--text-muted)"]
+    check("[page] F5 · style rule: every small grey line kind is Plex 11.5 / 500 / #5A5852",
+          {k: [_look(css, k).get(p) for p in ("font-family", "font-size", "font-weight",
+                                              "color")] for k in F5_GREY_KINDS},
+          {k: want for k in F5_GREY_KINDS})
+    check("[page] F5 · style rule: only the in-progress line is italic",
+          {k: _look(css, k).get("font-style") for k in F5_GREY_KINDS},
+          {k: ("italic" if k == ".answer-working" else None) for k in F5_GREY_KINDS})
+    check("[page] F5 · CITED / FOUND: no box, no border, no fill",
+          [_look(css, k).get(p) for k in (".mark", ".mark-cited", ".mark-found")
+           for p in ("background", "border", "padding")], [None] * 9)
     mark = _rule(css, ".turn-mark")
     check("[page] I7 · the Q marker: 18 x 18, 1.5 px ink border, 11 px 700",
           [mark.get(k) for k in ("width", "height", "border", "font-size", "font-weight")],
@@ -3079,13 +3116,13 @@ def look_i7():
     check("[page] I9 · the measured cap heights and the box's own centre are tokens",
           re.findall(r"(--cap-sans|--cap-serif|--mark-mid):\s*([\w.]+);", root),
           [("--cap-sans", "0.698"), ("--cap-serif", "0.676"), ("--mark-mid", "4px")])
-    check("[page] I9 · a serif answer's row uses 17 px Newsreader, a weak, folded or working "
-          "line 12.5 px (L-12)",
+    check("[page] I9 · a serif answer's row uses 17 px Newsreader; F5: an answer line or "
+          "working line first, 11.5 px (L-12)",
           [_rule(css, ".turn-row:has(> .turn-body > .answer-text:first-child)"),
-           _rule(css, ".turn-row:has(> .turn-body > :is(.answer-weak, "
-                      ".answer-folded, .answer-working):first-child)")],
+           _rule(css, ".turn-row:has(> .turn-body > :is(.answer-line, "
+                      ".answer-working):first-child)")],
           [{"--first-size": "var(--s17)", "--first-cap": "var(--cap-serif)"},
-           {"--first-size": "var(--s125)"}])
+           {"--first-size": "var(--s115)"}])
     check("[page] I7 · the question: Plex 16 px 600, line-height 1.4",
           [_rule(css, ".pane-you").get(k) for k in ("font-size", "font-weight", "line-height")],
           ["var(--s16)", "600", "1.4"])
@@ -5394,6 +5431,8 @@ async function main() {
   fresh();
   OUT.lines = turns().map(function (t) {
     var l = byClass(t, "topic-line")[0]; return l ? textOf(l) : null; });
+  // F5 · f4 is an older answer, so its results are folded; opened in place, as a click does
+  APP.S.resultsOpen.f4 = true; APP.renderAssistant();
   var f4 = turns()[3];
   OUT.groups = byClass(f4, "result-group").map(textOf);
   OUT.group_rows = nodesOf(byClass(f4, "pane-results")[0], "h4").map(textOf);
@@ -5745,6 +5784,129 @@ def _pane_ids():
     status, _h, raw = _get("/api/conversation")
     return [t["answer"]["answer_id"] for t in json.loads(raw)["turns"]
             if t.get("kind") == "answer"]
+
+
+def f5_page():
+    """fo-1 F5 · the pane, design C, on the stub's seven turns (flag on), through jsc.
+
+    Pass lines, written before the run:
+    - Every answer's A row starts with the answer line ("Haiku · 0.08¢"); a Sonnet answer's
+      line is "Sonnet · same N passages · {cost}"; the old fold label, Sonnet label and
+      information line are drawn nowhere (no `answer-folded`, `sonnet-label`, `answer-info`).
+    - "Latest" = the last answer in pane order: only it lacks `is-older`; with a Think
+      harder answer last, that answer is the latest and its Haiku parent is older.
+    - An older answer keeps its answer line, text and topic line, and its button row is in
+      the page (for hover / focus) while CSS hides it: clipped, out of flow, and shown
+      again on `.turn-a:hover` and `.turn-a:focus-within`.
+    - An older answer's results are one "▸ Found · N stories" line and no rows; a press
+      opens the rows in place under "▾ Found · N stories"; a second press folds them.
+      The latest answer's results are the plain list with its grey "Found · N" heading.
+    - The header's New conversation, Widen and Collapse are three plain links (no `btn`).
+    - The pane says "Pin", never "Pin to board".
+    What would pass while broken: "older" decided by the answer's index in the stored list
+    rather than pane order (a re-asked answer would be wrong): the Think harder case and the
+    cut conversation check it from two sides.
+    """
+    S.reset()
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+function bodyFirst(t) { var b = byClass(t, "turn-body")[0]; return b ? b.children[0].className : null; }
+function isOlder(t) { return (" " + t.className + " ").indexOf(" is-older ") >= 0; }
+async function main() {
+  fresh();
+  var ts = turns();
+  OUT.first_kids = ts.map(bodyFirst);
+  OUT.lines = ts.map(function (t) { return textOf(byClass(t, "answer-line")[0]); });
+  OUT.gone = ["answer-folded", "sonnet-label", "answer-info"].map(function (c) {
+    return byClass(pane(), c).length; });
+  OUT.older = ts.map(isOlder);
+  OUT.sonnet = APP.answerWords({model: "sonnet", passage_count: 8, cost_usd: 0.021,
+                                verdict: "enough", parent_answer_id: "f1"});
+  OUT.sonnet_cost = APP.moneyFine(0.021);
+
+  var f2 = ts[1];
+  OUT.older_keeps = [byClass(f2, "answer-line").length, byClass(f2, "answer-text").length,
+                     byClass(f2, "topic-line").length, byClass(f2, "answer-actions").length];
+
+  var f4 = turns()[3];
+  OUT.fold_closed = [byClass(f4, "results-fold").map(textOf), nodesOf(f4, "h4").length,
+                     byClass(f4, "result-row").length];
+  await press(byClass(f4, "results-fold")[0]);
+  f4 = turns()[3];
+  OUT.fold_open = [byClass(f4, "results-fold").map(textOf), byClass(f4, "result-row").length];
+  await press(byClass(f4, "results-fold")[0]);
+  f4 = turns()[3];
+  OUT.fold_again = [byClass(f4, "results-fold").map(textOf), byClass(f4, "result-row").length];
+
+  // the same answer as the latest: f1..f4 only
+  ST.conversation.turns = ST.conversation.turns.slice(0, 4);
+  var last = turns()[3];
+  OUT.latest_list = [isOlder(last), byClass(last, "results-fold").length,
+                     byClass(last, "result-row").length,
+                     byClass(last, "block-label").map(textOf)];
+
+  // a Think harder answer last: it is the latest, its parent older
+  fresh();
+  var parent = JSON.parse(JSON.stringify(CONV.turns[0]));
+  var child = JSON.parse(JSON.stringify(CONV.turns[0]));
+  child.answer.answer_id = "f1s"; child.answer.parent_answer_id = "f1";
+  child.answer.model = "sonnet"; child.answer.passage_count = 8;
+  ST.conversation.turns = [parent, child];
+  OUT.th_latest = APP.latestAnswerId(ST.conversation);
+  OUT.th_older = turns().map(isOlder);
+  OUT.th_lines = turns().map(function (t) { return textOf(byClass(t, "answer-line")[0]); });
+
+  fresh();
+  var head = byClass(pane(), "pane-header")[0];
+  OUT.header = nodesOf(head, "button").map(function (b) { return [textOf(b), b.className]; });
+  OUT.pins = byClass(pane(), "btn-save").map(textOf);
+  OUT.pin_to_board = textOf(pane()).indexOf("Pin to board");
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": S.FOLLOWUP_CONVERSATION})
+    if "crash" in got:
+        raise RuntimeError(got["crash"][:300])
+    n = len(S.FOLLOWUP_TURNS)
+    check("[page] F5 · every answer's A row starts with its answer line",
+          got["first_kids"], ["answer-line"] * n)
+    check("[page] F5 · the answer line is model · cost, the same for every Haiku answer",
+          got["lines"], ["Haiku · 0.08¢"] * n)
+    check("[page] F5 · a Sonnet answer's line: 'Sonnet · same N passages · cost'",
+          got["sonnet"], "Sonnet · same 8 passages · " + got["sonnet_cost"])
+    check("[page] F5 · the old fold label, Sonnet label and information line are gone",
+          got["gone"], [0, 0, 0])
+    check("[page] F5 · only the last answer in pane order is not quiet",
+          got["older"], [True] * (n - 1) + [False])
+    check("[page] F5 · an older answer keeps its line, text and topic line; its button row "
+          "is in the page for hover and focus", got["older_keeps"], [1, 1, 1, 1])
+    check("[page] F5 · an older answer's results fold to '▸ Found · N stories', no rows",
+          got["fold_closed"], [["▸ Found · 3 stories"], 0, 0])
+    check("[page] F5 · a press opens them in place under '▾ Found · N stories'",
+          got["fold_open"], [["▾ Found · 3 stories"], 3])
+    check("[page] F5 · a second press folds them again", got["fold_again"],
+          [["▸ Found · 3 stories"], 0])
+    check("[page] F5 · the same answer, latest: the plain list with its grey heading",
+          got["latest_list"][:3] + [got["latest_list"][3][:1]],
+          [False, 0, 3, ["Found · 3 stories"]])
+    check("[page] F5 · a Think harder answer last is the latest; its Haiku parent is quiet",
+          [got["th_latest"], got["th_older"]], ["f1s", [True, False]])
+    check("[page] F5 · the folded parent's line is the switch; the Sonnet answer has its own line",
+          got["th_lines"], ["▸ Haiku · 0.08¢", "Sonnet · same 8 passages · 0.08¢"])
+    check("[page] F5 · header: New conversation, Widen, Collapse are three plain links",
+          [[t, "btn" in c.split()] for t, c in got["header"]],
+          [["New conversation", False], ["Widen", False], ["Collapse", False]])
+    check("[page] F5 · the pane says 'Pin', never 'Pin to board'",
+          [set(got["pins"]), got["pin_to_board"]], [{"Pin"}, -1])
+    css = _css_without_comments()
+    hidden = _look(css, ".pane-turn.is-older .answer-actions")
+    shown = [_look(css, sel) for sel in (".pane-turn.is-older .turn-a:hover .answer-actions",
+                                         ".pane-turn.is-older .turn-a:focus-within .answer-actions")]
+    check("[page] F5 · CSS: an older answer's button row is clipped out of flow, not removed",
+          [hidden.get(k) for k in ("position", "clip-path", "display")],
+          ["absolute", "inset(50%)", None])
+    check("[page] F5 · CSS: and shown again on hover and on keyboard focus in that answer",
+          [[r.get(k) for k in ("position", "clip-path")] for r in shown],
+          [["static", "none"], ["static", "none"]])
 
 
 F4_STORY = []   # (story id, article count) the story route was checked on, for the summary
@@ -6629,7 +6791,7 @@ async function main() {
     return b.node.className.indexOf('icon-button') < 0; })[0]; }
   OUT.pins = [
     await pinVia(TODAY, actionPin),
-    await pinVia(CONV, function () { return byLabel(inTurn('f1'), 'Pin to board')[0]; }),
+    await pinVia(CONV, function () { return byLabel(inTurn('f1'), 'Pin')[0]; }),   /* F5 */
     await pinVia(ARTICLE, actionPin),
     await pinVia(SUGG, function () { return byLabel(buttons(), 'Pin to board', 'reading')
       .filter(function (b) { return b.node.className.indexOf('icon-button') >= 0; })[0]; })];
@@ -7176,7 +7338,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",

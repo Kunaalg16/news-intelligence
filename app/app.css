@@ -1061,8 +1061,10 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   --first-size: var(--s17);
   --first-cap: var(--cap-serif);
 }
-.turn-row:has(> .turn-body > :is(.answer-weak, .answer-folded, .answer-working):first-child) {
-  --first-size: var(--s125);
+/* F5 · every stored answer's first line is now its answer line (and a live one's the
+   working line): both the small grey line, 11.5 sans. */
+.turn-row:has(> .turn-body > :is(.answer-line, .answer-working):first-child) {
+  --first-size: var(--s115);
 }
 .turn-a .turn-mark {
   background: var(--chip-ground);
@@ -1100,11 +1102,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   .panes { transition: none; }
 }
 
-.answer-weak {
-  margin: 0 0 8px;
-  font-size: var(--s125);
-  color: var(--text-muted);
-}
+.answer-weak { margin: 0 0 8px; }
 
 /* Background is not from the papers, so it is fenced off and carries no chips. The
    dashed border is the fence: a solid one would read as another answer. */
@@ -1134,21 +1132,14 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 /* Explore's own cost line (the main page keeps its look, I7). */
 .answer-cost { font-size: var(--s11); color: var(--text-muted); }
 
-/* I7 · information is not a button: the model and its cost, "sample data". One plain
-   line, no border, above the row of buttons. */
-.answer-info {
-  margin: 8px 0 0;
-  font-size: var(--s115);
-  color: var(--text-muted);
-}
+/* F5 (pane C) · the answer line, first in every answer: model and cost, "sample data";
+   on a Haiku answer that folds, the line is the switch. */
+.answer-line { display: block; margin: 0 0 6px; text-align: left; }
+.answer-fold:hover { color: var(--ink); }
 
 /* I8 · flag `followup_rewrite`. The grey line after an answer says what was done with
    it; its one correction is an ochre underlined text button, not a bordered one. */
-.topic-line {
-  margin: 8px 0 0;
-  font-size: var(--s115);
-  color: var(--text-muted);
-}
+.topic-line { margin: 8px 0 0; }
 .topic-act {
   color: var(--ochre);
   font-size: inherit;
@@ -1207,22 +1198,9 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    to --text-muted would leave it looking live. The ground stays, so the role does. */
 .btn[disabled] { border-color: var(--mark); color: var(--mark); cursor: default; }
 
-/* The folded Haiku answer, once Think harder has answered (state 3). */
-.answer-folded {
-  display: block;
-  margin: 0 0 8px;
-  font-size: var(--s125);
-  color: var(--text-muted);
-  text-align: left;
-}
-.answer-folded:hover { color: var(--ink); }
-/* L-3 · what is working while a stream runs ("Haiku is writing…"). */
-.answer-working {
-  margin: 0 0 8px;
-  font-size: var(--s125);
-  color: var(--text-muted);
-}
-.sonnet-label { margin: 0 0 6px; }
+/* L-3 · what is working while a stream runs ("Haiku is writing…"): the small grey line in
+   progress, italic (F5). */
+.answer-working { margin: 0 0 8px; }
 
 /* The results list. It arrives first and is the thing the answer is built from, so it
    is a list of stories with a mark saying whether the answer used each one. */
@@ -1253,25 +1231,15 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .result-row button.result-open:hover h4 { text-decoration: underline; }
 .result-meta { margin: 2px 0 0; font-size: var(--s11); color: var(--text-muted); }
 
-/* CITED is ochre filled, FOUND a grey outline: the difference says whether the answer
-   actually used the story, which is the one thing the list is for. */
-.mark {
-  font-size: var(--s11);
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  padding: 1px 5px;
-  border-radius: 2px;
-  white-space: nowrap;
-}
-.mark-cited { background: var(--ochre); color: var(--page); }
-.mark-found { border: 1px solid var(--mark); color: var(--text-muted); }
+/* F5 · CITED / FOUND stay in capitals as a grey label, the small grey line style: no
+   box, no border (board "K1 (7)"); the word says whether the answer used the story. */
+.mark { letter-spacing: 0.06em; white-space: nowrap; }
 
 /* Nothing in your papers (state 5), and its closest stories. */
 .answer-none { margin: 0 0 8px; font-size: var(--s14); }
 .answer-none strong { font-weight: 600; }
 /* F3 · the small grey line (style rule §4.2) under "Not in this story". */
-.answer-hint { margin: 0 0 8px; font-size: var(--s115); font-weight: 500;
-               color: var(--text-muted); }
+.answer-hint { margin: 0 0 8px; }
 .closest { margin: 8px 0 0; padding: 0; list-style: none; }
 .closest li { padding: 4px 0; border-top: 1px solid var(--rule-light); }
 .closest button { text-align: left; font-size: var(--s14); }
@@ -1311,7 +1279,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .pane-divider.ask-divider::after { flex: 1 0 24px; background: var(--ink); }
 
 /* I6 · meaning search is off: one grey line above the results, not a warning. */
-.mode-note { margin: 6px 0; font-size: var(--s11); color: var(--text-muted); }
+.mode-note { margin: 6px 0; }
 
 /* An error (state 9). The only red in the pane. */
 .pane-error { margin: 8px 0; }
@@ -1548,3 +1516,41 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   color: var(--ink);
 }
 .outside-open:hover { text-decoration: underline; }
+
+/* ---------------------------------------------- F5 · the style rule (brief fo-1 §4.2)
+   ONE style for every small grey line: the answer line, the topic line, hints, "Word
+   search only", "▸ Found · N stories", CITED / FOUND, the pane's grey capitals labels
+   ("FOUND · N STORIES", "Closest stories"), DAY / WEEK. In progress ("… is writing",
+   "Still working on this") the same, italic. One rule, so no kind can drift. */
+.answer-line, .topic-line, .answer-hint, .answer-weak, .mode-note, .results-fold,
+.mark, .pane .block-label, .kind-label, .answer-working {
+  font-family: var(--sans);
+  font-size: var(--s115);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.answer-working { font-style: italic; }
+.results-fold { display: block; text-align: left; }
+.results-fold:hover { color: var(--ink); }
+.pane-results.is-folded { margin-top: 6px; }
+
+/* F5 · an older answer is quiet: its button row is visually hidden but stays in the tab
+   order, and shows while the pointer is over that answer or something in it has keyboard
+   focus (tabbing onto a hidden button reveals the row it is in). */
+.pane-turn.is-older .answer-actions {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.pane-turn.is-older .turn-a:hover .answer-actions,
+.pane-turn.is-older .turn-a:focus-within .answer-actions {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+}

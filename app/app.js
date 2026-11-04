@@ -31,6 +31,7 @@ const S = {
   live: null,                    /* the answer being streamed right now */
   sorts: {},                     /* answer_id -> 'relevance' | 'newest' */
   folded: {},                    /* answer_id -> true once Think harder answered */
+  resultsOpen: {},               /* answer_id -> true: an older answer's results opened (F5) */
   estimates: {},                 /* kind -> cost_usd, read once at boot */
   reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
   suggestions: {},               /* story_id -> its suggestion set, once asked for */
@@ -709,7 +710,7 @@ function pinControl(itemType, what, options) {
     class: 'reset ' + (o.class || 'action'), type: 'button', dataset: { you: 'true' },
     'aria-expanded': 'false', 'aria-haspopup': 'menu',
     'aria-label': o.label || null,
-    text: o.icon ? null : 'Pin to board',
+    text: o.icon ? null : (o.text || 'Pin to board'),
     onclick: async () => {
       const open = menu.hidden;
       if (open) {
@@ -2201,15 +2202,15 @@ function resultRow(story, answer) {
     el('span', { class: 'mark ' + mark.cls, text: mark.word }));
 }
 
-function resultsList(answerId, result, answer) {
+function resultsList(answerId, result, answer, foldHead) {
   if (!result || !result.stories || !result.stories.length) return null;
   const sort = S.sorts[answerId] || result.sort || 'relevance';
   const shown = result.stories.slice(0, PANE_RESULTS_SHOWN);
   const section = el('section', { class: 'pane-results' });
 
-  const head = el('div', { class: 'results-head' },
-    el('p', { class: 'block-label',
-              text: 'Found · ' + count(result.total_stories, 'story') }));
+  const head = el('div', { class: 'results-head' }, foldHead
+    || el('p', { class: 'block-label',
+                 text: 'Found · ' + count(result.total_stories, 'story') }));
   const switcher = el('span', { class: 'sort-switch' });
   for (const name of ['relevance', 'newest']) {
     if (name === 'newest') switcher.append(' | ');
@@ -2291,12 +2292,16 @@ function searchQueryString(query, filters, sort, limit) {
 
 /* ------------------------------------------------------------------ one answer */
 
+/* F5 (board "K1 (7)") · "Pin to board" is "Pin" everywhere in the pane; the menu it opens
+   is unchanged, and the story page's pins keep their words. */
+const PANE_PIN = 'Pin';
+
 function answerPinButton(answer) {
   return pinControl('answer', () => ({
     payload: { answer_id: answer.answer_id, question: answer.question,
                sentences: answer.sentences, cited: answer.cited, model: answer.model },
     source: { conversation_id: answer.conversation_id },
-  }), { class: 'btn btn-save' });
+  }), { class: 'btn btn-save', text: PANE_PIN });
 }
 
 function sampleTag() {
@@ -2383,21 +2388,31 @@ function costTag(usd) {
   return el('span', { class: 'btn-cost', text: '≈ ' + moneyFine(usd) });
 }
 
-/* I7 · information is not a button: the model and what it cost, and "sample data", as
-   one plain line. An empty answer cost nothing because no model was asked, and saying
-   "Haiku · 0¢" would imply one was (§8.3 state 5). */
-function answerInfo(answer) {
-  /* F3 · a not-covered answer was written by a model that said "not here", so it names
-     the model and its cost like any answer. An empty answer that still cost something
-     paid only for reading a follow-up (contract §12.3 #22, D-2 a): no writer ran. */
+/* F5 (pane C) · every answer starts with ONE answer line, the same for both models:
+   "Haiku · 0.08¢", "Sonnet · same N passages · 2.1¢", and on a Haiku answer that folds
+   the line itself is the switch, "▸ Haiku · 0.09¢" / "▾ …" (T-48 rules unchanged). It
+   replaces the old fold label, the old Sonnet label and the information line above the
+   buttons (I7, T-29). An empty answer cost nothing because no model was asked, and
+   "Haiku · 0¢" would imply one was (§8.3 state 5); a not-covered answer names its model
+   and cost like any answer; a paid empty one paid only to read a follow-up (F3). */
+function answerWords(answer) {
   const none = answer.verdict === 'empty' && !answer.not_covered;
-  const model = (answer.model === 'sonnet' ? 'Sonnet' : 'Haiku')
-                + ' · ' + moneyFine(answer.cost_usd);
-  const bits = [!none ? model
+  const model = answer.model === 'sonnet' ? sonnetLabel(answer) : 'Haiku';
+  const bits = [!none ? model + ' · ' + moneyFine(answer.cost_usd)
                 : answer.cost_usd > 0 ? EMPTY_PAID_WORDS(moneyFine(answer.cost_usd))
                 : 'no model call · 0¢'];
   if (answer.fixture) bits.push('sample data');
-  return el('p', { class: 'answer-info', text: bits.join(' · ') });
+  return bits.join(' · ');
+}
+
+function answerLine(answer, o) {
+  const opts = o || {};
+  if (!opts.foldable) return el('p', { class: 'answer-line', text: answerWords(answer) });
+  return el('button', {
+    class: 'reset answer-line answer-fold', type: 'button',
+    'aria-expanded': opts.folded ? 'false' : 'true',
+    onclick: () => { S.folded[answer.answer_id] = !opts.folded; renderAssistant(); },
+  }, (opts.folded ? '▸ ' : '▾ ') + answerWords(answer));
 }
 
 const EMPTY_PAID_WORDS = (cost) => 'No answer written · ' + cost + ' to read your follow-up';
@@ -2515,23 +2530,19 @@ function questionRow(question) {
 function answerTurn(answer, opts) {
   const o = opts || {};
   const byHash = paneHashes();
-  const block = el('div', { class: 'pane-turn' });
+  /* F5 · only the latest answer shows its button row and results; an older one is quiet
+     (`is-older`: its row shows on hover or keyboard focus, CSS; its results fold). */
+  const block = el('div', { class: 'pane-turn' + (o.older ? ' is-older' : '') });
   const remove = removeButton(answer);
   if (remove) block.append(remove);
   if (!o.noQuestion) block.append(questionRow(answer.question));
   const body = el('div', { class: 'turn-body' });
   block.append(turnRow('A', body));
 
-  /* L-2 · a Haiku answer with a Sonnet answer under it carries its own label, which is
-     also the switch: "▸" folded, "▾" open, both ways. */
-  if (o.foldable) {
-    body.append(el('button', {
-      class: 'reset answer-folded', type: 'button',
-      'aria-expanded': o.folded ? 'false' : 'true',
-      onclick: () => { S.folded[answer.answer_id] = !o.folded; renderAssistant(); },
-    }, (o.folded ? '▸ ' : '▾ ') + 'Haiku answer · ' + moneyFine(answer.cost_usd)));
-    if (o.folded) return block;
-  }
+  /* L-2 · a Haiku answer with a Sonnet answer under it: its answer line is the switch,
+     "▸" folded, "▾" open, both ways. Folded, the line is all there is. */
+  body.append(answerLine(answer, o));
+  if (o.foldable && o.folded) return block;
 
   if (answer.not_covered) {
     body.append(el('p', { class: 'answer-none' },
@@ -2579,7 +2590,6 @@ function answerTurn(answer, opts) {
   if (topic) body.append(topic);
   const widen = widenLine(answer);
   if (widen) body.append(widen);
-  body.append(answerInfo(answer));
   body.append(actionsRow(answer));
   const refused = S.backgroundError[answer.answer_id];
   if (refused) {
@@ -2591,10 +2601,26 @@ function answerTurn(answer, opts) {
     const result = S.results[answer.answer_id] || storedResults(answer);
     const note = answerModeNote(answer);
     if (note) body.append(note);
-    const list = resultsList(answer.answer_id, result, answer);
+    const list = o.older ? foldedResults(answer.answer_id, result, answer)
+                         : resultsList(answer.answer_id, result, answer);
     if (list) body.append(list);
   }
   return block;
+}
+
+/* F5 · an older answer's results fold to one small grey line, "▸ Found · N stories";
+   a click opens the list in place (in memory, like the Haiku fold), and the open list's
+   heading is the same line with "▾", which folds it again. */
+function foldedResults(answerId, result, answer) {
+  if (!result || !result.stories || !result.stories.length) return null;
+  const open = Boolean(S.resultsOpen[answerId]);
+  const words = (open ? '▾ ' : '▸ ') + 'Found · ' + count(result.total_stories, 'story');
+  const fold = el('button', { class: 'reset results-fold', type: 'button',
+                              'aria-expanded': open ? 'true' : 'false',
+                              onclick: () => { S.resultsOpen[answerId] = !open;
+                                               renderAssistant(); } }, words);
+  if (!open) return el('section', { class: 'pane-results is-folded' }, fold);
+  return resultsList(answerId, result, answer, fold);
 }
 
 /* Does the streamed turn stay on screen once the stream has ended?
@@ -2673,20 +2699,15 @@ function workingWords(live) {
 }
 
 /* L-1 · Think harder's live turn has no question of its own (its parent shows it), so
-   it is drawn as the stored one will be: the Sonnet label, then an A row. */
+   it is drawn as the stored one will be: an A row only. */
 function liveTurn() {
   const live = S.live;
   if (!live) return null;
   const byHash = paneHashes();
   const block = el('div', { class: 'pane-turn' });
-  if (live.parentOf) {
-    const parent = answerById(live.parentOf) || {};
-    block.append(el('p', { class: 'block-label sonnet-label',
-      text: sonnetLabel({ passage_count: parent.passage_count,
-                          parent_answer_id: live.parentOf }) }));
-  } else {
-    block.append(questionRow(live.question));
-  }
+  /* F5 · a Think harder turn has no question row and no label above it: its working
+     line "Sonnet is writing…" is the A row's first line, as the answer line will be. */
+  if (!live.parentOf) block.append(questionRow(live.question));
   const body = el('div', { class: 'turn-body' });
   block.append(turnRow('A', body));
 
@@ -3009,6 +3030,13 @@ async function removeTurn(answerId) {
   toast(TURN_REMOVED, null, REMOVE_TOAST_SECONDS);
 }
 
+/* F5 · "latest" = the last answer turn in pane order (`paneTurns`), a Think harder
+   answer included; every other answer is drawn quiet. */
+function latestAnswerId(conversation) {
+  const answers = paneTurns(conversation).filter((t) => t.kind === 'answer');
+  return answers.length ? answers[answers.length - 1].answer.answer_id : null;
+}
+
 /* ------------------------------------------------------------------ the whole pane */
 
 function paneWidth() {
@@ -3125,7 +3153,9 @@ function renderAssistant() {
 
   const header = el('div', { class: 'pane-header' },
     el('p', { class: 'pane-title', text: 'Assistant' }),
-    paneButton('free', { onclick: () => startNewConversation() }, 'New conversation'),
+    /* F5 · three plain links, no boxed button */
+    el('button', { class: 'reset', type: 'button',
+                   onclick: () => startNewConversation() }, 'New conversation'),
     el('button', { class: 'reset', type: 'button',
                    onclick: () => setPane(S.pane === 'wide' ? 'open' : 'wide') },
       S.pane === 'wide' ? 'Narrow' : 'Widen'),
@@ -3148,6 +3178,7 @@ function renderAssistant() {
   const inPlace = S.live && S.live.replaces;
   let placed = false;
   let firstSeen = false;
+  const latest = latestAnswerId(S.conversation);
   for (const turn of paneTurns(S.conversation)) {
     if (turn.kind === 'divider') {
       body.append(anchored(el('p', { class: 'pane-divider ask-divider',
@@ -3157,18 +3188,17 @@ function renderAssistant() {
       const answer = turn.answer;
       const here = inPlace && answer.answer_id === inPlace;
       if (here) placed = true;
+      const older = answer.answer_id !== latest;
       if (answer.parent_answer_id) {
-        body.append(anchored(el('p', { class: 'block-label sonnet-label',
-                                       text: sonnetLabel(answer) }),
-                             'label:' + answer.answer_id));
-        body.append(anchored(answerTurn(answer, { noQuestion: true, noResults: true }),
+        body.append(anchored(answerTurn(answer, { noQuestion: true, noResults: true,
+                                                  older: older }),
                              answer.answer_id));
       } else {
         if (!here || S.live.error) {
           const fold = foldState(answer.answer_id);
           body.append(anchored(answerTurn(answer, { foldable: fold.foldable,
                                                     folded: fold.folded,
-                                                    first: !firstSeen }),
+                                                    first: !firstSeen, older: older }),
                                answer.answer_id));
         }
         firstSeen = true;
@@ -4201,7 +4231,7 @@ const EXPORTS = {
   openStory, askNow, openExplore,
   storedResults, shortfallWords, SUGGEST_FEW, suggestionsBox,
   scopeWords, scopeStoryCount, scopeHasFilters, scopeIsNarrowed, seeAlso, seeAlsoFold,
-  actionsRow, askAllPapers, paneButton, PANE_BUTTON, answerInfo, turnRow, questionRow,
+  actionsRow, askAllPapers, paneButton, PANE_BUTTON, answerLine, answerWords, turnRow, questionRow,
   showCapConfirm,
   TOPIC_WORDS, EARLIER_WORDS, ALL_SCOPE, TURN_REMOVED, REMOVE_TOAST_SECONDS, earlierWords,
   earlierQuestion, topicLine, paneTurns, reaskInPlace, removeButton, removeTurn,
@@ -4209,7 +4239,7 @@ const EXPORTS = {
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */
-  answerTurn, liveTurn, resultsList, capBand, renderScope, actionsRow,
+  answerTurn, liveTurn, resultsList, foldedResults, latestAnswerId, PANE_PIN, capBand, renderScope, actionsRow,
   backgroundBlock, resultRow, sonnetLabel, foldState, workingWords, loadOutsideStory,
   renderOutsideStory, outsideScope, renderAssistant, collapsedRail,
   keepLiveAfterStream,
