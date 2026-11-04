@@ -1148,23 +1148,19 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 }
 .topic-act:hover { color: var(--ink); }
 .topic-price { white-space: nowrap; }   /* F6 · "· ≈ 0.08¢" stays with its action */
-/* Remove sits at the turn's top right, on the pane's ground so it covers a long
-   question's end cleanly; seen on hover and on keyboard focus. Opacity, not display,
-   so it stays in the tab order. `.pane-turn` is `position: relative` for it. */
+/* F7 · Remove sits at the right end of its line (the question's, or a Think harder
+   answer's answer line), in a third column of the row, so its right edge is the same on
+   every turn and its baseline is the line's first. Seen on hover and on keyboard focus
+   of its turn. Opacity, not display, so it stays in the tab order and the column keeps
+   its width (the question does not re-wrap on hover). Font: the shared grey rule. */
+.turn-row.has-end { grid-template-columns: 22px minmax(0, 1fr) auto; }
 .turn-remove {
-  position: absolute;
-  top: 0;
-  right: 0;
   padding: 0 0 0 8px;
-  background: var(--assistant-ground);
-  font-size: var(--s115);
-  color: var(--text-muted);
   text-decoration: underline;
   opacity: 0;
 }
 .pane-turn:hover .turn-remove,
-.turn-remove:focus,
-.turn-remove:focus-visible { opacity: 1; }
+.pane-turn:focus-within .turn-remove { opacity: 1; }
 .turn-remove:hover { color: var(--red); }
 /* Two searches: one heading per search above its rows. */
 .result-group { margin: 10px 0 2px; }
@@ -1525,7 +1521,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    ("FOUND · N STORIES", "Closest stories"), DAY / WEEK. In progress ("… is writing",
    "Still working on this") the same, italic. One rule, so no kind can drift. */
 .answer-line, .topic-line, .answer-hint, .answer-weak, .mode-note, .results-fold,
-.mark, .pane .block-label, .kind-label, .answer-working, .still-working {
+.mark, .pane .block-label, .kind-label, .answer-working, .still-working, .turn-remove {
   font-family: var(--sans);
   font-size: var(--s115);
   font-weight: 500;

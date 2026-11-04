@@ -187,6 +187,7 @@ const api = {
                                             story_id: storyId, headline: headline }),
   background: (answerId) => postOrError('/api/background', { answer_id: answerId }),
   hideTurn: (answerId) => postOrError('/api/hide_turn', { answer_id: answerId }),
+  unhideTurn: (answerId) => postOrError('/api/unhide_turn', { answer_id: answerId }),
   suggest: (storyId, hashes) =>
     postOrError('/api/suggest', { story_id: storyId, text_hashes: hashes }),
   raiseCap: () => postJSON('/api/cap/raise', {}),
@@ -870,7 +871,8 @@ async function undoLast() {
   const step = S.lastUndo;
   if (!step) { toast('Nothing to undo'); return; }
   S.lastUndo = null;
-  await step.run();
+  /* F7 · a step that could not be undone says so itself and returns false */
+  if (await step.run() === false) return;
   toast('Undone · ' + step.label);
 }
 
@@ -2530,12 +2532,15 @@ function answerModeNote(answer) {
    "Q, what happened…" and "A, …" in the order they are drawn. */
 const TURN_ROW = { Q: { class: 'turn-row turn-q' }, A: { class: 'turn-row turn-a' } };
 
-function turnRow(which, content) {
-  return el('div', TURN_ROW[which], el('span', { class: 'turn-mark', text: which }), content);
+/* F7 · `end` is what sits at the right end of the row's first line (Remove), in a third
+   column of its own, so its right edge is the same on every turn. */
+function turnRow(which, content, end) {
+  return el('div', { class: TURN_ROW[which].class + (end ? ' has-end' : '') },
+            el('span', { class: 'turn-mark', text: which }), content, end || null);
 }
 
-function questionRow(question) {
-  return turnRow('Q', el('p', { class: 'pane-you', text: question }));
+function questionRow(question, end) {
+  return turnRow('Q', el('p', { class: 'pane-you', text: question }), end);
 }
 
 function answerTurn(answer, opts) {
@@ -2544,11 +2549,13 @@ function answerTurn(answer, opts) {
   /* F5 · only the latest answer shows its button row and results; an older one is quiet
      (`is-older`: its row shows on hover or keyboard focus, CSS; its results fold). */
   const block = el('div', { class: 'pane-turn' + (o.older ? ' is-older' : '') });
-  const remove = removeButton(answer);
-  if (remove) block.append(remove);
-  if (!o.noQuestion) block.append(questionRow(answer.question));
+  /* F7 (call 6 C) · Remove at the right end of the line it belongs to: the question's
+     line (the question, both answers and the background go), or a Think harder answer's
+     answer line (only it goes; the Haiku answer unfolds). A Haiku answer's own line,
+     folded or not, has none. */
+  if (!o.noQuestion) block.append(questionRow(answer.question, removeButton(answer)));
   const body = el('div', { class: 'turn-body' });
-  block.append(turnRow('A', body));
+  block.append(turnRow('A', body, answer.parent_answer_id ? removeButton(answer) : null));
 
   /* L-2 · a Haiku answer with a Sonnet answer under it: its answer line is the switch,
      "▸" folded, "▾" open, both ways. Folded, the line is all there is. */
@@ -2928,6 +2935,7 @@ const TOPIC_WORDS = {
 const EARLIER_WORDS = 4;
 const ALL_SCOPE = { story_id: null, text_hashes: [], filters: {} };
 const TURN_REMOVED = 'Removed from this conversation';
+const TURN_UNDONE = 'remove from this conversation';     /* "Undone · …" after an Undo */
 const REMOVE_TOAST_SECONDS = 5;
 
 /* "[earlier]": the earlier question, cut to its first four words, in quotes so it reads
@@ -3105,8 +3113,8 @@ async function reaskInPlace(answerId, change) {
   renderAssistant();
 }
 
-/* Remove: shown on hover and on keyboard focus (CSS). The contract has no way to show a
-   hidden turn again, so the toast confirms and offers no Undo (T-36). */
+/* Remove: shown on hover and on keyboard focus (CSS). F7 (call 7 A): hide is reversible,
+   so the toast offers Undo for 5 s, and ⌘Z is the same Undo (`remember`). */
 function removeButton(answer) {
   if (!S.flags.followup_rewrite) return null;
   return el('button', { class: 'reset turn-remove', type: 'button',
@@ -3123,7 +3131,22 @@ async function removeTurn(answerId) {
   }
   await refreshConversation();
   renderAssistant();
-  toast(TURN_REMOVED, null, REMOVE_TOAST_SECONDS);
+  remember(TURN_UNDONE, () => restoreTurn(answerId));
+  toast(TURN_REMOVED + ' ·', undoLast, REMOVE_TOAST_SECONDS);
+}
+
+/* F7 · Undo = `unhide_turn` with the id that was passed to `hide_turn`: K3 reverses
+   exactly that one hide action. The pane re-reads and keeps its place (L-13 "keep": no
+   pane event is set). A refusal says why and returns false, so no "Undone" follows. */
+async function restoreTurn(answerId) {
+  const got = await api.unhideTurn(answerId);
+  if (got && got.error) {
+    toast(got.error.status === 0 ? NOT_RUNNING : 'Not restored · ' + got.error.message);
+    return false;
+  }
+  await refreshConversation();
+  renderAssistant();
+  return true;
 }
 
 /* F5 · "latest" = the last answer turn in pane order (`paneTurns`), a Think harder
@@ -4333,6 +4356,7 @@ const EXPORTS = {
   showCapConfirm,
   TOPIC_WORDS, EARLIER_WORDS, ALL_SCOPE, TURN_REMOVED, REMOVE_TOAST_SECONDS, earlierWords,
   earlierQuestion, topicLine, paneTurns, reaskInPlace, removeButton, removeTurn,
+  restoreTurn, TURN_UNDONE, undoLast,
   resultGroups, takeLiveEvent, toast, widenLine, WIDEN_WORDS, clearScope,
   earlierName, correctionPrice, buttonPrice, STILL_WORKING, STILL_REREAD_MS, REFUSED_HINT,
   stillWorkingLine, markStillRunning, stillRunningFrom, rereadIfStillRunning,

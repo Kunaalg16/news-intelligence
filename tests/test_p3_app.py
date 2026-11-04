@@ -3007,7 +3007,7 @@ def contrast():
 # F5 · the kinds of small grey line the style rule names (brief fo-1 §4.2), by class.
 F5_GREY_KINDS = (".answer-line", ".topic-line", ".answer-hint", ".answer-weak", ".mode-note",
                  ".results-fold", ".mark", ".pane .block-label", ".kind-label",
-                 ".answer-working", ".still-working")
+                 ".answer-working", ".still-working", ".turn-remove")
 
 
 def _look(css, selector):
@@ -5686,9 +5686,11 @@ main().then(function () { print(JSON.stringify(OUT)); },
           [True, [[{"answer_id": "f2", "mode": "as_typed"}] * 2, 0]])
     check("[page] I8 · Remove on each turn, labelled for a screen reader",
           got["removes"], [["Remove", "Remove this turn"]] * 7)
-    check("[page] I8 · Remove: one hide_turn, the turn leaves, a 5 s toast with no Undo",
-          got["removed"], [[{"answer_id": "f3"}], 6, -1, "Removed from this conversation",
-                           0, 5000])
+    # F7 (call 7 A): the toast now offers Undo ("Removed from this conversation · Undo";
+    # the shim's textOf joins the two pieces with no space).
+    check("[page] I8 · Remove: one hide_turn, the turn leaves, a 5 s toast with Undo",
+          got["removed"], [[{"answer_id": "f3"}], 6, -1, "Removed from this conversation ·Undo",
+                           1, 5000])
     check("[page] I8 · a refused Remove says why and re-reads nothing",
           got["remove_404"], ["Not removed · no such answer: 'f9'", 0])
     check("[page] I8 · Remove with nothing answering says the app isn't running",
@@ -6219,6 +6221,187 @@ def f4_routes():
     check("[fixture] F4 · a data layer without the function answers 501, never 500",
           got, [501, 501, 501, 501])
 
+
+def f7_page():
+    """fo-1 F7 · Remove and Undo on the page (brief §3.5, calls 6 C and 7 A), flag on,
+    the stub's turns plus a Think harder (Sonnet) answer f8 under f7.
+
+    Pass lines, written before the run:
+    - Every top-level turn has exactly one Remove, the last child of its Q row (a row
+      with the third column, `has-end`); a Haiku answer's A row has none, folded or
+      unfolded; the Sonnet answer's A row has one, its last child, beside its answer line.
+    - The question's Remove sends one /api/hide_turn with the top-level answer id; the
+      Sonnet's Remove sends one with the Sonnet's id.
+    - The toast: "Removed from this conversation ·" and one "Undo", for 5 s.
+    - Undo sends one /api/unhide_turn with the id that was passed to hide_turn, then
+      re-reads the conversation; the turn is back in its place; no pane event is set
+      (L-13 "keep"); the toast says "Undone · remove from this conversation".
+    - Two Removes, then Undo: only the LAST is undone (one unhide, its id); a second
+      Undo has nothing to undo and sends nothing.
+    - A refused Undo says "Not restored · <K3's reason>", re-reads nothing, no "Undone";
+      nothing answering says the app isn't running.
+    - CSS: Remove is the small grey line, underlined, in the row's own third column (not
+      absolute), shown on the turn's hover and on keyboard focus within it.
+    What would pass while broken: an Undo that unhid by the toast's own id or the last
+    answer (the Sonnet case passes a different id); Remove drawn on the folded Haiku line
+    (checked folded and unfolded).
+    """
+    S.reset()
+    conv = json.loads(json.dumps(S.FOLLOWUP_CONVERSATION))
+    sonnet = dict(conv["turns"][6]["answer"], answer_id="f8", parent_answer_id="f7",
+                  model="sonnet", question="what about the floods")
+    conv["turns"].append({"kind": "answer", "answer": sonnet})
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+function rowsOf(t) { return byClass(t, "turn-row"); }
+function removesIn(node) { return byClass(node, "turn-remove").length; }
+function lastIsRemove(row) { var k = row.children; return k.length ? (" " + k[k.length - 1].className + " ").indexOf(" turn-remove ") >= 0 : false; }
+function hasEnd(row) { return (" " + row.className + " ").indexOf(" has-end ") >= 0; }
+async function main() {
+  fresh(); ST.lastUndo = null;
+  OUT.place = turns().map(function (t) {
+    var q = byClass(t, "turn-q")[0], a = byClass(t, "turn-a")[0];
+    return [q ? [removesIn(q), lastIsRemove(q), hasEnd(q)] : null,
+            [removesIn(a), a ? lastIsRemove(a) : false]]; });
+  ST.folded.f7 = false;
+  OUT.unfolded = turns().map(function (t) { var a = byClass(t, "turn-a")[0]; return removesIn(a); });
+  ST.folded = {};
+
+  // --- the two Removes send the right id
+  REPLIES['/api/hide_turn'] = [200, {hidden: ["f7", "f8"], hide_action_id: "h1"}];
+  DELAYS = [];
+  await press(byClass(byClass(turns()[6], "turn-q")[0], "turn-remove")[0]);
+  OUT.q_remove = sent('/api/hide_turn').map(function (c) { return c[2]; });
+  OUT.toast = [nodesOf(document.byId.toast, "span").map(textOf),
+               nodesOf(document.byId.toast, "button").map(textOf), DELAYS[DELAYS.length - 1]];
+  fresh(); ST.lastUndo = null;
+  REPLIES['/api/hide_turn'] = [200, {hidden: ["f8"], hide_action_id: "h2"}];
+  var t8 = turns()[7];
+  await press(byClass(byClass(t8, "turn-a")[0], "turn-remove")[0]);
+  OUT.s_remove = sent('/api/hide_turn').map(function (c) { return c[2]; });
+
+  // --- Undo: unhide by the id passed to hide_turn, re-read, back in place
+  // the pane shows the conversation without f8; the re-read after Undo has it again
+  var less = JSON.parse(JSON.stringify(CONV));
+  less.turns = less.turns.filter(function (x) { return x.answer.answer_id !== "f8"; });
+  ST.conversation = less;
+  REPLIES['/api/conversation'] = [200, JSON.parse(JSON.stringify(CONV))];
+  REPLIES['/api/unhide_turn'] = [200, {unhidden: ["f8"]}];
+  CALLS = [];
+  var shown = turns().length;
+  // every pane event set during the Undo (renderAssistant resets it, so read the log)
+  var EVENTS = [], ev = null;
+  Object.defineProperty(ST, "paneEvent", {configurable: true,
+    get: function () { return ev; }, set: function (v) { if (v) EVENTS.push(v); ev = v; }});
+  await press(nodesOf(document.byId.toast, "button")[0]);
+  OUT.undo = [sent('/api/unhide_turn').map(function (c) { return c[2]; }),
+              sent('/api/conversation').length, [shown, turns().length], EVENTS,
+              textOf(document.byId.toast),
+              CALLS.map(function (c) { return c[1]; }).indexOf('/api/unhide_turn')
+                < CALLS.map(function (c) { return c[1]; }).indexOf('/api/conversation')];
+
+  // --- two Removes, one Undo: only the last
+  fresh(); ST.lastUndo = null;
+  REPLIES['/api/hide_turn'] = [200, {hidden: ["x"], hide_action_id: "h"}];
+  await press(byClass(byClass(turns()[2], "turn-q")[0], "turn-remove")[0]);
+  await press(byClass(byClass(turns()[4], "turn-q")[0], "turn-remove")[0]);
+  CALLS = [];
+  await APP.undoLast();
+  for (var j = 0; j < 40; j++) await null;
+  OUT.one = sent('/api/unhide_turn').map(function (c) { return c[2]; });
+  CALLS = [];
+  await APP.undoLast();
+  OUT.one_again = [sent('/api/unhide_turn').length, textOf(document.byId.toast)];
+
+  // --- a refused Undo
+  fresh(); ST.lastUndo = null;
+  await press(byClass(byClass(turns()[2], "turn-q")[0], "turn-remove")[0]);
+  REPLIES['/api/unhide_turn'] = [400, {detail: "that answer is not hidden: f3"}];
+  CALLS = [];
+  await press(nodesOf(document.byId.toast, "button")[0]);
+  OUT.refused = [textOf(document.byId.toast), sent('/api/conversation').length];
+  REPLIES['/api/unhide_turn'] = 'down';
+  OUT.down = [await APP.restoreTurn("f3"), textOf(document.byId.toast)];
+  delete REPLIES['/api/unhide_turn']; delete REPLIES['/api/hide_turn'];
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": conv})
+    check("F7 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    check("[page] F7 · one Remove at the right end of each question's line; none on a "
+          "Haiku answer's line (f7 folded); one on the Sonnet answer's line",
+          got["place"],
+          [[[1, True, True], [0, False]]] * 7 + [[None, [1, True]]])
+    check("[page] F7 · unfolded, the Haiku answer's line still has no Remove",
+          got["unfolded"], [0, 0, 0, 0, 0, 0, 0, 1])
+    check("[page] F7 · the question's Remove hides the top-level answer; the Sonnet's hides "
+          "only itself", [got["q_remove"], got["s_remove"]],
+          [[{"answer_id": "f7"}], [{"answer_id": "f8"}]])
+    check("[page] F7 · the toast: 'Removed from this conversation ·' + Undo, for 5 s",
+          got["toast"], [["Removed from this conversation ·"], ["Undo"], 5000])
+    check("[page] F7 · Undo: one unhide_turn with the id passed to hide_turn, then one "
+          "re-read; the turn back; place kept (no pane event); 'Undone · …'",
+          got["undo"], [[{"answer_id": "f8"}], 1, [7, 8], [],
+                        "Undone · remove from this conversation", True])
+    check("[page] F7 · two Removes, one Undo: only the last comes back; a second Undo sends "
+          "nothing", [got["one"], got["one_again"]],
+          [[{"answer_id": "f5"}], [0, "Nothing to undo"]])
+    check("[page] F7 · a refused Undo says K3's reason, re-reads nothing, no 'Undone'; "
+          "nothing answering says the app isn't running",
+          [got["refused"], got["down"]],
+          [["Not restored · that answer is not hidden: f3", 0],
+           [False, "The app isn't running. Click the News Intelligence icon."]])
+    css = _css_without_comments()
+    check("[page] F7 · Remove sits in the row's own third column, not drawn over the line",
+          [_look(css, ".turn-row.has-end").get("grid-template-columns"),
+           _look(css, ".turn-remove").get("position"),
+           _look(css, ".turn-remove").get("text-decoration")],
+          ["22px minmax(0, 1fr) auto", None, "underline"])
+    check("[page] F7 · Remove shows on its turn's hover and on keyboard focus within it",
+          [_look(css, ".turn-remove").get("opacity"),
+           _look(css, ".pane-turn:hover .turn-remove").get("opacity"),
+           _look(css, ".pane-turn:focus-within .turn-remove").get("opacity")],
+          ["0", "1", "1"])
+
+
+def f7_routes():
+    """fo-1 F7 · hide and Undo on K3's real reader, through the ASGI app, on the section's
+    copy of intel.db, fake model.
+
+    Pass lines, written before the run:
+    - Hiding a Haiku answer with a Think harder child hides exactly those two ids; the
+      conversation keeps everything else.
+    - With two hide actions done, unhide_turn(<the first id>) restores exactly that
+      action's ids; the second action's answer stays hidden.
+    - Hiding the Sonnet answer hides only it; its parent stays; unhiding it restores only it.
+    What would pass while broken: an unhide that cleared every hidden turn (the second
+    action's answer would come back).
+    """
+    import p3_app as A
+    A.data = R
+    a1 = list(R.ask("police", None))[-1]["answer"]["answer_id"]
+    s1 = list(R.think_harder(a1))[-1]["answer"]["answer_id"]
+    b1 = list(R.ask("and the courts", None))[-1]["answer"]["answer_id"]
+    before = _pane_ids()
+    status, body = _post("/api/hide_turn", {"answer_id": a1})
+    check("[fixture] F7 · hiding a Haiku answer hides it and its Think harder child, exactly",
+          [status, sorted(body.get("hidden", []))], [200, sorted([a1, s1])])
+    check("[fixture] F7 · and nothing else leaves the conversation",
+          _pane_ids(), [x for x in before if x not in (a1, s1)])
+    _post("/api/hide_turn", {"answer_id": b1})
+    status, body = _post("/api/unhide_turn", {"answer_id": a1})
+    check("[fixture] F7 · Undo restores exactly one hide action: the first back, the second "
+          "still hidden",
+          [status, sorted(body.get("unhidden", [])), b1 in _pane_ids(), _pane_ids()[-2:]],
+          [200, sorted([a1, s1]), False, [a1, s1]])
+    status, body = _post("/api/hide_turn", {"answer_id": s1})
+    after_hide = _pane_ids()
+    status2, body2 = _post("/api/unhide_turn", {"answer_id": s1})
+    check("[fixture] F7 · the Sonnet answer hides alone and comes back alone",
+          [status, body.get("hidden"), a1 in after_hide, s1 in after_hide,
+           status2, body2.get("unhidden"), s1 in _pane_ids()],
+          [200, [s1], True, False, 200, [s1], True])
 
 # ------------------------------------------------------------- I9 · every button pressed
 # Brief §4.6. (A) boots the whole page under jsc against the real server's own answers,
@@ -7545,7 +7728,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f7_page, f7_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
