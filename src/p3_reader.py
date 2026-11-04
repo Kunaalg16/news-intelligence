@@ -1160,6 +1160,7 @@ try:                                                  # pragma: no cover - wave 
     from p3_search import (search, facets, ask, think_harder, ask_background,  # noqa: F401
                            estimate_cost, suggest_connections, passages,       # noqa: F401
                            current_conversation, new_conversation, add_divider,  # noqa: F401
+                           get_answer,                                         # noqa: F401
                            ERROR_RETRYABLE)                                    # noqa: F401
 except ImportError:
     pass

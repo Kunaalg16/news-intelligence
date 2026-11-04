@@ -1679,6 +1679,13 @@ def _find_answer(answer_id):
     return row[0], row[1], json.loads(row[2])
 
 
+def get_answer(answer_id):
+    """One stored answer object by id (contract v2.5 line 11), as `current_conversation()`
+    shows it -- hidden and replaced answers too (a pin snapshot or Think harder may name
+    one). Unknown id -> LookupError."""
+    return _find_answer(answer_id)[2]
+
+
 def _exchange_text(answer):
     said = " ".join(s["text"] for s in answer.get("sentences") or []) or "(no answer)"
     return f"Q: {answer['question']}\nA: {said}"

@@ -83,6 +83,27 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
   - no code path reads `followup_carry_words`; `conversation_new_each_day` is False;
   - the summary is cut to `summary_max_chars` (TC-10);
   - added time before `results` and added cost per follow-up measured with the fake.
+  FP-5 · re-ask, hide / Undo, in-flight guard (fixed 4 Nov before the run, brief fp-1
+  §6 FP-5; fake client only):
+  - get_answer(id) returns the stored answer, a hidden one too; unknown -> LookupError;
+  - every refusal (reask: unknown id, Think harder id, hidden id, mode AND scope,
+    two_searches on a never-split chain; unhide: not hidden, hidden by a re-ask; the
+    guard's "already running") raises before any event and before any model call;
+  - a re-ask keeps the replaced answer's position, after a reload too, and through a
+    chain of 3; the rewriter sees only the visible exchanges BEFORE the replaced turn;
+  - hide sets are exact: a Haiku answer hides itself, its Think harder child and its
+    background (gap 4, TC-7); a Think harder answer hides only itself; a re-ask hides
+    the same set with hidden_by "reask";
+  - after a hide, the next writer prompt and rewriter prompt hold none of the hidden text;
+  - Undo restores exactly one hide action; an answer hidden by a re-ask refuses Undo;
+  - hide -> Undo -> ask = 0 summary calls; hide -> ask = 1 (TC-11);
+  - two_searches on a chain split -> one_search -> back reuses the original two
+    queries with 0 rewriter calls; a scope re-ask keeps the topic decision and
+    queries with 0 rewriter calls;
+  - guard: a slow fake background on a thread, a second call -> ValueError, one
+    cost_log row, the refusal logged; the guard is free again after a raised exception
+    and after an early-closed stream;
+  - double_paid_rows finds a planted pair and does not count a check retry.
   (Q17 fused recall@5 = 100%: `_work/k3_q17_score.py`, run separately; the real
   intel.db fingerprint: `_work/k3_fp_out/fp.py` before and after.)
   A failed line is answered by error analysis, not by moving the line.
@@ -2031,6 +2052,39 @@ def fp4_mock(tmp):
             os.environ.pop(k, None)
 
 
+def fp5_mock(tmp):
+    import os
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query)
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    S.embed_query = lambda q, **kw: VECS["repo"]
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+    try:
+        # --- get_answer (committed first: FP-6's pin snapshot reads it) ------------
+        S.new_conversation()
+        S._CLIENT = Fake(GOOD)
+        a = run(S.ask("Did the repo rate go up?"))[-1]["answer"]
+        R.close_all()
+        check("[fp5] get_answer returns the stored answer",
+              S.get_answer(a["answer_id"]), a)
+        check("[fp5] get_answer on an unknown id -> LookupError",
+              raises(lambda: S.get_answer("ans_nope"), LookupError), True)
+        check("[fp5] get_answer is re-exported by p3_reader", R.get_answer is S.get_answer,
+              True)
+    finally:
+        S._CLIENT = None
+        S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
+        R.close_all()
+        for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+            os.environ.pop(k, None)
+
+
 def fp4_real():
     """K3's 3 Nov line on the REAL archive: "police" after the EPFO question. A fake
     rewriter carries (the old joining's query); the search is read-only; the rewrite's
@@ -2106,6 +2160,8 @@ def main():
         fp3_mock(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         fp4_mock(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        fp5_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():
