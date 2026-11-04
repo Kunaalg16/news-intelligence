@@ -6601,6 +6601,10 @@ def run_section(fn, *args):
         # its last question (`_search_query`), so "police" came back empty on 3 Nov.
         PS.new_conversation()
         root, archive, work = R.ROOT, R.ARCHIVE, R.WORK
+        # S5 F5 · every request through the ASGI app writes a log line: to this
+        # section's temp dir, never the real data/logs (rule 7: the directory too).
+        log_dir = A.LOG_DIR
+        A.LOG_DIR = Path(tmp) / "logs"
         try:
             fn(*args)
         except Exception as exc:
@@ -6613,6 +6617,7 @@ def run_section(fn, *args):
         finally:
             R.close_all()
             R.ROOT, R.ARCHIVE, R.WORK = root, archive, work
+            A.LOG_DIR = log_dir
             A.data = R
             check(f"{fn.__name__} left the fake model in place", PS._CLIENT, fake_model)
             os.environ.pop("P3_READER_INTEL_DB", None)
@@ -6682,9 +6687,69 @@ def s5_server():
     check("[page] F4 · PDFs are left as they were (no Cache-Control added)",
           [page, whole], [(200, None), (200, None)])
 
+    # F5 (R-3) · one timing line per request. The section's log dir is already a temp
+    # one (run_section); these checks use one of their own so the counts are exact.
+    # What would pass while broken: a log that is never read back -- every check reads
+    # the file; a query string logged only for some routes -- checked on search AND ask.
+    import contextlib, io
+    log_kept = A.LOG_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        A.LOG_DIR = Path(tmp) / "logs"
+        log = A.LOG_DIR / "app.log"
+        lines = lambda: log.read_text().splitlines() if log.exists() else []  # noqa: E731
+        try:
+            _get("/api/status")
+            one = lines()
+            check("[page] F5 · a request appends exactly one line: time, method, path, "
+                  "status, total ms",
+                  [len(one), bool(re.fullmatch(
+                      r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d GET /api/status 200 total \d+ ms",
+                      one[-1] if one else ""))], [1, True])
+            _get("/api/digest", b"ref=no-such-digest")
+            check("[page] F5 · the line carries the answer's own status",
+                  lines()[-1].split()[2:5] if len(lines()) == 2 else None,
+                  ["GET", "/api/digest", "404"])
+            _get("/api/search", b"q=zebrafinchsecret&sort=relevance")
+            status, _h, _b = _http("POST", "/api/ask", b"note=zebrafinchsecret",
+                                   json.dumps({"question": "what did the police say"}).encode())
+            got = lines()
+            stream = got[-1] if len(got) == 4 else ""
+            m = re.search(r"total (\d+) ms first byte (\d+) ms$", stream)
+            check("[page] F5 · a stream's line has total and first byte, first byte <= total",
+                  [status, stream.split()[2:5], bool(m) and int(m.group(2)) <= int(m.group(1))],
+                  [200, ["POST", "/api/ask", "200"], True])
+            check("[page] F5 · a query string never reaches the log (search, ask)",
+                  "zebrafinchsecret" in log.read_text(), False)
+            check("[page] F5 · a plain route's line has no first-byte part",
+                  [" first byte " in l for l in got[:3]], [False, False, False])
+            # The writer must never break a request: point the log at a FILE as its dir.
+            blocker = Path(tmp) / "not_a_dir"
+            blocker.write_text("x")
+            A.LOG_DIR = blocker
+            A._LOG_WARNED.clear()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                answers = [_get("/api/status")[0], _get("/api/status")[0]]
+            check("[page] F5 · a log that cannot be written breaks nothing: both answer "
+                  "200, one console warning", [answers, err.getvalue().count("p3_app: "
+                                                "request log not written")], [[200, 200], 1])
+        finally:
+            A.LOG_DIR = log_kept
+            A._LOG_WARNED.clear()
+
+
+REAL_APP_LOG = ROOT / "data" / "logs" / "app.log"
+
+
+def _log_state():
+    """The real app.log's size and checksum (None if absent): the suite must not move it."""
+    return (REAL_APP_LOG.stat().st_size, _checksum(REAL_APP_LOG)) if REAL_APP_LOG.exists() \
+        else None
+
 
 def main():
     before = _checksum(REAL_INTEL)
+    log_before = _log_state()
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
@@ -6693,6 +6758,8 @@ def main():
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
           _checksum(REAL_INTEL) == before, True)
+    check("[page] F5 · the real data/logs/app.log is what it was before the run",
+          _log_state() == log_before, True)
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")

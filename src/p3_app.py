@@ -61,6 +61,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -70,6 +71,7 @@ import pymupdf                        # cuts one page out of a PDF (I4); in .ven
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / "app"
+LOG_DIR = ROOT / "data" / "logs"      # F5 · the request log goes to LOG_DIR / "app.log"
 ARCHIVE = ROOT / "archive"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -169,6 +171,64 @@ class _CacheHeaders:
 
 
 app.add_middleware(_CacheHeaders)
+
+# F5 (R-3) · one timing line per request, appended to data/logs/app.log, so a slow answer
+# leaves a trace (L-7: 30-60 s answers, and the log was 0 bytes). The launcher sends the
+# server's own output to the same file with `>>`; both append, so lines do not tear.
+# The path is logged WITHOUT the query string: questions and searches stay out of it.
+# No rotation: a page load is about 25 lines (about 2.5 kB).
+STREAM_PATHS = ("/api/ask", "/api/think_harder", "/api/reask")   # also log first byte
+_LOG_WARNED = []
+
+
+def _log_request(line):
+    """Never breaks a request: a failure to write is said once on the console, then
+    swallowed."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_DIR / "app.log", "a", encoding="utf-8") as out:
+            out.write(line + "\n")
+    except Exception as exc:                  # noqa: BLE001 -- by design, see above
+        if not _LOG_WARNED:
+            _LOG_WARNED.append(exc)
+            print(f"p3_app: request log not written ({exc}); later failures are "
+                  "not reported", file=sys.stderr)
+
+
+class _RequestLog:
+    """Times each request from arrival to its last byte; for a stream, also to its
+    first byte (the wait before the first event). Plain ASGI, so a stream is timed as
+    it really leaves, not as a buffered whole."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.inner(scope, receive, send)
+        start = time.perf_counter()
+        seen = {"status": None, "first": None}
+
+        async def send_timed(message):
+            if message["type"] == "http.response.start":
+                seen["status"] = message["status"]
+            elif (message["type"] == "http.response.body" and seen["first"] is None
+                    and message.get("body")):
+                seen["first"] = time.perf_counter()
+            await send(message)
+
+        try:
+            await self.inner(scope, receive, send_timed)
+        finally:
+            ms = lambda t: round((t - start) * 1000)       # noqa: E731
+            line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} {scope['method']} "
+                    f"{scope['path']} {seen['status'] or 500} total {ms(time.perf_counter())} ms")
+            if scope["path"] in STREAM_PATHS and seen["first"] is not None:
+                line += f" first byte {ms(seen['first'])} ms"
+            _log_request(line)
+
+
+app.add_middleware(_RequestLog)      # added last = outermost: it times everything
 
 
 # ------------------------------------------------------------------ small helpers
