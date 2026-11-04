@@ -38,6 +38,7 @@ const S = {
   suggesting: {},                /* story_id -> true while its suggest call runs (K-3) */
   backgroundBusy: {},            /* answer_id -> true while its background call runs */
   backgroundError: {},           /* answer_id -> {message} from a refused background */
+  stillRunning: {},              /* answer_id -> true: its paid action runs from an earlier press (F6) */
   widened: null,                 /* answer_id just re-asked of all papers (K-6), until the next question */
   seeAlsoOpen: {},               /* story_id -> true while D1's fold is open; not a pref */
   userLinks: {},                 /* story_id -> the links the reader made out of it */
@@ -2331,7 +2332,9 @@ async function askBackground(answerId) {
   renderAssistant();
   const got = await api.background(answerId);
   delete S.backgroundBusy[answerId];
-  if (got && got.error) {
+  if (got && got.error && got.error.status === 400 && isAlreadyRunning(got.error.message)) {
+    markStillRunning(answerId);
+  } else if (got && got.error) {
     S.backgroundError[answerId] = got.error;
   } else {
     const answer = answerById(answerId);
@@ -2382,6 +2385,13 @@ function paneButton(role, props, ...children) {
   return el('button', Object.assign({}, props, {
     class: PANE_BUTTON[role].class + (own ? ' ' + own : ''), type: 'button',
   }), ...children);
+}
+
+/* F6 · a scope correction re-asks in place (flag on), so it spends the ask price and
+   says so as every spending button does; no estimate read, no price. */
+function buttonPrice(kind) {
+  const usd = S.estimates[kind];
+  return usd === null || usd === undefined ? null : [' · ', costTag(usd)];
 }
 
 function costTag(usd) {
@@ -2437,6 +2447,7 @@ function notCoveredCount(answer) {
    is free now (it was ochre, Q3 c): it widens the question, and the question it then
    asks is what costs, at the usual price. */
 function actionsRow(answer) {
+  if (S.stillRunning[answer.answer_id]) return stillWorkingLine();
   const none = answer.verdict === 'empty';
   const row = el('div', { class: 'answer-actions' });
 
@@ -2469,7 +2480,7 @@ function actionsRow(answer) {
         /* A Think harder answer has no question of its own: its parent is re-asked. */
         ? reaskInPlace(answer.parent_answer_id || answer.answer_id, { scope: ALL_SCOPE })
         : askAllPapers(answer.question)),
-    }, 'Ask all papers instead'));
+    }, 'Ask all papers instead', S.flags.followup_rewrite ? buttonPrice('ask') : null));
   }
 
   /* I8 · the other way: asked of all papers while a story is open. Flag only. */
@@ -2479,7 +2490,7 @@ function actionsRow(answer) {
       onclick: () => reaskInPlace(answer.answer_id, { scope: {
         story_id: S.scope.story_id, text_hashes: S.scope.text_hashes || [],
         filters: (answer.scope || {}).filters || {} } }),
-    }, 'Ask in this story instead'));
+    }, 'Ask in this story instead', buttonPrice('ask')));
   }
 
   row.append(answerPinButton(answer));
@@ -2494,7 +2505,7 @@ function refusedBox(error, retry, what, paidCost) {
   return el('div', { class: 'pane-error' },
     el('p', { class: 'error-first',
               text: error.status === 0 ? NOT_RUNNING : what + ' · ' + error.message }),
-    paidCost === undefined
+    paidCost === undefined || paidCost === null
       ? el('button', { class: 'reset action', type: 'button', onclick: retry }, 'Retry')
       : paneButton('paid', { onclick: retry }, 'Retry · ', costTag(paidCost)));
 }
@@ -2676,7 +2687,7 @@ async function streamAnswer(url, body, onEvent) {
   }
   S.reachable = true;
   if (!response.ok || !response.body) {
-    onEvent({ type: 'error', code: 'model_error', reason: 'other', retryable: true });
+    onEvent(await refusalEvent(response));
     return;
   }
   const reader = response.body.getReader();
@@ -2692,6 +2703,31 @@ async function streamAnswer(url, body, onEvent) {
   const last = ndjsonSplit(buffer, '\n');
   for (const event of last.events) onEvent(event);
 }
+
+/* F6 · a stream refused before its first event (K3's `ValueError` -> 400, `LookupError`
+   -> 404) carries K3's reason, shown with Retry as every other refusal (T-23). One reason
+   is not a failure: the same paid action is still running from an earlier press (TC-4),
+   so the page waits for it instead (`already_running`, no Retry). Anything without a
+   reason (a 500, an unreadable body) keeps the old "unexpected error". */
+async function refusalEvent(response) {
+  let got = null;
+  try { got = await response.json(); } catch (e) { got = null; }
+  const message = got && typeof got.detail === 'string' ? got.detail : null;
+  if (!message || (response.status !== 400 && response.status !== 404)) {
+    return { type: 'error', code: 'model_error', reason: 'other', retryable: true };
+  }
+  if (response.status === 400 && isAlreadyRunning(message)) {
+    return { type: 'error', code: 'already_running', message: message, retryable: false };
+  }
+  return { type: 'error', code: 'refused', status: response.status, message: message,
+           retryable: true };
+}
+
+/* The contract says the 400's message STARTS with "already running" (§12.2 #9); K3's
+   real message is "<action> is already running for <id>" (p3_search `_in_flight`). The
+   real code wins on a shape (brief header), so the phrase is matched anywhere. */
+const ALREADY_RUNNING = /\balready running\b/i;
+function isAlreadyRunning(message) { return ALREADY_RUNNING.test(String(message || '')); }
 
 /* L-3 · while a stream runs, words say what is working, not only the caret. */
 function workingWords(live) {
@@ -2715,8 +2751,13 @@ function liveTurn() {
     /* Nothing here: the band above the composer already says the cap is reached, with
        the real numbers in it. Drawing a box too would repeat it in the wrong words. */
     void 0;
+  } else if (live.error && live.error.code === 'already_running') {
+    body.append(stillWorkingLine());
   } else if (live.error) {
-    const words = errorWording(live.error);
+    const words = live.error.code === 'refused'
+      ? { first: "Couldn't get an answer · " + live.error.message, hint: REFUSED_HINT,
+          retry: true }
+      : errorWording(live.error);
     const box = el('div', { class: 'pane-error' },
       el('p', { class: 'error-first', text: words.first }),
       el('p', { class: 'error-hint', text: words.hint }));
@@ -2810,7 +2851,8 @@ async function runThinkHarder(answerId) {
     renderAssistant();
   });
   const live = S.live;
-  if (!keepLiveAfterStream(live)) S.live = null;
+  if (stillRunningFrom(live, answerId)) S.live = null;
+  if (!keepLiveAfterStream(S.live)) S.live = null;
   if (live && live.answer) S.results[live.answer.answer_id] = S.results[answerId];
   await refreshConversation();
   S.cost = await api.cost();
@@ -2867,17 +2909,20 @@ function showCapConfirm(actions) {
    in place. `topic` missing or unknown: no line (§6 rule 6: nothing to say honestly). */
 
 const TOPIC_WORDS = {
-  follow_up: { said: (e) => 'Follow-up of your ' + e + ' question',
+  /* F6 · with K3's `earlier_label` (2-5 words naming the earlier topic) the line names
+     the topic; without it, T-37's quote of the earlier question. */
+  follow_up: { said: (e, named) => named ? 'Follow-up of the ' + e + ' topic'
+                                         : 'Follow-up of your ' + e + ' question',
                redone: (e) => 'Asked in the ' + e + ' topic',
                act: () => 'Treat as new topic', mode: 'as_typed' },
   new_topic: { said: () => 'New topic', redone: () => 'Asked as a new topic',
                act: (e) => 'Ask in the ' + e + ' topic instead', mode: 'carry' },
   two_searches: { said: () => 'Two searches', redone: () => 'Searched as two topics',
                   act: () => 'Search as one question', mode: 'one_search' },
-  /* No mode asks for two searches; none at all hands the choice back to the rewriter,
-     which is what "and back" can honestly promise (T-35). */
+  /* F6 · K3's `two_searches` mode (call 5 A) reuses the two queries of the nearest split
+     answer up the chain; drawn only here, on an answer searched as one. */
   one_search: { said: () => 'One search', redone: () => 'Searched as one question',
-                act: () => 'Search as two topics', mode: null },
+                act: () => 'Search as two topics', mode: 'two_searches' },
 };
 
 const EARLIER_WORDS = 4;
@@ -2911,16 +2956,66 @@ function earlierQuestion(answer) {
   return (root || before || {}).question || null;
 }
 
+/* F6 · the earlier topic's name: K3's `earlier_label` when the rewriter gave one, else
+   the 4-word quote. `named` says which, for the one wording that differs. */
+function earlierName(answer) {
+  const label = String(answer.earlier_label || '').trim();
+  return label ? { text: label, named: true }
+               : { text: earlierWords(earlierQuestion(answer)), named: false };
+}
+
+/* F6 (call 10 A) · a correction re-asks, at the ask price: "· ≈ 0.08¢" after it, in the
+   line's grey. No estimate read: no price rather than a guessed one. */
+function correctionPrice() {
+  const ask = S.estimates.ask;
+  if (ask === null || ask === undefined) return null;
+  return el('span', { class: 'topic-price', text: ' · ≈ ' + moneyFine(ask) });
+}
+
 function topicLine(answer, first) {
   if (!S.flags.followup_rewrite || first || answer.parent_answer_id) return null;
   const words = TOPIC_WORDS[answer.topic];
   if (!words) return null;
-  const earlier = earlierWords(earlierQuestion(answer));
+  const earlier = earlierName(answer);
   return el('p', { class: 'topic-line' },
-    (answer.replaces_answer_id ? words.redone(earlier) : words.said(earlier)) + ' · ',
+    (answer.replaces_answer_id ? words.redone(earlier.text)
+                               : words.said(earlier.text, earlier.named)) + ' · ',
     el('button', { class: 'reset topic-act', type: 'button',
                    onclick: () => reaskInPlace(answer.answer_id, { mode: words.mode }) },
-       words.act(earlier)));
+       words.act(earlier.text)),
+    correctionPrice());
+}
+
+/* F6 (TC-4, sheet item 8 A) · the same paid action is still running from an earlier
+   press (another window, or a reload mid-answer). In place of the answer's button row,
+   one italic grey line and no Retry; the pane re-reads the conversation when the window
+   regains focus and once after 30 s, and each re-read gives the row back (a press while
+   it still runs is refused again, free, and says so again). */
+const STILL_WORKING = 'Still working on this · it appears here when done';
+const STILL_REREAD_MS = 30000;
+const REFUSED_HINT = 'Nothing was asked and nothing was charged.';
+
+function stillWorkingLine() {
+  return el('p', { class: 'still-working', role: 'status', text: STILL_WORKING });
+}
+
+function markStillRunning(answerId) {
+  S.stillRunning[answerId] = true;
+  setTimeout(rereadIfStillRunning, STILL_REREAD_MS);
+}
+
+/* After a stream: was it refused as already running? Then the answer it was for waits. */
+function stillRunningFrom(live, answerId) {
+  if (!live || !live.error || live.error.code !== 'already_running') return false;
+  markStillRunning(answerId);
+  return true;
+}
+
+async function rereadIfStillRunning() {
+  if (!Object.keys(S.stillRunning).length) return;
+  S.stillRunning = {};
+  await refreshConversation();
+  renderAssistant();
 }
 
 /* K-6 (Kunaal, 4 Nov, option c) · a scope correction re-asks one answer and leaves the
@@ -2999,7 +3094,8 @@ async function reaskInPlace(answerId, change) {
   await streamAnswer('/api/reask', Object.assign({ answer_id: answerId }, change),
                      takeLiveEvent);
   const live = S.live;
-  if (!keepLiveAfterStream(live)) S.live = null;
+  if (stillRunningFrom(live, answerId)) S.live = null;
+  if (!keepLiveAfterStream(S.live)) S.live = null;
   if (live && live.answer && live.results) S.results[live.answer.answer_id] = live.results;
   /* K-6: widened to all papers while the chip still names a story -> offer to follow. */
   S.widened = live && live.answer && change.scope && !change.scope.story_id
@@ -3554,7 +3650,8 @@ function suggestSection(story) {
   const got = S.suggestions[story.story_id];
   if (got && got.error) {
     return el('div', { class: 'suggest-offer' },
-      refusedBox(got.error, () => askForSuggestions(story), 'No suggestions'));
+      refusedBox(got.error, () => askForSuggestions(story), 'No suggestions',
+                 S.estimates.suggest));
   }
   if (got) return suggestionsBox(story, got);
   const busy = Boolean(S.suggesting[story.story_id]);
@@ -4109,6 +4206,7 @@ async function boot() {
   const digest = await api.digest(S.ref);
   S.appVersion = status ? status.app_version : null;     /* F3 · as loaded */
   window.addEventListener('focus', checkVersion);
+  window.addEventListener('focus', rereadIfStillRunning);
   if (typeof setInterval === 'function') {        /* jsc (the suite's boot) has none */
     setInterval(checkVersion, VERSION_CHECK_MINUTES * 60 * 1000);
   }
@@ -4236,6 +4334,9 @@ const EXPORTS = {
   TOPIC_WORDS, EARLIER_WORDS, ALL_SCOPE, TURN_REMOVED, REMOVE_TOAST_SECONDS, earlierWords,
   earlierQuestion, topicLine, paneTurns, reaskInPlace, removeButton, removeTurn,
   resultGroups, takeLiveEvent, toast, widenLine, WIDEN_WORDS, clearScope,
+  earlierName, correctionPrice, buttonPrice, STILL_WORKING, STILL_REREAD_MS, REFUSED_HINT,
+  stillWorkingLine, markStillRunning, stillRunningFrom, rereadIfStillRunning,
+  refusalEvent, isAlreadyRunning, runThinkHarder,
   /* The pane's DOM builders are exported too. v0 left the DOM-building functions to
      the eye for want of a browser; the tests give jsc an 80-line DOM instead, which
      is the difference between checking that the nine states render and hoping. */

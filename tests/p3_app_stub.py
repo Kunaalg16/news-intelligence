@@ -96,7 +96,7 @@ FOLLOWUP_CONVERSATION = {"conversation_id": "c_stub", "started_at": "2026-11-04T
 # What a re-ask under each mode says it did (§11.2: `mode` overrides the rewriter; no
 # mode lets it decide, which for f5 is two searches again). A table, not a rule.
 REASK_TOPIC = {"as_typed": "new_topic", "carry": "follow_up", "one_search": "one_search",
-               None: "two_searches"}
+               "two_searches": "two_searches", None: "two_searches"}
 
 # What the suite's checks read back: every reask / hide_turn call, in order, and the
 # answers hidden so far. Lists in memory; nothing is written anywhere.

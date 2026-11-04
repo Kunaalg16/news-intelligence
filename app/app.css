@@ -1147,6 +1147,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   text-decoration: underline;
 }
 .topic-act:hover { color: var(--ink); }
+.topic-price { white-space: nowrap; }   /* F6 · "· ≈ 0.08¢" stays with its action */
 /* Remove sits at the turn's top right, on the pane's ground so it covers a long
    question's end cleanly; seen on hover and on keyboard focus. Opacity, not display,
    so it stays in the tab order. `.pane-turn` is `position: relative` for it. */
@@ -1524,13 +1525,14 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    ("FOUND · N STORIES", "Closest stories"), DAY / WEEK. In progress ("… is writing",
    "Still working on this") the same, italic. One rule, so no kind can drift. */
 .answer-line, .topic-line, .answer-hint, .answer-weak, .mode-note, .results-fold,
-.mark, .pane .block-label, .kind-label, .answer-working {
+.mark, .pane .block-label, .kind-label, .answer-working, .still-working {
   font-family: var(--sans);
   font-size: var(--s115);
   font-weight: 500;
   color: var(--text-muted);
 }
-.answer-working { font-style: italic; }
+.answer-working, .still-working { font-style: italic; }
+.still-working { margin: 10px 0 0; }
 .mark-cited { color: var(--ochre); }   /* after the rule above: ochre ink (Kunaal, 5 Nov) */
 .results-fold { display: block; text-align: left; }
 .results-fold:hover { color: var(--ink); }

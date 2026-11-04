@@ -3007,7 +3007,7 @@ def contrast():
 # F5 · the kinds of small grey line the style rule names (brief fo-1 §4.2), by class.
 F5_GREY_KINDS = (".answer-line", ".topic-line", ".answer-hint", ".answer-weak", ".mode-note",
                  ".results-fold", ".mark", ".pane .block-label", ".kind-label",
-                 ".answer-working")
+                 ".answer-working", ".still-working")
 
 
 def _look(css, selector):
@@ -3087,7 +3087,8 @@ def look_i7():
           {k: want for k in F5_GREY_KINDS})
     check("[page] F5 · style rule: only the in-progress line is italic",
           {k: _look(css, k).get("font-style") for k in F5_GREY_KINDS},
-          {k: ("italic" if k == ".answer-working" else None) for k in F5_GREY_KINDS})
+          {k: ("italic" if k in (".answer-working", ".still-working") else None)
+           for k in F5_GREY_KINDS})
     # Same specificity as the shared `.mark` rule, so it must come AFTER it to win (the
     # first version came before and the browser drew CITED grey: caught by the run check).
     rules = re.findall(r"([^{}]+)\{([^}]*)\}", css)
@@ -5099,9 +5100,11 @@ main().then(function () { print(JSON.stringify(OUT)); },
           got["k3_busy"], [["Looking for related stories…", True]])
     check("[page] K-3 · a second press while it runs sends nothing (one press = one call)",
           got["k3_calls_while_busy"], 1)
-    check("[page] K-3 · a refusal shows the server's message and a Retry, in the same place",
+    # F6 (call 10 A): Suggest's own Retry spends a suggest call, so it is paid and priced.
+    check("[page] K-3 · a refusal shows the server's message and a paid Retry with the "
+          "suggest price, in the same place",
           [("the model service is busy" in got["k3_refused"][0]),
-           [b[0] for b in got["k3_refused"][1]]], [True, ["Retry"]])
+           [b[0] for b in got["k3_refused"][1]]], [True, ["Retry · ≈ 0.06¢"]])
     check("[page] K-3 · Retry sends exactly one more", got["k3_calls_after_retry"], 2)
     check("[page] I6 · meaning search off: the suggest box says so, not 'nothing related'",
           got["fts_suggest"].startswith("Can't look for related stories right now: meaning "
@@ -5542,16 +5545,16 @@ async function main() {
   ST.scope = {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}};
   OUT.in_story = turns().map(function (x) {
     return nodesOf(x, "button").filter(function (b) {
-      return textOf(b) === "Ask in this story instead"; }).length; });
+      return textOf(b).indexOf("Ask in this story instead") === 0; }).length; });
   var allBtn = nodesOf(turns()[2], "button").filter(function (b) {
-    return textOf(b) === "Ask all papers instead"; })[0];
+    return textOf(b).indexOf("Ask all papers instead") === 0; })[0];
   await press(allBtn);
   OUT.all_papers = [sent('/api/reask').map(function (c) { return c[2]; }),
                     sent('/api/ask').length, ST.scope.story_id];
   CALLS = [];
   ST.conversation = JSON.parse(JSON.stringify(CONV));
   var storyBtn = nodesOf(turns()[1], "button").filter(function (b) {
-    return textOf(b) === "Ask in this story instead"; })[0];
+    return textOf(b).indexOf("Ask in this story instead") === 0; })[0];
   await press(storyBtn);
   OUT.this_story = sent('/api/reask').map(function (c) { return c[2]; });
 
@@ -5640,12 +5643,13 @@ main().then(function () { print(JSON.stringify(OUT)); },
     check("[page] I8 · grey lines: none on the first answer or a missing topic; each topic "
           "word for word (read back with nothing in memory, as after a reload)",
           got["lines"],
+          # F6 (call 10 A): each correction is followed by the ask price, "· ≈ 0.08¢"
           [None,
-           f"Follow-up of your {E} question · Treat as new topic",
-           f"New topic · Ask in the {E} topic instead",
-           "Two searches · Search as one question",
-           "One search · Search as two topics",
-           f"Asked in the {E} topic · Treat as new topic",
+           f"Follow-up of your {E} question · Treat as new topic · ≈ 0.08¢",
+           f"New topic · Ask in the {E} topic instead · ≈ 0.08¢",
+           "Two searches · Search as one question · ≈ 0.08¢",
+           "One search · Search as two topics · ≈ 0.08¢",
+           f"Asked in the {E} topic · Treat as new topic · ≈ 0.08¢",
            None])
     check("[page] I8 · [earlier] is the first 4 words in quotes; short ones whole; none "
           "reads 'earlier'", got["earlier"],
@@ -5661,7 +5665,8 @@ main().then(function () { print(JSON.stringify(OUT)); },
            [{"answer_id": "f2", "mode": "as_typed"}],
            [{"answer_id": "f3", "mode": "carry"}],
            [{"answer_id": "f4", "mode": "one_search"}],
-           [{"answer_id": "f5", "mode": None}],
+           # F6: K3's `two_searches` mode (call 5 A), was none (T-35)
+           [{"answer_id": "f5", "mode": "two_searches"}],
            [{"answer_id": "f6", "mode": "as_typed"}],
            None])
     check("[page] I8 · and no correction asks anew", got["modes_ask"], 0)
@@ -5923,6 +5928,193 @@ main().then(function () { print(JSON.stringify(OUT)); },
 F4_STORY = []   # (story id, article count) the story route was checked on, for the summary
 
 
+def f6_page():
+    """fo-1 F6 · the follow-up display (brief §3.4), flag on, on the stub's seven turns.
+
+    Pass lines, written before the run:
+    - Topic line: `earlier_label` given -> "Follow-up of the {earlier_label} topic · Treat
+      as new topic"; "Ask in the {earlier_label} topic instead" on a new topic; a blank
+      label reads as none -> T-37's 4-word quote. None on the first answer or without
+      `topic` (I8).
+    - "Search as two topics" is drawn on the `one_search` answer only, and sends
+      mode "two_searches" (I8's mode check).
+    - Prices: every topic-line correction is followed in its line by "· ≈ {ask
+      estimate}" (`topic-price`, after the link); no estimate read -> no price at all.
+      "Ask all papers instead" / "Ask in this story instead" carry "· ≈ {ask}" while the
+      flag is on (they re-ask); flag off "Ask all papers instead" stays unpriced (T-28).
+      Suggest's Retry is paid, "Retry · ≈ {suggest}" (K-3's check).
+    - Already running: a 400 whose message holds "already running" (K3's real "reask is
+      already running for f2", and the contract's bare "already running") -> no live
+      turn, no error box, no Retry; that answer's button row is replaced by one italic
+      grey line "Still working on this · it appears here when done"; other answers keep
+      their rows; a 30 s re-read is scheduled. Same for Think harder (on the parent) and
+      Background (no background error kept).
+    - The re-read (focus or 30 s) reads the conversation once and gives the row back;
+      with nothing waiting it reads nothing. Boot hangs it on the window's focus.
+    - Any other refusal keeps T-23: K3's message + Retry ("Couldn't get an answer · " +
+      message, "Nothing was asked and nothing was charged.", paid Retry); 404 too; a 500
+      without a reason keeps "unexpected error".
+    What would pass while broken: matching only the contract's "starts with" form -> K3's
+    real message is used; a waiting line that is never cleared -> the re-read check.
+    """
+    S.reset()
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+function lineOf(t) { var l = byClass(t, "topic-line")[0]; return l ? textOf(l) : null; }
+function firstLines(box) { return box ? nodesOf(box, "p").map(textOf) : null; }
+async function main() {
+  // --- the topic line with K3's earlier_label
+  fresh(); ST.stillRunning = {};
+  var conv = JSON.parse(JSON.stringify(CONV));
+  conv.turns[1].answer.earlier_label = "EPFO pension rules";
+  conv.turns[2].answer.earlier_label = "EPFO pension rules";
+  conv.turns[5].answer.earlier_label = "   ";
+  ST.conversation = conv;
+  OUT.labelled = turns().map(lineOf);
+
+  // --- where "Search as two topics" is drawn
+  fresh();
+  OUT.two_where = turns().map(function (t) { return byClass(t, "topic-act").filter(function (b) {
+    return textOf(b) === "Search as two topics"; }).length; });
+
+  // --- prices
+  OUT.prices = turns().map(function (t) {
+    var l = byClass(t, "topic-line")[0]; if (!l) return null;
+    var p = byClass(l, "topic-price"), a = byClass(l, "topic-act")[0];
+    return [p.length, p.length ? textOf(p[0]) : null,
+            textOf(l).indexOf(textOf(a)) < textOf(l).indexOf("≈")]; });
+  var keep = ST.estimates.ask; ST.estimates.ask = null;
+  OUT.no_estimate = turns().map(function (t) { var l = lineOf(t); return l === null ? null : l.indexOf("≈"); });
+  ST.estimates.ask = keep;
+  function scopeLabels() {
+    var seen = [];
+    nodesOf(pane(), "button").map(textOf).forEach(function (x) {
+      if (/^Ask (all papers|in this story) instead/.test(x) && seen.indexOf(x) < 0) seen.push(x); });
+    return seen.sort();
+  }
+  ST.scope = {story_id: "s_open", headline: "Open", text_hashes: ["h_o1"], filters: {}};
+  OUT.scope_on = scopeLabels();
+  ST.flags.followup_rewrite = false;
+  OUT.scope_off = scopeLabels();
+  ST.flags.followup_rewrite = true;
+
+  // --- already running: a re-ask
+  fresh(); ST.stillRunning = {}; delete STREAMS['/api/reask'];
+  REPLIES['/api/reask'] = [400, {detail: "reask is already running for f2"}];
+  DELAYS = [];
+  await APP.reaskInPlace("f2", {mode: "as_typed"});
+  var t2 = turns()[1];
+  OUT.ar_reask = [turns().length, ST.live === null, byClass(t2, "still-working").map(textOf),
+    byClass(t2, "answer-actions").length, byClass(pane(), "pane-error").length,
+    nodesOf(t2, "button").filter(function (b) { return /^Retry/.test(textOf(b)); }).length,
+    DELAYS.indexOf(30000) >= 0, byClass(turns()[6], "answer-actions").length,
+    byClass(turns()[6], "still-working").length];
+  var reads = sent('/api/conversation').length;
+  await APP.rereadIfStillRunning();
+  for (var j = 0; j < 40; j++) await null;
+  OUT.reread = [sent('/api/conversation').length - reads,
+                byClass(turns()[1], "still-working").length,
+                byClass(turns()[1], "answer-actions").length];
+  await APP.rereadIfStillRunning();
+  OUT.reread_idle = sent('/api/conversation').length - reads;
+
+  // --- the contract's own form of the message
+  fresh(); ST.stillRunning = {};
+  REPLIES['/api/reask'] = [400, {detail: "already running"}];
+  await APP.reaskInPlace("f3", {mode: "carry"});
+  OUT.ar_contract = byClass(turns()[2], "still-working").length;
+
+  // --- Think harder, on its parent
+  fresh(); ST.stillRunning = {}; delete STREAMS['/api/think_harder'];
+  REPLIES['/api/think_harder'] = [400, {detail: "think_harder is already running for f7"}];
+  await APP.runThinkHarder("f7");
+  OUT.ar_think = [ST.live === null, byClass(turns()[6], "still-working").length,
+                  byClass(turns()[6], "answer-actions").length, byClass(pane(), "pane-error").length];
+  STREAMS['/api/think_harder'] = STREAMS['/api/ask'];
+
+  // --- Background
+  fresh(); ST.stillRunning = {}; ST.backgroundError = {};
+  REPLIES['/api/background'] = [400, {detail: "background is already running for f5"}];
+  await APP.askBackground("f5");
+  OUT.ar_back = [byClass(turns()[4], "still-working").length, Object.keys(ST.backgroundError).length,
+                 byClass(pane(), "pane-error").length];
+  ST.stillRunning = {};
+  REPLIES['/api/background'] = [400, {detail: "this answer already has a background line"}];
+  await APP.askBackground("f5");
+  OUT.other_back = [byClass(turns()[4], "still-working").length,
+                    byClass(turns()[4], "pane-error").length];
+  delete REPLIES['/api/background']; ST.backgroundError = {};
+
+  // --- any other refusal: T-23
+  fresh(); ST.stillRunning = {};
+  REPLIES['/api/reask'] = [400, {detail: "unknown mode: 'x'"}];
+  await APP.reaskInPlace("f2", {mode: "x"});
+  var box = byClass(pane(), "pane-error")[0];
+  OUT.refused = [firstLines(box), box ? nodesOf(box, "button").map(textOf) : null,
+                 byClass(pane(), "still-working").length];
+  fresh(); REPLIES['/api/reask'] = [404, {detail: "no such answer: 'f9'"}];
+  await APP.reaskInPlace("f2", {});
+  OUT.refused404 = firstLines(byClass(pane(), "pane-error")[0]);
+  fresh(); REPLIES['/api/reask'] = [500, {}];
+  await APP.reaskInPlace("f2", {});
+  OUT.refused500 = firstLines(byClass(pane(), "pane-error")[0]);
+  delete REPLIES['/api/reask'];
+  OUT.match = ["already running", "reask is already running for f2", "Already running",
+               "alreadyrunning", "the run already ran"].map(APP.isAlreadyRunning);
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": S.FOLLOWUP_CONVERSATION})
+    check("F6 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    E = "“What did the EPFO…”"
+    P = " · ≈ 0.08¢"
+    check("[page] F6 · topic line names the earlier topic by earlier_label; a blank label "
+          "falls back to the 4-word quote", got["labelled"],
+          [None, "Follow-up of the EPFO pension rules topic · Treat as new topic" + P,
+           "New topic · Ask in the EPFO pension rules topic instead" + P,
+           "Two searches · Search as one question" + P, "One search · Search as two topics" + P,
+           f"Asked in the {E} topic · Treat as new topic" + P, None])
+    check("[page] F6 · 'Search as two topics' only on the answer searched as one",
+          got["two_where"], [0, 0, 0, 0, 1, 0, 0])
+    check("[page] F6 · each correction is followed in its line by '· ≈ {ask estimate}'",
+          [x if x is None else [x[0], (x[1] or "").strip(), x[2]] for x in got["prices"]],
+          [None] + [[1, "· ≈ 0.08¢", True]] * 5 + [None])
+    check("[page] F6 · no estimate read: no price, not a guessed one",
+          got["no_estimate"], [None, -1, -1, -1, -1, -1, None])
+    check("[page] F6 · the scope corrections carry the ask price while they re-ask (flag on); "
+          "flag off 'Ask all papers instead' stays unpriced",
+          [got["scope_on"], got["scope_off"]],
+          [["Ask all papers instead · ≈ 0.08¢", "Ask in this story instead · ≈ 0.08¢"],
+           ["Ask all papers instead"]])
+    STILL = "Still working on this · it appears here when done"
+    check("[page] F6 · already running (re-ask): no live turn, no error, no Retry; the "
+          "answer's row replaced by the italic grey line; other rows kept; 30 s re-read set",
+          got["ar_reask"], [7, True, [STILL], 0, 0, 0, True, 1, 0])
+    check("[page] F6 · the re-read reads the conversation once and gives the row back; "
+          "nothing waiting, nothing read", [got["reread"], got["reread_idle"]], [[1, 0, 1], 1])
+    check("[page] F6 · the contract's bare 'already running' is matched too",
+          got["ar_contract"], 1)
+    check("[page] F6 · already running (Think harder): the parent's row waits, no error box",
+          got["ar_think"], [True, 1, 0, 0])
+    check("[page] F6 · already running (Background): the row waits, no refusal kept; another "
+          "400 keeps its refusal box", [got["ar_back"], got["other_back"]], [[1, 0, 0], [0, 1]])
+    check("[page] F6 · any other refusal keeps T-23: K3's message, nothing charged, a paid Retry",
+          got["refused"], [["Couldn't get an answer · unknown mode: 'x'",
+                            "Nothing was asked and nothing was charged."], ["Retry · ≈ 0.08¢"], 0])
+    check("[page] F6 · a 404 says K3's reason too; a 500 with none keeps 'unexpected error'",
+          [got["refused404"][0], got["refused500"][0]],
+          ["Couldn't get an answer · no such answer: 'f9'",
+           "Couldn't get an answer · unexpected error"])
+    check("[page] F6 · 'already running' matched as a phrase, any case, nothing looser",
+          got["match"], [True, True, True, False, False])
+    src = (ROOT / "app" / "app.js").read_text()
+    boot = src[src.index("async function boot()"):]
+    check("[page] F6 · boot re-reads a waiting answer when the window regains focus",
+          "window.addEventListener('focus', rereadIfStillRunning);" in boot[:boot.index("\n}\n")],
+          True)
+
+
 def f4_routes():
     """fo-1 F4 · /api/reask, /api/hide_turn, /api/unhide_turn and /api/story onto K3's real
     functions, through the ASGI app, on the section's copy of intel.db, fake model.
@@ -6054,11 +6246,15 @@ I9_ESTIMATES = {"ask": 0.0008, "think_harder": 0.0213, "background": 0.0004,
 # as usual (T-28). The follow-up corrections re-ask at the ask price (brief §4.5 gives
 # them no price; T-44). Suggest's refusal "Retry": T-28 kept it outside the pane's
 # priced buttons; it spends a suggest call (finding, T-46).
-I9_UNPRICED_PAID = ["Ask", "Ask all papers instead", "Ask in this story instead",
+# F6 (call 10 A, 5 Nov): Suggest's Retry and "Ask in this story instead" now print their
+# price on the button and leave the list; "Ask all papers instead" stays for the flag-off
+# state, where it asks anew (T-28; with the flag on it is priced). The topic-line
+# corrections stay listed: their price is printed BESIDE the link, in its line ("· ≈
+# 0.08¢"), not on it -- F6's own check reads the line.
+I9_UNPRICED_PAID = ["Ask", "Ask all papers instead",
                     "Ask in the “What did the EPFO…” topic instead",
                     "Ask in the “what about the floods” topic instead",
-                    "Search as one question", "Search as two topics", "Treat as new topic",
-                    "Retry"]
+                    "Search as one question", "Search as two topics", "Treat as new topic"]
 
 
 def _tracked_app_js(tmp):
@@ -6897,7 +7093,7 @@ main().then(function () { print(JSON.stringify(OUT)); },
           [None, [[{"answer_id": "f2", "mode": "as_typed"}], 0],
            [[{"answer_id": "f3", "mode": "carry"}], 0],
            [[{"answer_id": "f4", "mode": "one_search"}], 0],
-           [[{"answer_id": "f5", "mode": None}], 0],
+           [[{"answer_id": "f5", "mode": "two_searches"}], 0],   # F6: K3's mode (call 5 A)
            [[{"answer_id": "f6", "mode": "as_typed"}], 0], None])
     check("[page] I9 B · 'Ask all papers instead' re-asks with the all-papers scope",
           got["scope_all"], [[{"answer_id": "f3", "scope": {"story_id": None,
@@ -7349,7 +7545,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
