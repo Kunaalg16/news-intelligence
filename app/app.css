@@ -978,8 +978,12 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 
 .pane-body {
   overflow-y: auto;
+  /* L-13 · the code anchors the place on every redraw (placePane); the browser's own
+     anchoring does not survive a full redraw and must not fight it. */
+  overflow-anchor: none;
   padding: 4px 14px 14px;
 }
+.pane-spacer { height: 0; }
 
 .pane-turn { position: relative; margin: 0 0 22px; }
 

@@ -1728,6 +1728,48 @@ eq("[page] state 8 · a reloaded conversation says when it started",
    whole.indexOf("Conversation from Mon 9.30am") > 0, true);
 eq("[page] state 7 · the divider names the story now being asked about (I6, call 8)",
    whole.indexOf("Now asking about · ANOTHER STORY") > 0, true);
+
+// S5 · L-13: the ask pane keeps its place. One check per row of Kunaal's table (4 Nov).
+var KEEP = {rule: "keep"};
+eq("[page] L-13 · row 1: a fold, unfold, Pin, a menu, a click, a refusal, an error stay put",
+   ["fold", "unfold", "pin", "menu", "click", "refusal", "error"].map(function (e) {
+     return APP.paneScrollRule(e); }),
+   [KEEP, KEEP, KEEP, KEEP, KEEP, KEEP, KEEP]);
+eq("[page] L-13 · row 2: a new question jumps to that question",
+   APP.paneScrollRule("ask", "live"), {rule: "to_question", id: "live"});
+eq("[page] L-13 · row 3: Think harder stays on that question",
+   APP.paneScrollRule("think_harder"), KEEP);
+eq("[page] L-13 · row 4: a stream chunk does not move the reader",
+   APP.paneScrollRule("chunk"), KEEP);
+eq("[page] L-13 · row 5: load, reload, New conversation open at the latest question",
+   ["load", "reload", "new_conversation"].map(function (e) { return APP.paneScrollRule(e); }),
+   [{rule: "to_latest"}, {rule: "to_latest"}, {rule: "to_latest"}]);
+eq("[page] L-13 · any other redraw keeps the place", APP.paneScrollRule("redraw"), KEEP);
+function paneBodyKids() {
+  document.byId.assistant.children = [];
+  APP.renderAssistant();
+  return nodesWithClass(document.byId.assistant, "pane-body")[0].children;
+}
+function nodesWithClass(node, cls, found) {
+  found = found || [];
+  if (node && (" " + (node.className || "") + " ").indexOf(" " + cls + " ") >= 0) found.push(node);
+  for (var i = 0; i < ((node && node.children) || []).length; i++)
+    nodesWithClass(node.children[i], cls, found);
+  return found;
+}
+eq("[page] L-13 · every block of the pane carries its anchor (the spacer last, none)",
+   paneBodyKids().map(function (k) { return k.attrs["data-anchor"] || k.className; }),
+   ["reload-divider", "a1", "divider:2026-11-02T09:40:00:s2", "a2", "pane-spacer"]);
+PS.paneEvent = "load";
+paneBodyKids();
+eq("[page] L-13 · a redraw spends the event it was for", PS.paneEvent, null);
+PS.live = {question: "q", sentences: [], results: null, error: null};
+eq("[page] L-13 · the live turn is anchored as 'live' while it streams",
+   paneBodyKids().map(function (k) { return k.attrs["data-anchor"]; }).indexOf("live") > 0, true);
+PS.live.answer = answerFixture({answer_id: "a9"});
+eq("[page] L-13 · and by its answer's id once done (the stored answer takes its place)",
+   APP.liveKey(), "a9");
+PS.live = null;
 eq("[page] both answers are in it",
    whole.indexOf("what happened in Delhi?") > 0 && whole.indexOf("and then?") > 0, true);
 eq("[page] the composer invites a question about your papers",
@@ -2858,6 +2900,20 @@ def look_i7():
           ["list-item", "disc outside", "0 0 6px"])
     check("[page] I7 · D1 fold: the list is indented so its bullets have room",
           _rule(css, ".see-also-heads").get("padding-left"), "1.1em")
+    # S5 · L-13: the events that are not "keep" are set where they happen. Read off the
+    # source (jsc has no server for askNow's stream nor a boot); the browser-pane check
+    # watches them land. Passes while broken if the line is dead code.
+    js = (ROOT / "app" / "app.js").read_text()
+    def body_of(name):
+        m = re.search(r"\n(?:async )?function " + name + r"\(.*?\n}\n", js, re.S)
+        return m.group(0) if m else ""
+    check("[page] L-13 · askNow marks its redraw as a new question; New conversation and "
+          "boot as the latest",
+          ["S.paneEvent = 'ask'" in body_of("askNow"),
+           "S.paneEvent = 'new_conversation'" in body_of("startNewConversation"),
+           "S.paneEvent = 'load'" in body_of("boot")], [True, True, True])
+    check("[page] L-13 · the browser's own scroll anchoring is off on the pane",
+          _rule(css, ".pane-body").get("overflow-anchor"), "none")
 
 
 def markup():

@@ -19,6 +19,7 @@
 const S = {
   flags: {},
   knobs: {},
+  paneEvent: null,     /* L-13 · what the next pane redraw is for (paneScrollRule) */
   /* --- v0.1, the ask pane --- */
   pane: 'open',                  /* open | collapsed | wide, remembered as a pref */
   conversation: null,            /* {conversation_id, started_at, turns} */
@@ -2642,6 +2643,7 @@ async function askNow(question, options) {
     await refreshConversation();
   }
   S.live = { question: question, sentences: [], results: null, error: null };
+  S.paneEvent = 'ask';           /* L-13 · jump to the new question */
   renderAssistant();
 
   await streamAnswer(o.url || '/api/ask',
@@ -2924,9 +2926,77 @@ function collapsedRail(label, onclick) {
     }, el('span', { class: 'rail-label', text: label })));
 }
 
+/* L-13 · the ask pane keeps its place (Kunaal, 4 Nov). Every redraw builds a new
+   .pane-body, whose scrollTop starts at 0, so any click used to throw the reader back to
+   the first question. Which rule an event gets is this one pure function; the measuring
+   is holdPane / placePane below. An event the table does not name keeps the place. */
+const PANE_SCROLL_LATEST = ['load', 'reload', 'new_conversation'];
+function paneScrollRule(event, id) {
+  if (event === 'ask') return { rule: 'to_question', id: id };
+  if (PANE_SCROLL_LATEST.includes(event)) return { rule: 'to_latest' };
+  return { rule: 'keep' };      /* fold, unfold, pin, a menu, a click, a refusal, an error,
+                                   Think harder, a stream chunk, any other redraw */
+}
+
+function anchored(node, key) {
+  if (node) node.setAttribute('data-anchor', key);
+  return node;
+}
+
+function anchorsOf(body) {
+  return Array.from(body.children).filter((k) => k.dataset && k.dataset.anchor);
+}
+
+/* Scroll anchoring, before the redraw: the first block whose bottom edge is below the
+   pane's top, and every block after it (a fallback if the first is gone), each with its
+   offset from the pane's top. Restoring the raw scrollTop is not enough: a fold above
+   the view changes the heights. Null where there is no layout (jsc) or no old pane. */
+function holdPane(body) {
+  if (!body || typeof body.getBoundingClientRect !== 'function') return null;
+  const top = body.getBoundingClientRect().top;
+  const kids = anchorsOf(body);
+  const first = kids.findIndex((k) => k.getBoundingClientRect().bottom > top);
+  if (first < 0) return null;
+  return kids.slice(first).map((k) => ({ key: k.dataset.anchor,
+                                        offset: k.getBoundingClientRect().top - top }));
+}
+
+function lastQuestionBlock(body) {
+  const asked = anchorsOf(body).filter((k) => k.querySelector('.turn-q'));
+  return asked.length ? asked[asked.length - 1] : null;
+}
+
+/* After the redraw. The spacer lets the latest question reach the pane's top however
+   short its answer is (else the browser clamps the jump); it shrinks as the answer grows.
+   Jumps are instant. Keep with nothing held (first draw, pane reopened) opens at the
+   latest question. */
+function placePane(body, held, rule) {
+  if (typeof body.getBoundingClientRect !== 'function') return;
+  const spacer = body.querySelector('.pane-spacer');
+  const top = body.getBoundingClientRect().top;
+  const offsetOf = (node) => node.getBoundingClientRect().top - top + body.scrollTop;
+  const lastQ = lastQuestionBlock(body);
+  if (spacer) {
+    spacer.style.height = '0px';
+    spacer.style.height = lastQ ? Math.max(0, body.clientHeight
+      - (body.scrollHeight - offsetOf(lastQ))) + 'px' : '0px';
+  }
+  const find = (key) => anchorsOf(body).find((k) => k.dataset.anchor === key);
+  if (rule.rule === 'keep' && held) {
+    for (const a of held) {
+      const node = find(a.key);
+      if (node) { body.scrollTop = offsetOf(node) - a.offset; return; }
+    }
+    return;
+  }
+  const target = rule.rule === 'to_question' ? find(rule.id) : lastQ;
+  if (target) body.scrollTop = offsetOf(target);
+}
+
 function renderAssistant() {
   const pane = document.getElementById('assistant');
   if (!pane) return;
+  const held = holdPane(pane.querySelector('.pane-body'));
   clear(pane);
   document.documentElement.style.setProperty('--pane-width', paneWidth());
 
@@ -2957,8 +3027,9 @@ function renderAssistant() {
 
   const body = el('div', { class: 'pane-body' });
   if (S.reloadDivider) {
-    body.append(el('p', { class: 'pane-divider',
-                          text: 'Conversation from ' + S.reloadDivider }));
+    body.append(anchored(el('p', { class: 'pane-divider',
+                                   text: 'Conversation from ' + S.reloadDivider }),
+                         'reload-divider'));
   }
   /* I8 · a re-ask streams where its answer was: the old answer gives way to the live
      turn, or, if the re-ask failed, stays and the error follows it. */
@@ -2967,29 +3038,35 @@ function renderAssistant() {
   let firstSeen = false;
   for (const turn of paneTurns(S.conversation)) {
     if (turn.kind === 'divider') {
-      body.append(el('p', { class: 'pane-divider ask-divider',
-                            text: 'Now asking about · ' + turn.headline }));
+      body.append(anchored(el('p', { class: 'pane-divider ask-divider',
+                                     text: 'Now asking about · ' + turn.headline }),
+                           'divider:' + turn.at + ':' + (turn.story_id || '')));
     } else if (turn.kind === 'answer') {
       const answer = turn.answer;
       const here = inPlace && answer.answer_id === inPlace;
       if (here) placed = true;
       if (answer.parent_answer_id) {
-        body.append(el('p', { class: 'block-label sonnet-label',
-                              text: sonnetLabel(answer) }));
-        body.append(answerTurn(answer, { noQuestion: true, noResults: true }));
+        body.append(anchored(el('p', { class: 'block-label sonnet-label',
+                                       text: sonnetLabel(answer) }),
+                             'label:' + answer.answer_id));
+        body.append(anchored(answerTurn(answer, { noQuestion: true, noResults: true }),
+                             answer.answer_id));
       } else {
         if (!here || S.live.error) {
           const fold = foldState(answer.answer_id);
-          body.append(answerTurn(answer, { foldable: fold.foldable, folded: fold.folded,
-                                           first: !firstSeen }));
+          body.append(anchored(answerTurn(answer, { foldable: fold.foldable,
+                                                    folded: fold.folded,
+                                                    first: !firstSeen }),
+                               answer.answer_id));
         }
         firstSeen = true;
-        if (here) { const live = liveTurn(); if (live) body.append(live); }
+        if (here) { const live = liveTurn(); if (live) body.append(anchored(live, liveKey())); }
       }
     }
   }
   const live = placed ? null : liveTurn();
-  if (live) body.append(live);
+  if (live) body.append(anchored(live, liveKey()));
+  body.append(el('div', { class: 'pane-spacer', 'aria-hidden': 'true' }));
   shell.append(body);
 
   const band = capBand();
@@ -3023,6 +3100,15 @@ function renderAssistant() {
   shell.append(foot);
 
   pane.append(shell);
+  const event = S.paneEvent || 'redraw';
+  S.paneEvent = null;
+  placePane(body, held, paneScrollRule(event, 'live'));
+}
+
+/* The live turn's anchor: 'live' while it streams, its answer's id once done, so the
+   redraw that swaps it for the stored answer keeps the place. */
+function liveKey() {
+  return S.live && S.live.answer ? S.live.answer.answer_id : 'live';
 }
 
 async function startNewConversation() {
@@ -3033,6 +3119,7 @@ async function startNewConversation() {
   S.live = null;                 /* a kept error from the old conversation goes with it */
   S.reloadDivider = null;
   S.widened = null;
+  S.paneEvent = 'new_conversation';
   renderAssistant();
   focusComposer();
 }
@@ -3861,6 +3948,7 @@ async function boot() {
     const panePref = await api.pref('pane');
     if (panePref && PANE_WIDTHS[panePref.value]) S.pane = panePref.value;
     await refreshConversation();
+    S.paneEvent = 'load';        /* L-13 · open at the latest question */
     if (S.conversation && (S.conversation.turns || []).length) {
       S.reloadDivider = dayName(S.conversation.started_at.slice(0, 10)) + ' '
                         + timeOfDay(S.conversation.started_at);
@@ -3962,6 +4050,7 @@ const EXPORTS = {
   threadSection, timelineView, graphView, removeLinkButton,
   nodeKind, KIND_WORDS, graphPlan, viewEntryIds, markIfPast,
   keyAction, KEYS, CHEAT_SHEET, CHEAT_MARKS, FLAG_ELEMENTS, render, remember, undoLast,
+  paneScrollRule, PANE_SCROLL_LATEST, liveKey, holdPane, placePane,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
 };
 
