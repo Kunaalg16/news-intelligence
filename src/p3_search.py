@@ -965,7 +965,12 @@ MODEL_REGISTER = {
     "claude-haiku-5-5": {"shape": "forced_tool", "forced_tool": True, "auto_tool": True,
                          "structured_output": "accepted (probe); not yet used live",
                          "thinking_default": "adaptive, effort medium",
-                         "verified": "2026-11-03, live ask (forced tool, $0.000792)"},
+                         "verified": "2026-11-03, live ask (forced tool, $0.000792)",
+                         # FP-3 (4 Nov): the ask's tool schema gained an optional
+                         # `not_covered` ("sentences_ask"). Same model and shape, new
+                         # schema (item 18): its first live use is Kunaal's next live ask
+                         # (L2's answers or L3); write the date and cost here then.
+                         "ask_schema_sentences_ask": "not yet used live"},
     "claude-sonnet-5-5": {"shape": "structured_output", "forced_tool": False, "auto_tool": True, "structured_output": True,
                           "thinking_default": "adaptive, effort high (billed as output; "
                           "counts against max_tokens)",
@@ -1000,6 +1005,15 @@ ASK_RULES = ("You answer a reader's QUESTION using the newspaper ARTICLES given,
              "nothing else. If the articles answer it only in part, say what they do "
              "cover and stop there.\n" + D.WRITER_RULES)
 
+# Inside a story (F-1, option A, TC-1) the writer is always called, so it must be able to
+# say the story does not answer the question. The line sits BEFORE the writer's rules, so
+# their last line, the injection defence, stays the last thing it reads.
+ASK_STORY_RULES = ("You answer a reader's QUESTION using the newspaper ARTICLES given, and "
+                   "nothing else. The articles are ONE story the reader has open. If they "
+                   "answer it only in part, say what they do cover and stop there. If they "
+                   "do not answer it at all, return no sentences and set not_covered to "
+                   "true.\n" + D.WRITER_RULES)
+
 BACKGROUND_RULES = """You give short general background to a reader's question.
 - Write 2 to 3 plain sentences from general knowledge. No citations.
 - Do not claim anything about what newspapers reported.
@@ -1017,6 +1031,17 @@ SCHEMAS = {
             "cites": {"type": "array", "items": {"type": "string"}}},
             "required": ["text", "cites"]}}},
         "required": ["sentences"]},
+    # The Haiku ask's tool (FP-3, TC-1): the same sentences, plus an optional
+    # `not_covered` the story rules tell it to set. Sent for purpose "ask" only
+    # (SCHEMA_FOR_PURPOSE); Think harder keeps "sentences" (Sonnet's structured output is
+    # verified on that schema, and nothing reads not_covered from it).
+    "sentences_ask": {"type": "object", "properties": {
+        "sentences": {"type": "array", "items": {"type": "object", "properties": {
+            "text": {"type": "string"},
+            "cites": {"type": "array", "items": {"type": "string"}}},
+            "required": ["text", "cites"]}},
+        "not_covered": {"type": "boolean"}},
+        "required": ["sentences"]},
     "text": {"type": "object", "properties": {"text": {"type": "string"}},
              "required": ["text"]},
     "whys": {"type": "object", "properties": {
@@ -1025,6 +1050,11 @@ SCHEMAS = {
             "required": ["story_id", "why"]}}},
         "required": ["whys"]},
 }
+
+# (schema the code asks for, purpose) -> the schema the live client sends. The NAME the
+# code passes stays "sentences" for every writer call, so every fake client keyed on it
+# (this suite's, K1's) keeps working; only the bytes sent for a Haiku ask change.
+SCHEMA_FOR_PURPOSE = {("sentences", "ask"): "sentences_ask"}
 
 
 def _R():
@@ -1071,6 +1101,7 @@ def _live_client():
 
     def call(prompt, system, purpose, model, schema):
         shape = request_shape(model)              # raises before any request is sent
+        schema = SCHEMA_FOR_PURPOSE.get((schema, purpose), schema)
         messages = [{"role": "user", "content": prompt}]
         if shape == "structured_output":
             # Sonnet 5.5 refuses a FORCED tool call (400, live 3 Nov; probe 3 Nov). A
@@ -1743,18 +1774,24 @@ def _answer_prompt(question, by_id, memory):
     return "\n\n".join(parts)
 
 
-def _write(question, chosen, memory, model_key, purpose, spent):
+def _write(question, chosen, memory, model_key, purpose, spent, story=False):
     """The checked sentences: citations, then numbers (p3_digest's own checks), ONE
     repair naming the broken rule, failing sentences dropped. Nothing is streamed from
-    here, so a sentence the checks drop is never shown and then withdrawn."""
+    here, so a sentence the checks drop is never shown and then withdrawn.
+    `story` (FP-3): the passages are one open story; the writer may answer "not
+    covered", which is taken at its word -- no sentences, no repair (TC-1).
+    Returns (sentences, attempts, drops, not_covered)."""
     by_id = _articles_of(chosen)
     base = _answer_prompt(question, by_id, memory)
+    rules = ASK_STORY_RULES if story else ASK_RULES
     prompt, kept, attempts, drops = base, [], 0, 0
     for attempt in range(1 + KNOBS["check_retries"]):
         attempts = attempt + 1
         with _phase("writer_call" if attempt == 0 else "check_retry_call"):
-            reply = _call(purpose, MODEL_IDS[model_key], prompt, ASK_RULES, "sentences",
+            reply = _call(purpose, MODEL_IDS[model_key], prompt, rules, "sentences",
                           spent)
+        if story and reply.get("not_covered") is True:
+            return [], attempts, drops, True
         with _phase("checks"):
             kept, cite_drops = D.check_citations(reply.get("sentences") or [], set(by_id))
             kept, number_drops = D.check_sentence_numbers(kept, by_id)
@@ -1765,7 +1802,7 @@ def _write(question, chosen, memory, model_key, purpose, spent):
         prompt = D.repair_prompt(base, problems)
     if len(kept) < KNOBS["answer_min_sentences"]:
         kept = []
-    return kept, attempts, drops
+    return kept, attempts, drops, False
 
 
 def _compact_results(stories, cited, limit):
@@ -1798,7 +1835,8 @@ def _scope_filters(scope):
 def ask(question, scope=None, conversation_id=None):
     """Answer a question from the archive (contract §7). A GENERATOR of events:
     `results` first, then checked `sentence`s, then `done` -- or `error` instead of
-    `done`, never a raise. An `empty` verdict makes NO model call. Traced (FP-1)."""
+    `done`, never a raise. Across all papers an `empty` verdict makes NO model call;
+    inside a story (`scope.story_id`) the writer is always called (F-1). Traced (FP-1)."""
     yield from _traced_stream("ask", {}, _ask(question, scope, conversation_id))
 
 
@@ -1834,15 +1872,19 @@ def _ask(question, scope, conversation_id):
                            switch if switch in ERROR_RETRYABLE else "other")
         return
 
-    empty = result["verdict"] == "empty" or not ranked
+    # Inside a story there is NO gate (F-1, option A): the similarity verdict is kept for
+    # measurement and the writer decides. Only a story with no passage ranked at all
+    # (embedding service down and none of the words in it) has nothing to write from.
+    story = bool((scope or {}).get("story_id"))
+    empty = (result["verdict"] == "empty" and not story) or not ranked
     chosen = [] if empty else _choose_passages(ranked)
-    spent, sentences, attempts, drops = [], [], 0, 0
+    spent, sentences, attempts, drops, not_covered = [], [], 0, 0, False
     if not empty:
         try:
             with _phase("memory"):
                 memory = _memory(cid, spent)
-            sentences, attempts, drops = _write(question, chosen, memory, "haiku", "ask",
-                                                spent)
+            sentences, attempts, drops, not_covered = _write(
+                question, chosen, memory, "haiku", "ask", spent, story=story)
         except Exception as e:                                # noqa: BLE001
             # A failed call is an EVENT, never a raise (contract §7); what it was
             # charged is already in cost_log via `_call`.
@@ -1850,16 +1892,30 @@ def _ask(question, scope, conversation_id):
             return
     with _phase("store"):
         answer = _ask_answer(R, aid, cid, question, scope, result, chosen, sentences,
-                             empty, spent, attempts, drops)
+                             empty, spent, attempts, drops, story)
     for s in sentences:
         yield {"type": "sentence", "text": s["text"], "cites": s["cites"]}
     yield {"type": "done", "answer": answer}
 
 
+def _top_similarity(result):
+    """The best passage cosine in a search result (None with the service down). Read off
+    the returned rows: inside a story there is one row, so it is the verdict's number."""
+    return max((s["similarity"] for s in result["stories"]
+                if s.get("similarity") is not None), default=None)
+
+
 def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, spent,
-                attempts, drops):
-    """The stored answer object of one `ask()`, written as its turn."""
-    verdict = result["verdict"] if sentences or empty else "empty"
+                attempts, drops, story=False):
+    """The stored answer object of one `ask()`, written as its turn.
+    Inside a story (TC-1, TC-2, TC-23) `verdict` is the OUTCOME -- "enough" when
+    sentences were written, "empty" when not covered (the writer said so, or fewer than
+    two sentences survived) -- and there is no `closest` list. Everywhere,
+    `similarity_verdict` / `top_similarity` keep what the search measured."""
+    if story:
+        verdict = "enough" if sentences else "empty"
+    else:
+        verdict = result["verdict"] if sentences or empty else "empty"
     cited = sorted({h for s in sentences for h in s["cites"]})
     story_of = {p["text_hash"]: p["story_id"] for p in chosen}
     answer = {
@@ -1869,7 +1925,10 @@ def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, 
         "verdict": verdict, "found_count": result["total_articles"],
         "sentences": sentences, "background": None, "cited": cited,
         "found": [s["story_id"] for s in result["stories"]],
-        "closest": result["stories"][:3] if verdict == "empty" else [],
+        "closest": result["stories"][:3] if verdict == "empty" and not story else [],
+        "not_covered": bool(story and not sentences),
+        "similarity_verdict": result["verdict"],
+        "top_similarity": _top_similarity(result),
         "passage_set_id": _store_passage_set(chosen),
         "cost_usd": round(sum(spent), 6), "attempts": attempts, "drops": drops,
         "at": R._now(),
@@ -1915,15 +1974,22 @@ def _think_harder(answer_id):
         try:
             with _phase("memory"):
                 memory = _memory(cid, spent, before=answer_id)
-            sentences, attempts, drops = _write(parent["question"], chosen, memory,
-                                                "sonnet", "think_harder", spent)
+            sentences, attempts, drops, _nc = _write(parent["question"], chosen, memory,
+                                                     "sonnet", "think_harder", spent)
         except Exception as e:                                # noqa: BLE001
             yield _error_event(_reason_of(e), e)
             return
     with _phase("store"):
         cited = sorted({h for s in sentences for h in s["cites"]})
         cited_stories = {p["story_id"] for p in chosen if p["text_hash"] in cited}
-        answer = dict(parent, answer_id=R._new_id("ans"), parent_answer_id=answer_id,
+        outcome = {}
+        if (parent.get("scope") or {}).get("story_id"):
+            # Inside a story the verdict is the outcome (TC-23), so Think harder states
+            # its own rather than inheriting the parent's.
+            outcome = {"verdict": "enough" if sentences else "empty",
+                       "not_covered": not sentences}
+        answer = dict(parent, **outcome, answer_id=R._new_id("ans"),
+                      parent_answer_id=answer_id,
                       model="sonnet", model_id=MODEL_IDS["sonnet"], sentences=sentences,
                       background=None, cited=cited,
                       results=[dict(r, mark="cited" if r["story_id"] in cited_stories

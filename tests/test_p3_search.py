@@ -53,6 +53,18 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
   - one trace line per paid action, for the real client on the real file only: a fake
     client, or the real client on a copy, writes none;
   - a stream resumed on different threads still names >= 90% of its time.
+  FP-3 · F-1 (fixed 4 Nov before the run, brief fp-1 §6 FP-3; fake client only):
+  - a story-scoped question whose similarity verdict is `empty` -> ONE writer call;
+  - the writer says not covered -> 0 sentences, `not_covered` true, 1 attempt, its
+    cost row written, no repair;
+  - inside a story, fewer than 2 sentences surviving the checks -> `not_covered` true,
+    no `closest` list;
+  - inside a story `verdict` is the outcome (enough written / empty not covered), never
+    the similarity band (a `thin` similarity with sentences -> "enough");
+  - an all-papers `empty` question -> 0 calls, $0 (unchanged);
+  - `similarity_verdict` / `top_similarity` stored and returned after a reload;
+  - the live client sends the `not_covered` schema for the Haiku ask only, never for
+    Think harder (Sonnet), and the story rules keep the injection line last.
   A failed line is answered by error analysis, not by moving the line.
 
 WHEN TO RUN
@@ -638,7 +650,8 @@ def ask_mock(tmp):
               "model_id", "verdict", "found_count", "sentences", "background", "cited",
               "found", "closest", "passage_set_id", "cost_usd", "attempts", "drops",
               "at", "searched_days", "passage_count", "results", "results_total",
-              "mode", "fixture"]))
+              "mode", "not_covered", "similarity_verdict", "top_similarity",
+              "fixture"]))
     check("[ask] no background line inside ask()", a1["background"], None)
     check("[ask] the writer saw at most 8 passages, at most 2 per article",
           (a1["passage_count"] <= 8,
@@ -1520,6 +1533,162 @@ def D_last_line():
     return p3_digest.WRITER_RULES.strip().splitlines()[-1].strip()
 
 
+# ================================================================= FP-3 · F-1
+
+def fp3_mock(tmp):
+    import os
+    import types
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query)
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    mode = {"v": "none"}
+    S.embed_query = lambda q, **kw: VECS[mode["v"]]
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+    story = {"story_id": "g1", "text_hashes": [], "filters": {}}
+
+    def cost_rows():
+        return R._intel_ro().execute("SELECT COUNT(*) FROM cost_log").fetchone()[0]
+
+    try:
+        # 1 · similarity empty inside a story, the writer says not covered
+        S.new_conversation()
+        S._CLIENT = fake = Fake(({"sentences": [], "not_covered": True}, 2500, 20))
+        before = cost_rows()
+        ev = run(S.ask("Who won the Melbourne Cup?", scope=story))
+        a = ev[-1]["answer"]
+        check("[fp3] story + similarity empty -> ONE writer call",
+              (ev[0]["search"]["verdict"], len(fake.calls)), ("empty", 1))
+        check("[fp3] the call carried the story rules, the injection line last",
+              (fake.calls[0]["system"] == S.ASK_STORY_RULES,
+               S.ASK_STORY_RULES.endswith(D_last_line()) or
+               S.ASK_STORY_RULES.rstrip().endswith(D_last_line().rstrip())), (True, True))
+        check("[fp3] not covered -> 0 sentences, not_covered, 1 attempt, cost row, paid",
+              ([e["type"] for e in ev], a["sentences"], a["not_covered"], a["attempts"],
+               cost_rows() - before, a["cost_usd"] > 0),
+              (["results", "done"], [], True, 1, 1, True))
+        check("[fp3] inside a story verdict is the outcome: empty, no closest list",
+              (a["verdict"], a["closest"]), ("empty", []))
+        check("[fp3] similarity kept for measurement",
+              (a["similarity_verdict"], isinstance(a["top_similarity"], float)),
+              ("empty", True))
+        aid = a["answer_id"]
+        R.close_all()
+        back = next(t["answer"] for t in S.current_conversation()["turns"]
+                    if t["kind"] == "answer" and t["answer"]["answer_id"] == aid)
+        check("[fp3] similarity_verdict / top_similarity / not_covered survive a reload",
+              (back["similarity_verdict"], back["top_similarity"], back["not_covered"]),
+              ("empty", a["top_similarity"], True))
+
+        # 2 · similarity empty inside a story, the writer answers -> written, "enough"
+        S._CLIENT = fake = Fake(GOOD)
+        ev = run(S.ask("Who decided it?", scope=story))
+        a = ev[-1]["answer"]
+        check("[fp3] story + similarity empty, writer answers -> sentences, enough",
+              (len(fake.calls), len(a["sentences"]), a["verdict"], a["not_covered"],
+               a["similarity_verdict"]), (1, 2, "enough", False, "empty"))
+
+        # 3 · thin similarity inside a story with sentences -> "enough", never "thin"
+        mode["v"] = "thin"
+        S._CLIENT = fake = Fake(GOOD)
+        ev = run(S.ask("Was there any rate news?", scope=story))
+        a = ev[-1]["answer"]
+        check("[fp3] TC-23 · thin similarity in a story labels nothing: verdict enough",
+              (ev[0]["search"]["verdict"], a["verdict"], a["similarity_verdict"]),
+              ("thin", "enough", "thin"))
+
+        # 4 · fewer than 2 survive (twice) inside a story -> not_covered, no closest
+        mode["v"] = "repo"
+        S._CLIENT = fake = Fake(said(("x", ["bad"])), said(("y", ["bad"])))
+        a = run(S.ask("Repo rate news?", scope=story))[-1]["answer"]
+        check("[fp3] < 2 sentences in a story -> not_covered, verdict empty, no closest",
+              (a["sentences"], a["not_covered"], a["verdict"], a["closest"],
+               a["attempts"]), ([], True, "empty", [], 2))
+
+        # 5 · all papers, similarity empty -> unchanged: no call, $0
+        mode["v"] = "none"
+        S._CLIENT = fake = Fake()
+        before = cost_rows()
+        ev = run(S.ask("Who won the Melbourne Cup?"))
+        a = ev[-1]["answer"]
+        check("[fp3] all papers + empty -> 0 calls, $0, nothing logged (unchanged)",
+              (len(fake.calls), a["cost_usd"], cost_rows() - before, a["verdict"],
+               a["not_covered"], len(a["closest"]) > 0), (0, 0.0, 0, "empty", False, True))
+        mode["v"] = "repo"
+        S._CLIENT = fake = Fake(GOOD)
+        a_all = run(S.ask("Did the repo rate go up?"))[-1]["answer"]
+        check("[fp3] all papers keep ASK_RULES; their answers carry the new fields",
+              (fake.calls[0]["system"] == S.ASK_RULES, a_all["not_covered"],
+               a_all["similarity_verdict"], a_all["verdict"]),
+              (True, False, "enough", "enough"))
+
+        # 6 · Think harder on a story answer states its own outcome
+        S._CLIENT = Fake(said(("x", ["bad"])), said(("y", ["bad"])))
+        story_ans = next(t["answer"] for t in S.current_conversation()["turns"]
+                         if t["kind"] == "answer" and t["answer"]["verdict"] == "enough"
+                         and t["answer"]["scope"].get("story_id"))
+        t = run(S.think_harder(story_ans["answer_id"]))[-1]["answer"]
+        check("[fp3] Think harder in a story, nothing survives -> empty, not_covered",
+              (t["verdict"], t["not_covered"], t["sentences"]), ("empty", True, []))
+
+        # 7 · what the live client SENDS (real request path, fake SDK, nothing leaves)
+        sent = []
+
+        class _Messages:
+            def create(self, **kw):
+                sent.append(kw)
+                if "output_config" in kw:
+                    return types.SimpleNamespace(
+                        usage=types.SimpleNamespace(input_tokens=10, output_tokens=5),
+                        content=[types.SimpleNamespace(type="text", text=json.dumps(
+                            {"sentences": []}))])
+                return types.SimpleNamespace(
+                    usage=types.SimpleNamespace(input_tokens=10, output_tokens=5),
+                    content=[types.SimpleNamespace(type="tool_use",
+                                                   input={"sentences": []})])
+        fake_sdk = types.ModuleType("anthropic")
+        fake_sdk.Anthropic = lambda **kw: types.SimpleNamespace(messages=_Messages())
+        dot = types.ModuleType("dotenv")
+        dot.load_dotenv = lambda *a, **k: None
+        saved_mods = {m: sys.modules.get(m) for m in ("anthropic", "dotenv")}
+        saved_key = os.environ.get("ANTHROPIC_API_KEY")
+        sys.modules.update(anthropic=fake_sdk, dotenv=dot)
+        os.environ["ANTHROPIC_API_KEY"] = "fake-not-a-key"
+        try:
+            S._LIVE = None
+            call = S._live_client()
+            call(prompt="p", system="s", purpose="ask", model=S.MODEL_IDS["haiku"],
+                 schema="sentences")
+            call(prompt="p", system="s", purpose="think_harder",
+                 model=S.MODEL_IDS["sonnet"], schema="sentences")
+        finally:
+            S._LIVE = None
+            for m, v in saved_mods.items():
+                if v is None:
+                    sys.modules.pop(m, None)
+                else:
+                    sys.modules[m] = v
+            if saved_key is None:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+            else:
+                os.environ["ANTHROPIC_API_KEY"] = saved_key
+        check("[fp3] the Haiku ask's tool carries not_covered; Sonnet's schema does not",
+              ("not_covered" in sent[0]["tools"][0]["input_schema"]["properties"],
+               "not_covered" in sent[1]["output_config"]["format"]["schema"]["properties"]),
+              (True, False))
+    finally:
+        S._CLIENT = None
+        R.close_all()
+        S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
+        for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+            os.environ.pop(k, None)
+
+
 # ================================================================= 4. nothing written
 
 def untouched(before):
@@ -1547,6 +1716,8 @@ def main():
         trace_mock(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         fp2_mock(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        fp3_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():
