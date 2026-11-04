@@ -38,6 +38,7 @@ USAGE (from ~/news-intel)
 """
 
 import datetime as dt
+import hashlib
 import json
 import os
 import shutil
@@ -51,6 +52,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 REAL_NEWS = ROOT / "data" / "news.db"
 REAL_INTEL = ROOT / "data" / "intel.db"
+
+
+def real_fingerprint():
+    """The real intel.db's content, read-only: SHA-256 of its dump. Equal before and after
+    the suite = the suite wrote nothing to it, whatever the app has stored there before."""
+    con = sqlite3.connect(f"file:{REAL_INTEL}?mode=ro", uri=True)
+    h = hashlib.sha256()
+    for line in con.iterdump():
+        h.update(line.encode()); h.update(b"\n")
+    con.close()
+    return h.hexdigest()[:16]
 
 CHECKS = []
 
@@ -1021,9 +1033,9 @@ def on_real(tmp):
           bool(R.read_state([rows[0]["text_hash"]])[rows[0]["text_hash"]]), True)
 
     R.close_all()
-    check("real · the real intel.db was not written to",
-          sqlite3.connect(f"file:{REAL_INTEL}?mode=ro", uri=True).execute(
-              "SELECT COUNT(*) FROM read_state").fetchone()[0], 0)
+    # "the real intel.db was not written to" is checked in main(), by the file's content
+    # before and after the whole suite (it once counted read_state rows here, which the
+    # app's own use fills).
 
 
 def main():
@@ -1031,6 +1043,7 @@ def main():
     kept = {k: os.environ.get(k) for k in
             ("P3_READER_NEWS_DB", "P3_READER_INTEL_DB", "P3_READER_WORK",
              "P3_READER_DIGESTS")}
+    before = real_fingerprint() if REAL_INTEL.exists() else None
     try:
         with tempfile.TemporaryDirectory() as tmp:
             on_mock(tmp)
@@ -1060,6 +1073,9 @@ def main():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    if before is not None:
+        check("the real intel.db was not written to (content same before and after)",
+              real_fingerprint(), before)
 
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:

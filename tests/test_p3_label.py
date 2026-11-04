@@ -7,10 +7,13 @@ WHAT IT DOES
        and the awkward neighbours of each rule (an empty extra-event list stored three
        different ways, a cue phrase in a news text, a text printed in two seats, a story
        whose only piece is paid). Every rule's expected label is written out by hand.
-    2. GOLDEN COUNTS (real data, read-only): the label of every tagged text in
-       data/news.db, counted and compared with measurement M1 (`_work/k3_m1_report.md`,
-       RAN ON MAC 1 Nov). This is a regression test: it is not asking whether the rules
-       are good, it is asking whether they still do what they did when M1 measured them.
+    2. GOLDEN COUNTS (real data, read-only): the label of every text M1 counted, compared
+       with measurement M1 (`_work/k3_m1_report.md`, RAN ON MAC 1 Nov). This is a
+       regression test: it is not asking whether the rules are good, it is asking whether
+       they still do what they did when M1 measured them. M1's texts = those tagged before
+       M1 ran (`M1_TAGGED_BEFORE`), so the daily run's new texts never move these numbers.
+       The checks that must be 0 (no 'ad', no paid / other / notice counted as coverage)
+       run on every tagged text, old and new.
 
 WHY IT EXISTS
     The labels decide what the digest counts as coverage, what it hides and what the
@@ -47,6 +50,9 @@ sys.path.insert(0, str(ROOT / "src"))
 import p3_label as L
 
 NEWS_DB = ROOT / "data" / "news.db"
+# M1's texts: tagged before M1 ran (1 Nov 05:11, the report's own time). Measured 4 Nov:
+# 6,655 tags before it (= M1's count), the rest tagged on 3 Nov. A rule, not a knob.
+M1_TAGGED_BEFORE = "2026-11-01T05:11:21"
 
 CHECKS = []          # (name, got, want)
 
@@ -218,12 +224,16 @@ def golden():
     con = sqlite3.connect(f"file:{NEWS_DB}?mode=ro", uri=True)
     rows = con.execute(
         "SELECT t.text_hash, t.kind, t.topic, t.summary, t.event, t.events_more, t.text_check, "
-        "x.headline, x.body FROM tags t JOIN texts x ON x.text_hash = t.text_hash "
+        "x.headline, x.body, t.tagged_at FROM tags t JOIN texts x ON x.text_hash = t.text_hash "
         "WHERE t.model = ? AND t.prompt_version = ?", (L.TAG_MODEL, L.TAG_PROMPT)).fetchall()
     cols = ("text_hash", "kind", "topic", "summary", "event", "events_more", "text_check",
             "headline", "body")
-    labels = [L.label_text(dict(zip(cols, r))) for r in rows]
+    every = [L.label_text(dict(zip(cols, r))) for r in rows]
     con.close()
+    # M1's numbers are checked on M1's texts; the zero checks below on every text.
+    m1 = [i for i, r in enumerate(rows) if r[9] < M1_TAGGED_BEFORE]
+    labels = [every[i] for i in m1]
+    rows = [rows[i] for i in m1]
 
     n = collections.Counter
     checks = n(l["text_check"] for l in labels)
@@ -236,17 +246,24 @@ def golden():
     kinds = n(l["kind"] for l in labels)
     check("M1 sponsored texts", kinds["sponsored"], 104)
     check("layer paid = sponsored texts", sum(l["layer"] == "paid" for l in labels), 104)
-    check("no text labelled 'ad' in v1", sum(l["layer"] == "ad" for l in labels), 0)
     check("M1 kind other", kinds["other"], 109)
-    check("no 'other' counts as coverage",
-          sum(l["counts_as_coverage"] for l in labels if l["kind"] == "other"), 0)
-    check("no paid piece counts as coverage", sum(l["counts_as_coverage"] and l["paid"] for l in labels), 0)
-    check("no notice counts as coverage",
-          sum(l["counts_as_coverage"] for l in labels if l["notice"]), 0)
-    check("every notice is out of the digest",
-          sum(l["in_digest"] for l in labels if l["notice"]), 0)
-    check("every notice stays searchable",
-          sum(l["searchable"] for l in labels if l["notice"]), kinds["notice"])
+
+    # every tagged text, old and new
+    check("all texts · the M1 set is part of the archive", len(every) >= len(labels), True)
+    check("all texts · no text labelled 'ad' in v1", sum(l["layer"] == "ad" for l in every), 0)
+    check("all texts · layer paid = sponsored texts",
+          sum(l["layer"] == "paid" for l in every), sum(l["kind"] == "sponsored" for l in every))
+    check("all texts · no 'other' counts as coverage",
+          sum(l["counts_as_coverage"] for l in every if l["kind"] == "other"), 0)
+    check("all texts · no paid piece counts as coverage",
+          sum(l["counts_as_coverage"] and l["paid"] for l in every), 0)
+    check("all texts · no notice counts as coverage",
+          sum(l["counts_as_coverage"] for l in every if l["notice"]), 0)
+    check("all texts · every notice is out of the digest",
+          sum(l["in_digest"] for l in every if l["notice"]), 0)
+    check("all texts · every notice stays searchable",
+          sum(l["searchable"] for l in every if l["notice"]),
+          sum(l["kind"] == "notice" for l in every))
 
     speech = [l for l in labels if l["event"] == "speech or statement"]
     check("M1 main event speech", len(speech), 1044)
@@ -256,7 +273,7 @@ def golden():
     check("the swap covers every speech text", sum(swaps.values()), 1044)
     check("speech kept as a speech = the Q1b number", swaps[""], 528)
 
-    return dict(labels=len(labels), kinds=kinds, swaps=swaps,
+    return dict(labels=len(labels), every=len(every), kinds=kinds, swaps=swaps,
                 coverage=sum(l["counts_as_coverage"] for l in labels),
                 fragment_like=sum(l["fragment_like"] for l in labels),
                 cue_hits=sum(1 for l in labels if l["cue_rule_hit"]),
@@ -282,6 +299,8 @@ def main():
 
     if numbers:
         k = numbers["kinds"]
+        print(f"M1 set: {numbers['labels']} of {numbers['every']} tagged texts "
+              f"(tagged before {M1_TAGGED_BEFORE}); the lines below are the M1 set")
         print(f"labels: {numbers['labels']} texts · coverage {numbers['coverage']} · "
               f"fragment-like {numbers['fragment_like']} · paid {k['sponsored']} · "
               f"notice {k['notice']} · other {k['other']}")
