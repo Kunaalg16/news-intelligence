@@ -947,11 +947,17 @@ def on_real(tmp):
     os.environ["P3_READER_NEWS_DB"] = str(REAL_NEWS)
     os.environ["P3_READER_INTEL_DB"] = str(copy)
     os.environ["P3_READER_WORK"] = str(ROOT / "_work")
+    # X10 moved the old digests into data/digests/, where the daily run writes the new
+    # ones: read both folders, as the app does.
+    os.environ["P3_READER_DIGESTS"] = str(ROOT / "data" / "digests")
     import p3_reader as R
     R.close_all()
 
     digest = R.get_digest("latest")
     check("real · the latest digest loads", bool(digest and digest.get("stories")), True)
+    check("real · the old digests are listed from data/digests/ (X10)",
+          {"digest_live", "k3_b1_3_digest_2026-10-11"} <=
+          {d["ref"] for d in R.list_digests()}, True)
     check("real · run_status is ready", R.run_status()["state"], "ready")
 
     rows = [r for s in digest["stories"] for r in s["coverage"]["rows"]]
@@ -1023,7 +1029,8 @@ def on_real(tmp):
 def main():
     mock_only = "--mock" in sys.argv
     kept = {k: os.environ.get(k) for k in
-            ("P3_READER_NEWS_DB", "P3_READER_INTEL_DB", "P3_READER_WORK")}
+            ("P3_READER_NEWS_DB", "P3_READER_INTEL_DB", "P3_READER_WORK",
+             "P3_READER_DIGESTS")}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             on_mock(tmp)
@@ -1034,16 +1041,15 @@ def main():
         elif not (REAL_NEWS.exists() and REAL_INTEL.exists()):
             print("real data: SKIPPED (databases not found)")
         else:
-            # FP-6's real checks first: on_real still crashes on the digests' move (X10),
-            # which is FP-8's to fix, and must not hide these.
+            # FP-6's real checks first, so a crash in on_real can never hide them.
             with tempfile.TemporaryDirectory() as tmp:
                 fp6_real(tmp)
             with tempfile.TemporaryDirectory() as tmp:
                 try:
                     on_real(tmp)
                 except Exception as exc:                     # noqa: BLE001
-                    # Reported as a FAILED check, not swallowed: the known X10 crash
-                    # (FP-8's) then still fails the suite, and the checks above print.
+                    # Reported as a FAILED check, not swallowed: a crash still fails
+                    # the suite, and the checks above print.
                     import traceback
                     where = traceback.extract_tb(exc.__traceback__)[-1]
                     check("real · on_real ran to the end",
