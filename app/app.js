@@ -3909,8 +3909,7 @@ function startKeyboard() {
    F3 · after a build the open Safari tab kept running the old page (the launcher brings
    the tab forward and never reloads it, T-14), so Kunaal saw bugs already fixed. The
    page remembers /api/status's `app_version` at load and asks again on focus and every
-   few minutes. Look: italic grey, no border, no fill (Kunaal, 4 Nov). Wording PROPOSED,
-   confirmed at the run check. */
+   few minutes. Look: italic grey, no border, no fill; wording approved (Kunaal, 4 Nov). */
 
 /* KNOB · how long an open tab may run an old page unnoticed when it never loses focus.
    5 minutes is the brief's number; what would change it is Kunaal seeing the line late. */
@@ -3918,7 +3917,7 @@ const VERSION_CHECK_MINUTES = 5;
 
 const VERSION_WORDS = {
   reload: ['App updated · ', 'Reload'],                        /* app_version differs */
-  restart: 'App updated · quit News Intelligence from the Dock and open it again',
+  restart: 'App updated · Quit News Intelligence from the Dock and open it again',
 };                                     /* server_on_disk differs from server_version */
 
 /* Which line, if any: 'restart' when the route code changed and the server still runs

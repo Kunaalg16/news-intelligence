@@ -1796,7 +1796,7 @@ eq("[page] F3 · Reload reloads the page", reloads, 1);
 APP.renderVersionLine("restart");
 eq("[page] F3 · the quit line has no action",
    [textOf(vline), nodesOf(vline, "button").length, vline.hidden],
-   ["App updated · quit News Intelligence from the Dock and open it again", 0, false]);
+   ["App updated · Quit News Intelligence from the Dock and open it again", 0, false]);
 APP.renderVersionLine(null);
 eq("[page] F3 · and nothing when the versions match", [textOf(vline), vline.hidden], ["", true]);
 delete document.byId["version-line"];
