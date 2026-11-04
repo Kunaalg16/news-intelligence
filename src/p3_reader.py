@@ -9,6 +9,7 @@ WHAT IT DOES
 
       R6   run_status · get_digest · list_digests      what there is to read
       R3   article                                     one article, with its real body
+           get_story                                   one story, every article (FP-6)
       R2   thread                                      a story's days, and its related items
       R4   new_since_read                              what joined since the reader left
       R1   mark_read · read_state · set_keep_unread · list_keep_unread · follow ·
@@ -480,6 +481,73 @@ def article(text_hash):
             "fixture": False}
 
 
+# ------------------------------------------------------------------- one story (FP-6)
+
+def _search():
+    """`p3_search`, looked up at CALL time. It is imported at this module's END (and
+    imports this one lazily), so a top-level import here would hand it a half-built
+    module (brief §4). By the time any function runs, the import at the end is done."""
+    import p3_search
+    return p3_search
+
+
+def get_story(story_id):
+    """One story with EVERY article in it (contract v2.5 line 10, call 9 / K1 call 8).
+
+    Membership is `p3_search.corpus()["story_of_hash"]` -- the same grouping a search
+    result and a digest item read, so "3 of 6" in a search row and the six here cannot
+    disagree. Each article is the search article row (`p3_search._article_row`: the
+    seven contract keys + snippet) plus `page_links_more` (R5, `p3_digest.jump_links`,
+    each link carrying its paper as R2 D8 asks). One text printed twice is ONE article,
+    shown at its best-placed seat (corpus' own rule, Q11g).
+
+    Order: best-placed first -- the article's best seat points (corpus computes them with
+    p3_digest's `seat_points`), then paper name, then date, then hash so ties are stable.
+    The headline is corpus' (TC-20: `p3_search.story_headlines`, never blank); `papers`
+    and `paper_names` count every printed seat of the story's articles, as corpus'
+    `papers` does, so a text printed in two papers names both. The snippet is the
+    article's lead passage from search.db, as a browse row shows it.
+
+    Read only: news.db and search.db `mode=ro`, intel.db through the reader's read-only
+    connection. Unknown id -> LookupError; a non-string -> ValueError.
+    """
+    if not isinstance(story_id, str) or not story_id:
+        raise ValueError("story_id must be a non-empty string")
+    SR = _search()
+    world = SR.corpus(news=_news(), intel=_intel_ro())
+    row = world["stories"].get(story_id)
+    if row is None:
+        raise LookupError(f"no such story: {story_id!r}")
+    members = sorted(h for h, sid in world["story_of_hash"].items() if sid == story_id)
+    seat_of = row["seat_of_hash"]
+    members.sort(key=lambda h: (-(seat_of[h]["points"] or 0), seat_of[h]["publisher"] or "",
+                                seat_of[h]["date"] or "", h))
+    scon = SR.open_ro(SR.SEARCH_DB)
+    try:
+        leads = SR._lead_passages(scon, members)
+    finally:
+        scon.close()
+    articles = []
+    for h in members:
+        seat = seat_of[h]
+        art = SR._article_row(seat, leads.get(h, ""))
+        art["page_links_more"] = [dict(link, paper=seat["publisher"])
+                                  for link in D.jump_links(seat)]
+        articles.append(art)
+    # Every printed seat of these articles, under corpus' own seat rule, for the papers.
+    wanted = set(members)
+    names = sorted({s["publisher"] for s in _seats_on(row["dates"])
+                    if s["text_hash"] in wanted and SR._seat_allowed(s, {})})
+    return {"story_id": story_id,
+            "headline": row["headline"],
+            "dates": list(row["dates"]),
+            "papers": row["papers"],
+            "paper_names": names,
+            "article_count": len(articles),
+            "articles": articles,
+            "fixture": False}
+
+
 # ------------------------------------------------------------------------- threads
 
 def _thread_group_ids(thread_id):
@@ -905,12 +973,37 @@ def _hashes_in_payload(payload):
     return []
 
 
+ANSWER_SNAPSHOT_KEYS = ("question", "sentences", "passage_set_id", "model", "model_id",
+                        "verdict", "not_covered", "at")
+
+
+def _answer_snapshot(payload):
+    """TC-14 (contract v2.5 line 12): an answer pin keeps the answer AS IT WAS PINNED.
+
+    Read through `get_answer` (hidden and replaced answers too) and copied into the pin,
+    so hiding the answer later, or a re-ask replacing it, leaves the board unchanged. The
+    snapshot is always K3's own copy: a `snapshot` the caller sent is replaced. `at` is
+    the answer's own time (the pin has its own `created_at`). Unknown answer ->
+    LookupError, raised before anything is written."""
+    if not isinstance(payload, dict) or not payload.get("answer_id"):
+        raise ValueError("an answer pin's payload needs its answer_id")
+    answer = _search().get_answer(payload["answer_id"])
+    snap = {k: answer.get(k) for k in ANSWER_SNAPSHOT_KEYS}
+    snap["sentences"] = [dict(s, cites=list(s.get("cites") or []))
+                         for s in answer.get("sentences") or []]
+    snap["not_covered"] = bool(answer.get("not_covered"))
+    return dict(payload, snapshot=snap)
+
+
 def pin(board_id, item_type, payload, source, created_by="app"):
-    """Pin something to a board (R1). `payload` carries the hashes as they are now."""
+    """Pin something to a board (R1). `payload` carries the hashes as they are now; an
+    answer pin also carries `payload.snapshot` (TC-14, `_answer_snapshot`)."""
     if item_type not in ITEM_TYPES:
         raise ValueError(f"item_type must be one of {', '.join(ITEM_TYPES)}")
     if created_by not in CREATED_BY:
         raise ValueError(f"created_by must be one of {', '.join(CREATED_BY)}")
+    if item_type == "answer":
+        payload = _answer_snapshot(payload)
     con = _intel_w()
     if con.execute("SELECT 1 FROM boards WHERE board_id = ?", (board_id,)).fetchone() is None:
         raise LookupError(f"no such board: {board_id!r}")

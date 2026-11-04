@@ -60,12 +60,27 @@ async def facets() -> dict:
 
 @server.tool()
 async def get_story(story_id: str, digest_ref: str | None = None) -> dict:
-    """One story as a digest shows it (the latest digest unless `digest_ref` is given)."""
+    """Any story, with every one of its articles (best-placed first). A story in the
+    digest (the latest unless `digest_ref` is given) keeps its digest fields too."""
+    # FP-6: found through p3_reader.get_story, so a story that is in NO digest is found
+    # as well (LookupError only when the archive has no such story). The digest's fields
+    # win where both have a key (its `headline` is the digest's object, `dates` the
+    # digest's); get_story's fill in the rest (`articles`, `article_count`,
+    # `paper_names`, `papers`).
+    # A digest story whose id the archive no longer knows (grouping re-ran since that
+    # digest was built) is still returned as the digest has it, exactly as before FP-6.
     digest = R.get_digest(digest_ref) if digest_ref else R._latest_digest()
     for story in (digest or {}).get("stories") or []:
         if story.get("story_id") == story_id:
-            return story
-    raise LookupError(f"no story {story_id!r} in that digest")
+            try:
+                full = R.get_story(story_id)
+            except LookupError:
+                return story
+            merged = dict(story)
+            for key, value in full.items():
+                merged.setdefault(key, value)
+            return merged
+    return R.get_story(story_id)
 
 
 @server.tool()

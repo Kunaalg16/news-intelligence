@@ -11,6 +11,12 @@ PASS LINES (brief 2 §3 B2-7, fixed before the run)
   - A create_board + add_pin round trip changes ONLY `boards` and `pins` (every other
     table's contents hashed before and after), and both rows say created_by claude_mcp.
   - news.db and search.db mtimes are unchanged.
+  FP-6 (K3 final pass brief §6, fixed before the run, 4 Nov):
+  - get_story finds a story that is in NO digest, through p3_reader.get_story, with
+    every article (article_count = len(articles) = its members in corpus()).
+  - a digest story keeps its digest fields (coverage, headline object) and gains the
+    full article list; an unknown id is an error, not a quiet empty result.
+  - the tool list is unchanged (still exactly the ten) and mtimes as above.
 
 USAGE (from ~/news-intel)
   .venv/bin/python tests/test_p3_mcp.py
@@ -92,6 +98,50 @@ def main():
         after = table_hashes(copy)
         check("ONLY boards and pins changed",
               sorted(t for t in after if after[t] != before.get(t)), ["boards", "pins"])
+
+        # --- FP-6: get_story finds ANY story -----------------------------------------
+        import p3_search as SR
+        world = SR.corpus()
+        digest = R._latest_digest() or {}
+        in_digest = [s["story_id"] for s in digest.get("stories") or []]
+        outside = sorted(sid for sid in world["stories"] if sid not in set(in_digest))
+        members = lambda sid: sorted(h for h, x in world["story_of_hash"].items() if x == sid)
+        if outside:
+            sid = outside[0]
+            got = asyncio.run(M.get_story(sid))
+            check("FP-6 · a story in no digest is found, with every article",
+                  (got["story_id"], got["article_count"], len(got["articles"]),
+                   sorted(a["text_hash"] for a in got["articles"])),
+                  (sid, len(members(sid)), len(members(sid)), members(sid)))
+            res = asyncio.run(M.server.call_tool("get_story", {"story_id": sid}))
+            # in process the SDK hands the dict back as JSON text content
+            import json
+            body = res.structured_content or json.loads(res.content[0].text)
+            check("FP-6 · and through the server's call_tool too (not an error)",
+                  (bool(res.is_error), body.get("story_id"), body.get("article_count")),
+                  (False, sid, len(members(sid))))
+        else:
+            check("FP-6 · a story in no digest exists to test with", outside, ["any"])
+        if in_digest:
+            sid = in_digest[0]
+            got = asyncio.run(M.get_story(sid))
+            want = next(s for s in digest["stories"] if s["story_id"] == sid)
+            check("FP-6 · a digest story keeps its digest fields",
+                  {k: got.get(k) for k in want}, want)
+            check("FP-6 · and gains every article",
+                  (got.get("article_count"), len(got.get("articles") or [])),
+                  (len(members(sid)), len(members(sid))) if sid in world["stories"]
+                  else (None, 0))
+        # In process the SDK raises its own error with the tool's as the cause (over
+        # stdio the same thing reaches the client as an error result).
+        try:
+            asyncio.run(M.server.call_tool("get_story", {"story_id": "1999-01-01:nope"}))
+            cause = None
+        except Exception as exc:                          # noqa: BLE001
+            cause = type(exc.__cause__ or exc).__name__
+        check("FP-6 · an unknown story is an error (LookupError)", cause, "LookupError")
+        names_after = sorted(t.name for t in asyncio.run(M.server.list_tools()))
+        check("FP-6 · the tool list is unchanged", names_after, names)
 
         got = asyncio.run(M.server.call_tool("facets", {}))
         check("a read tool answers (facets)", got is not None, True)

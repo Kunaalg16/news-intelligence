@@ -630,6 +630,315 @@ def on_mock(tmp):
     R.close_all()
 
 
+# ------------------------------------------------------------------ FP-6 (4 Nov)
+#
+# get_story · the answer-pin snapshot (TC-14) · the passages() snapshot check.
+#
+# PASS LINES (K3 final pass brief §6 FP-6, fixed before the run):
+#   - get_story on the real story 2026-10-30:9bbbe5763293 lists 6 articles, in points
+#     order (best seat points, then paper, then date) -- read-only on the real data.
+#   - on every story of one full real day, article_count = its members in corpus().
+#   - news.db / search.db mtimes unchanged by get_story.
+#   - pin snapshot equals the answer's fields (question, sentences with cites,
+#     passage_set_id, model, model_id, verdict, not_covered, at) and survives a hide
+#     and a replacement of the stored answer; unknown answer -> LookupError, no write.
+#   - passages() check: an answer written on a copy (fake client), then its articles
+#     changed in COPIES of news.db and search.db -> passages() rows identical.
+#   - the real intel.db is never written (fingerprinted outside the suite as well).
+# A failed line is answered by error analysis, not by moving the line.
+
+import re                                            # noqa: E402
+
+FP6_REAL_STORY = "2026-10-30:9bbbe5763293"
+FP6_REAL_DAY = "2026-10-30"
+FP6_ROW_KEYS = sorted(["text_hash", "headline", "paper", "date", "kind", "page_link",
+                       "page_links_more", "snippet"])
+FP6_STORY_KEYS = sorted(["story_id", "headline", "dates", "papers", "paper_names",
+                         "article_count", "articles", "fixture"])
+
+
+class FakeWriter:
+    """The only "model" here: replies built from the prompt, no network, no cost. The
+    writer cites the first and last article it was shown; sentences carry no number, so
+    the number check has nothing to drop."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, prompt, system, purpose, model, schema):
+        if schema == "rewrite":
+            question = prompt.rsplit("NEW QUESTION: ", 1)[-1].strip()
+            return {"decision": "new_topic", "queries": [question]}, 1200, 40
+        if schema == "text":
+            return {"text": "Earlier: a question."}, 300, 40
+        self.calls.append((purpose, model))
+        ids = re.findall(r'<article id="([^"]+)"', prompt)
+        return ({"sentences": [{"text": "The plan moved ahead.", "cites": [ids[0]]},
+                               {"text": "Officials spoke about it.", "cites": [ids[-1]]}]},
+                3000, 200)
+
+
+def build_mock_search(path):
+    """search.db for the mock: one passage per text, header + text, word index only (no
+    vectors: the tests run with the embedding service 'down', so mode is fts_only)."""
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE passages (passage_id INTEGER PRIMARY KEY, text_hash TEXT, ord INTEGER,
+                               start_word INTEGER, words INTEGER, headline TEXT, text TEXT);
+        CREATE VIRTUAL TABLE passages_fts USING fts5(headline, text, content='passages',
+                               content_rowid='passage_id', tokenize='porter unicode61');
+        CREATE TABLE passage_vectors (passage_id INTEGER PRIMARY KEY, dim INTEGER,
+                               vec BLOB, model TEXT, variant TEXT, embedded_at TEXT);
+    """)
+    for pid, (h, head, _w, _seats, _kind) in enumerate(MOCK_TEXTS, 1):
+        text = f"{head}\n\n{head}. The canal plan and the water board, as reported."
+        con.execute("INSERT INTO passages VALUES (?,?,0,0,?,?,?)",
+                    (pid, h, len(text.split()), head, text))
+        con.execute("INSERT INTO passages_fts (rowid, headline, text) VALUES (?,?,?)",
+                    (pid, head, text))
+    con.commit()
+    con.close()
+
+
+def _ro_rows(path, sql, args=()):
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return con.execute(sql, args).fetchall()
+    finally:
+        con.close()
+
+
+def _points_order_ok(story, seat_of):
+    keys = [(-(seat_of[a["text_hash"]]["points"] or 0), a["paper"] or "", a["date"] or "",
+             a["text_hash"]) for a in story["articles"]]
+    return keys == sorted(keys)
+
+
+def _passages_snapshot_check(label, news, search_p, story_id, question):
+    """Write an answer with the fake client on these COPIES, then change its articles in
+    the news.db and search.db copies, and read passages() before and after."""
+    import p3_reader as R
+    import p3_search as SR
+    SR._CLIENT = fake = FakeWriter()
+    SR.new_conversation()
+    events = list(SR.ask(question, scope={"story_id": story_id}))
+    answer = events[-1].get("answer") or {}
+    check(f"{label} · passages() · the fake writer wrote an answer on the copy",
+          (events[-1]["type"], bool(answer.get("sentences")), len(fake.calls)),
+          ("done", True, 1))
+    before = R.passages(answer["passage_set_id"])
+    hashes = sorted({p["text_hash"] for p in before})
+    qs = ",".join("?" * len(hashes))
+    con = sqlite3.connect(news)
+    con.execute(f"UPDATE texts SET headline = 'CHANGED', body = 'CHANGED' "
+                f"WHERE text_hash IN ({qs})", hashes)
+    con.execute(f"UPDATE placements SET extra = '{{}}', page = 99 "
+                f"WHERE text_hash IN ({qs})", hashes)
+    con.commit()
+    con.close()
+    con = sqlite3.connect(search_p)
+    con.execute(f"UPDATE passages SET text = 'CHANGED', headline = 'CHANGED' "
+                f"WHERE text_hash IN ({qs})", hashes)
+    con.commit()
+    con.close()
+    R.close_all()
+    check(f"{label} · passages() · the change really landed in the copies",
+          ({R.article(h)["headline"] for h in hashes},
+           {t for (t,) in _ro_rows(search_p, f"SELECT DISTINCT text FROM passages "
+                                             f"WHERE text_hash IN ({qs})", hashes)}),
+          ({"CHANGED"}, {"CHANGED"}))
+    check(f"{label} · passages() · rows identical before and after the change",
+          R.passages(answer["passage_set_id"]), before)
+    check(f"{label} · passages() · and not empty", bool(before), True)
+    SR._CLIENT = None
+    return answer
+
+
+def fp6_mock(tmp):
+    work, news, intel = mock_world(tmp)
+    search_p = Path(tmp) / "search.db"
+    build_mock_search(search_p)
+    # a3 runs on: a page link to its continuation (R5), so page_links_more has an entry
+    con = sqlite3.connect(news)
+    con.execute("UPDATE placements SET extra = ? WHERE text_hash = 'a3'",
+                (json.dumps({"paper": "2026-10-03_Mint", "continues_to": 5}),))
+    con.commit()
+    con.close()
+    import p3_reader as R
+    import p3_search as SR
+    saved = (SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB, SR.embed_query, SR._CLIENT)
+    SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB = news, intel, search_p
+    SR.embed_query = lambda q, **kw: None            # the service "down": fts_only
+    R.close_all()
+    try:
+        stamps = {p.name: p.stat().st_mtime_ns for p in (news, search_p)}
+        world = SR.corpus(news=R._news(), intel=R._intel_ro())
+        st = R.get_story(THREAD_ID)
+        check("FP-6 mock · get_story has exactly the contract's keys", sorted(st), FP6_STORY_KEYS)
+        check("FP-6 mock · every article row has exactly the contract's keys",
+              {tuple(sorted(a)) for a in st["articles"]}, {tuple(FP6_ROW_KEYS)})
+        check("FP-6 mock · every member article, once",
+              (st["article_count"], sorted(a["text_hash"] for a in st["articles"])),
+              (3, ["a1", "a2", "a3"]))
+        check("FP-6 mock · membership = corpus()['story_of_hash']",
+              sorted(a["text_hash"] for a in st["articles"]),
+              sorted(h for h, s in world["story_of_hash"].items() if s == THREAD_ID))
+        check("FP-6 mock · best-placed first (points, then paper, then date)",
+              _points_order_ok(st, world["stories"][THREAD_ID]["seat_of_hash"]), True)
+        a2 = next(a for a in st["articles"] if a["text_hash"] == "a2")
+        check("FP-6 mock · a text printed twice is shown at its best seat (front page)",
+              (a2["paper"], a2["page_link"]["pdf_page"], a2["page_link"]["paper"]),
+              ("The Hindu", 1, "The Hindu"))
+        check("FP-6 mock · papers counts every seat; paper_names names them",
+              (st["papers"], st["paper_names"]), (2, ["Mint", "The Hindu"]))
+        check("FP-6 mock · the headline is corpus' (TC-20 rule, one copy)",
+              st["headline"], world["stories"][THREAD_ID]["headline"])
+        check("FP-6 mock · dates are the story's days", st["dates"], list(MOCK_DATES))
+        a3 = next(a for a in st["articles"] if a["text_hash"] == "a3")
+        check("FP-6 mock · page_links_more carries the jump, with its paper",
+              [(l["pdf_page"], l["reason"], l["paper"]) for l in a3["page_links_more"]],
+              [(5, "continues_to", "Mint")])
+        check("FP-6 mock · the others have no extra page",
+              [a["page_links_more"] for a in st["articles"] if a["text_hash"] != "a3"],
+              [[], []])
+        check("FP-6 mock · the snippet is the lead passage, header stripped",
+              a3["snippet"].startswith("Canal plan cleared. The canal plan"), True)
+        check("FP-6 mock · a one-day story has its one article",
+              R.get_story("2026-10-01:bbb")["article_count"], 1)
+        check("FP-6 mock · error · an unknown story is a LookupError",
+              raises(lambda: R.get_story("2026-09-09:zzz"), LookupError), True)
+        check("FP-6 mock · error · a non-day-group (later day) id is not a story",
+              raises(lambda: R.get_story("2026-10-02:aaa"), LookupError), True)
+        check("FP-6 mock · error · a non-string id is a ValueError",
+              raises(lambda: R.get_story(None), ValueError), True)
+        check("FP-6 mock · get_story writes nothing to news.db / search.db",
+              {p.name: p.stat().st_mtime_ns for p in (news, search_p)}, stamps)
+
+        # --- the passages() snapshot check, then TC-14 on the same answer -------------
+        answer = _passages_snapshot_check("FP-6 mock", news, search_p, THREAD_ID,
+                                          "What happened to the canal plan?")
+        check("FP-6 mock · ITEM_TYPES has 'answer'", "answer" in R.ITEM_TYPES, True)
+        board = R.create_board("answers")
+        n_pins = lambda: _ro_rows(intel, "SELECT COUNT(*) FROM pins")[0][0]
+        before_bad = n_pins()
+        check("FP-6 mock · TC-14 · an unknown answer is a LookupError",
+              raises(lambda: R.pin(board, "answer", {"answer_id": "ans_nope"}, {}),
+                     LookupError), True)
+        check("FP-6 mock · TC-14 · an answer pin with no answer_id is a ValueError",
+              raises(lambda: R.pin(board, "answer", {"question": "x"}, {}), ValueError), True)
+        check("FP-6 mock · TC-14 · and neither wrote a pin", n_pins(), before_bad)
+        sent = {"answer_id": answer["answer_id"], "question": "page's copy",
+                "snapshot": {"question": "forged"}}
+        R.pin(board, "answer", sent, {"conversation_id": answer["conversation_id"]})
+        want = {k: answer[k] for k in R.ANSWER_SNAPSHOT_KEYS}
+        snap = R.list_pins(board)[0]["payload"]["snapshot"]
+        check("FP-6 mock · TC-14 · the snapshot equals the answer's fields", snap, want)
+        check("FP-6 mock · TC-14 · sentences keep their cites",
+              [s["cites"] for s in snap["sentences"]],
+              [s["cites"] for s in answer["sentences"]])
+        check("FP-6 mock · TC-14 · the page's own payload keys are kept beside it",
+              R.list_pins(board)[0]["payload"]["question"], "page's copy")
+        con = sqlite3.connect(intel)
+        con.execute("UPDATE turns SET hidden_at = '2026-11-04T10:00:00', hidden_by = 'hide', "
+                    "hide_action_id = 'h_test' WHERE json_extract(payload, '$.answer_id') = ?",
+                    (answer["answer_id"],))
+        con.execute("UPDATE turns SET payload = json_set(payload, '$.sentences', json('[]'), "
+                    "'$.verdict', 'empty') WHERE json_extract(payload, '$.answer_id') = ?",
+                    (answer["answer_id"],))
+        con.commit()
+        con.close()
+        R.close_all()
+        check("FP-6 mock · TC-14 · the stored answer really was hidden and changed",
+              (SR.get_answer(answer["answer_id"])["sentences"],
+               _ro_rows(intel, "SELECT hidden_by FROM turns WHERE "
+                               "json_extract(payload, '$.answer_id') = ?",
+                        (answer["answer_id"],))[0][0]), ([], "hide"))
+        check("FP-6 mock · TC-14 · the snapshot survives the hide and the replacement",
+              R.list_pins(board)[0]["payload"]["snapshot"], want)
+        check("FP-6 mock · TC-14 · a hidden answer can still be pinned (get_answer finds it)",
+              R.pin(board, "answer", {"answer_id": answer["answer_id"]}, {})[:2], "p_")
+    finally:
+        SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB, SR.embed_query, SR._CLIENT = saved
+        R.close_all()
+        os.environ.pop("P3_READER_INTEL_DB", None)
+        os.environ.pop("P3_READER_NEWS_DB", None)
+
+
+def fp6_real(tmp):
+    """Read-only get_story checks on the REAL data, then the passages() check on COPIES.
+    Runs before `on_real`, so FP-8's known crash there (digests moved, X10) cannot hide
+    it."""
+    import p3_reader as R
+    import p3_search as SR
+    real_search = ROOT / "data" / "search.db"
+    stamps = {p.name: p.stat().st_mtime_ns for p in (REAL_NEWS, real_search)}
+    copy = Path(tmp) / "intel_fp6_copy.db"
+    src = sqlite3.connect(f"file:{REAL_INTEL}?mode=ro", uri=True)
+    dst = sqlite3.connect(copy)
+    src.backup(dst)
+    src.close()
+    dst.close()
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ["P3_READER_NEWS_DB"] = str(REAL_NEWS)
+    os.environ["P3_READER_INTEL_DB"] = str(copy)
+    os.environ["P3_READER_WORK"] = str(work)
+    saved = (SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB, SR.embed_query, SR._CLIENT)
+    R.close_all()
+    try:
+        world = SR.corpus(news=R._news(), intel=R._intel_ro())
+        members = {}
+        for h, sid in world["story_of_hash"].items():
+            members.setdefault(sid, set()).add(h)
+        st = R.get_story(FP6_REAL_STORY)
+        seat_of = world["stories"][FP6_REAL_STORY]["seat_of_hash"]
+        check("FP-6 real · 2026-10-30:9bbbe5763293 lists 6 articles (K1 saw '3 of 6')",
+              (st["article_count"], len(st["articles"])), (6, 6))
+        check("FP-6 real · in points order (points, then paper, then date)",
+              _points_order_ok(st, seat_of), True)
+        check("FP-6 real · its headline is never blank", bool(st["headline"].strip()), True)
+        day = sorted(sid for sid, row in world["stories"].items()
+                     if FP6_REAL_DAY in row["dates"])
+        got = {sid: R.get_story(sid) for sid in day}
+        check(f"FP-6 real · every story of {FP6_REAL_DAY} ({len(day)}): article_count = "
+              f"its members in corpus()",
+              [sid for sid in day if got[sid]["article_count"] != len(members[sid]) or
+               {a["text_hash"] for a in got[sid]["articles"]} != members[sid]], [])
+        check("FP-6 real · and every one is in points order",
+              [sid for sid in day if not _points_order_ok(
+                  got[sid], world["stories"][sid]["seat_of_hash"])], [])
+        check("FP-6 real · papers = len(paper_names) on every one",
+              [sid for sid in day if got[sid]["papers"] != len(got[sid]["paper_names"])], [])
+        check("FP-6 real · no blank headline that day",
+              [sid for sid in day if not (got[sid]["headline"] or "").strip()], [])
+        check("FP-6 real · every page link points at a PDF that exists",
+              [a["page_link"]["pdf"] for s in got.values() for a in s["articles"]
+               if not (ROOT / a["page_link"]["pdf"]).exists()], [])
+        check("FP-6 real · news.db / search.db mtimes unchanged by get_story",
+              {p.name: p.stat().st_mtime_ns for p in (REAL_NEWS, real_search)}, stamps)
+        CHECKS.append(("FP-6 real · (count) stories checked on the day", len(day), len(day)))
+
+        # passages() snapshot check on COPIES of news.db and search.db
+        news_c, search_c = Path(tmp) / "news_copy.db", Path(tmp) / "search_copy.db"
+        for a, b in ((REAL_NEWS, news_c), (real_search, search_c)):
+            s_, d_ = sqlite3.connect(f"file:{a}?mode=ro", uri=True), sqlite3.connect(b)
+            s_.backup(d_)
+            s_.close()
+            d_.close()
+        os.environ["P3_READER_NEWS_DB"] = str(news_c)
+        SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB = news_c, copy, search_c
+        SR.embed_query = lambda q, **kw: None        # never the live service (8766)
+        R.close_all()
+        _passages_snapshot_check("FP-6 real copies", news_c, search_c, FP6_REAL_STORY,
+                                 "Where is the cyclone expected to make landfall?")
+        check("FP-6 real · the real news.db / search.db were not touched by the copies",
+              {p.name: p.stat().st_mtime_ns for p in (REAL_NEWS, real_search)}, stamps)
+    finally:
+        SR.NEWS_DB, SR.INTEL_DB, SR.SEARCH_DB, SR.embed_query, SR._CLIENT = saved
+        R.close_all()
+
+
 # ------------------------------------------------------------------------ 2. real data
 
 def on_real(tmp):
@@ -718,13 +1027,27 @@ def main():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             on_mock(tmp)
+        with tempfile.TemporaryDirectory() as tmp:
+            fp6_mock(tmp)
         if mock_only:
             print("real data: SKIPPED (--mock)")
         elif not (REAL_NEWS.exists() and REAL_INTEL.exists()):
             print("real data: SKIPPED (databases not found)")
         else:
+            # FP-6's real checks first: on_real still crashes on the digests' move (X10),
+            # which is FP-8's to fix, and must not hide these.
             with tempfile.TemporaryDirectory() as tmp:
-                on_real(tmp)
+                fp6_real(tmp)
+            with tempfile.TemporaryDirectory() as tmp:
+                try:
+                    on_real(tmp)
+                except Exception as exc:                     # noqa: BLE001
+                    # Reported as a FAILED check, not swallowed: the known X10 crash
+                    # (FP-8's) then still fails the suite, and the checks above print.
+                    import traceback
+                    where = traceback.extract_tb(exc.__traceback__)[-1]
+                    check("real · on_real ran to the end",
+                          f"{type(exc).__name__} at line {where.lineno}: {exc}", "no crash")
     finally:
         for k, v in kept.items():
             if v is None:
