@@ -1492,6 +1492,23 @@ var askLive = APP.liveTurn();
 eq("[page] L-3 · a question's live turn keeps its Q row and says Haiku is writing",
    [classesOf(askLive).filter(function (c) { return c === "turn-row turn-q"; }).length,
     textOf(askLive).indexOf("Haiku is writing…") > 0], [1, true]);
+/* S5 · L-12: the classes of the A row's body children, in order */
+function aBodyKids(turn) {
+  var rows = turn.children.filter(function (c) {
+    return (" " + c.className + " ").indexOf(" turn-a ") >= 0; });
+  var body = rows[0].children.filter(function (c) { return c.className === "turn-body"; })[0];
+  return body.children.map(function (c) { return c.className; });
+}
+eq("[page] L-12 · no words yet: the working line is the A row's first line",
+   aBodyKids(askLive)[0], "answer-working");
+PS.live.sentences.push({text: "First words.", cites: []});
+eq("[page] L-12 · once text exists it goes first, the working line under it",
+   aBodyKids(APP.liveTurn()), ["answer-text", "answer-working"]);
+PS.live.sentences = [];
+PS.live.parentOf = "a1";
+eq("[page] L-12 · the same for Think harder (Sonnet is writing…, no Q row)",
+   aBodyKids(APP.liveTurn())[0], "answer-working");
+delete PS.live.parentOf;
 PS.live.answer = answerFixture();
 eq("[page] L-3 · once the answer is done the words go",
    textOf(APP.liveTurn()).indexOf("is writing") < 0, true);
@@ -2807,10 +2824,11 @@ def look_i7():
     check("[page] I9 · the measured cap heights and the box's own centre are tokens",
           re.findall(r"(--cap-sans|--cap-serif|--mark-mid):\s*([\w.]+);", root),
           [("--cap-sans", "0.698"), ("--cap-serif", "0.676"), ("--mark-mid", "4px")])
-    check("[page] I9 · a serif answer's row uses 17 px Newsreader, a weak or folded line "
-          "12.5 px", [_rule(css, ".turn-row:has(> .turn-body > .answer-text:first-child)"),
-                      _rule(css, ".turn-row:has(> .turn-body > :is(.answer-weak, "
-                                 ".answer-folded):first-child)")],
+    check("[page] I9 · a serif answer's row uses 17 px Newsreader, a weak, folded or working "
+          "line 12.5 px (L-12)",
+          [_rule(css, ".turn-row:has(> .turn-body > .answer-text:first-child)"),
+           _rule(css, ".turn-row:has(> .turn-body > :is(.answer-weak, "
+                      ".answer-folded, .answer-working):first-child)")],
           [{"--first-size": "var(--s17)", "--first-cap": "var(--cap-serif)"},
            {"--first-size": "var(--s125)"}])
     check("[page] I7 · the question: Plex 16 px 600, line-height 1.4",
@@ -5087,7 +5105,8 @@ async function main() {
   var open = gateStream('/api/reask');
   var running = APP.reaskInPlace("f2", {mode: "as_typed"});
   var during = turns();
-  OUT.during = [during.length, byClass(during[1], "answer-caret").length,
+  /* S5 L-12: before its first word the live turn is its working line (no caret yet) */
+  OUT.during = [during.length, byClass(during[1], "answer-working").length,
                 byClass(during[1], "answer-text").length,
                 textOf(during[1]).indexOf("A stub sentence.") >= 0];
   await APP.reaskInPlace("f3", {mode: "carry"});
@@ -5286,7 +5305,7 @@ main().then(function () { print(JSON.stringify(OUT)); },
            None])
     check("[page] I8 · and no correction asks anew", got["modes_ask"], 0)
     check("[page] I8 · while it streams the live turn is at the old answer's place, the old "
-          "answer not drawn", got["during"], [7, 1, 1, False])
+          "answer not drawn", got["during"], [7, 1, 0, False])
     check("[page] I8 · a second press while one runs sends nothing", got["during_calls"], 1)
     q = [a["question"] for a in S.FOLLOWUP_TURNS]
     check("[page] I8 · after it the new answer stands where the old one was, even listed last",

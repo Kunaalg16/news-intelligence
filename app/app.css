@@ -1018,7 +1018,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   --first-size: var(--s17);
   --first-cap: var(--cap-serif);
 }
-.turn-row:has(> .turn-body > :is(.answer-weak, .answer-folded):first-child) {
+.turn-row:has(> .turn-body > :is(.answer-weak, .answer-folded, .answer-working):first-child) {
   --first-size: var(--s125);
 }
 .turn-a .turn-mark {

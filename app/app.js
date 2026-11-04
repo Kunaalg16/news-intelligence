@@ -2595,16 +2595,20 @@ function liveTurn() {
     }
     body.append(box);
   } else {
-    const text = el('div', { class: 'answer-text' });
-    for (const sentence of live.sentences) {
-      text.append(el('p', {}, sentence.text, ' ', chipsFor(sentence.cites, byHash)));
+    /* L-12 · before any words arrive the working line IS the A row's first line (the box
+       centres on its capitals, K-7); an empty text block drawn first left the box on a
+       blank line with the words one line below. Once text streams, it goes first. */
+    const working = live.answer ? null
+      : el('p', { class: 'answer-working', role: 'status', text: workingWords(live) });
+    if (live.sentences.length || live.answer) {
+      const text = el('div', { class: 'answer-text' });
+      for (const sentence of live.sentences) {
+        text.append(el('p', {}, sentence.text, ' ', chipsFor(sentence.cites, byHash)));
+      }
+      text.append(el('span', { class: 'answer-caret', 'aria-hidden': 'true' }));
+      body.append(text);
     }
-    text.append(el('span', { class: 'answer-caret', 'aria-hidden': 'true' }));
-    body.append(text);
-    if (!live.answer) {
-      body.append(el('p', { class: 'answer-working', role: 'status',
-                            text: workingWords(live) }));
-    }
+    if (working) body.append(working);
   }
 
   if (live.results) {
