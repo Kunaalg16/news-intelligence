@@ -92,6 +92,16 @@ KNOBS = {
     # paragraphs too long to re-find his place in.
     "paragraph_words": 100,
 
+    # A full stop after one of these words, or after a single letter (an initial, or the
+    # end of "U.S." / "p.m."), never ends a paragraph: "…said Mr." with the name opening
+    # the next one read as a broken page (found 5 Nov; 598 of 10,888 articles had one).
+    # Leaning this way is safe: a missed sentence end only lets a paragraph run on to the
+    # next one. Case-sensitive ("No." is a number, "no." can end a sentence). What would
+    # change it: a paragraph seen ending on a short form not listed here.
+    "no_break_after": ("Mr", "Mrs", "Ms", "Dr", "Prof", "Shri", "Smt", "Sri", "No", "Nos",
+                       "vs", "Rs", "St", "Jr", "Sr", "Gen", "Lt", "Col", "Capt", "Maj",
+                       "Brig", "Hon", "Adv"),
+
 }
 
 # ------------------------------------------------------- FEATURE FLAGS (brief §8.8)
@@ -263,7 +273,11 @@ def _mapped():
 
 # Two fixed-width look-behinds rather than one with an optional quote: Python's re needs
 # every look-behind to be a fixed width, and a sentence can end inside a quotation mark.
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"'”’])\s+")
+# The bare-stop branch is guarded by one negative look-behind per `no_break_after` word
+# (each a fixed width of its own) and one for a single letter.
+_NO_BREAK = ("".join(rf"(?<!\b{re.escape(w)}\.)" for w in KNOBS["no_break_after"])
+             + r"(?<!\b[A-Za-z]\.)")
+_SENTENCE_END = re.compile(_NO_BREAK + r"(?<=[.!?])\s+|(?<=[.!?][\"'”’])\s+")
 
 
 def paragraphs(body, min_words=None):

@@ -763,6 +763,37 @@ def routes():
               [p for p in paras
                if not re.search(r"[.!?][\"'”’]?$", p.strip())], [])
 
+        # F1b (fo-1) · no paragraph ends on a title or an initial (`no_break_after`).
+        # With min_words=1 every sentence end the splitter accepts becomes a break, so
+        # each case shows exactly where it breaks and where it must not.
+        cases = {
+            "a title": ("He met Mr. Modi in Delhi. Then he left.",
+                        ["He met Mr. Modi in Delhi.", "Then he left."]),
+            "an initial": ("Minister S. Jaishankar spoke. Talks went on.",
+                           ["Minister S. Jaishankar spoke.", "Talks went on."]),
+            "a dotted short form": ("Rates in the U.S. rose at 5 p.m. on Friday. It held.",
+                                    ["Rates in the U.S. rose at 5 p.m. on Friday.",
+                                     "It held."]),
+            "a number": ("Platform No. 4 was shut. Trains ran late.",
+                         ["Platform No. 4 was shut.", "Trains ran late."]),
+            "a lower-case 'no.' still ends a sentence": ("He said no. She agreed.",
+                                                         ["He said no.", "She agreed."]),
+            "a quoted end still breaks": ("“We will go.” They went.",
+                                          ["“We will go.”", "They went."]),
+            "? and ! still break": ("Why now? Because! Done.", ["Why now?", "Because!",
+                                                                "Done."]),
+        }
+        for what, (body, want) in cases.items():
+            check(f"F1b · paragraphs: {what}", A.paragraphs(body, min_words=1), want)
+        listed = re.compile(r"(?:\b(?:" + "|".join(A.KNOBS["no_break_after"])
+                            + r")\.|\b[A-Za-z]\.)$")
+        ends = [p.split()[-1]
+                for st in live["stories"] for r in st["coverage"]["rows"]
+                for p in A.article(r["text_hash"])["paragraphs"][:-1]
+                if listed.search(p.split()[-1])]
+        check("F1b · no paragraph in the latest digest's articles ends on a title or an "
+              "initial", ends, [])
+
         # --- threads --------------------------------------------------------------
         shown = [s for s in live["stories"] if (s.get("story_so_far") or {}).get("shown")][0]
         t = A.thread(shown["story_so_far"]["thread_id"])
