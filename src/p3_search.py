@@ -41,7 +41,10 @@ WHEN THE EMBEDDING SERVICE IS DOWN
   by `p3_embedsvc.py` over HTTP (Q14 r). If that service is not up, `search()` does NOT
   fail: it runs the word index alone and says so in its result (`mode: "fts_only"`), so
   the page can tell the reader that meaning-search is off rather than quietly returning
-  worse answers (graceful degradation).
+  worse answers (graceful degradation). `mode` is ALWAYS present (FP-2, TC-3): exactly
+  `"hybrid"` or `"fts_only"` on every search result, `results` event, stored answer and
+  `suggest_connections` response. (`"vector_only"` exists only through the `indexes`
+  test seam, which the app never passes.)
 
 DATA (one owner per file)
   search()/facets()  read data/search.db · news.db · intel.db, ALL read-only (mode=ro)
@@ -63,11 +66,13 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -79,6 +84,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import p3_digest as D                                              # noqa: E402
 import p3_label as L                                               # noqa: E402
 import p3_store as ST                                              # noqa: E402
+from p3_index import fold                                         # noqa: E402
 
 SEARCH_DB = ROOT / "data" / "search.db"
 NEWS_DB = ROOT / "data" / "news.db"
@@ -152,6 +158,13 @@ KNOBS = {
     # run could not separate covered from not-covered on this signal at any value.
     "not_found_threshold": 0.0280,
     "thin_threshold": 0.0300,
+
+    # A story with no printed headline anywhere (A8: 16 of 7,484 stories over 33 days,
+    # every one a single headline-less piece with no deck) is shown under its deck, or
+    # else the first line of its best-placed article cut to about this many words at a
+    # sentence end (TC-20). PLACED: a headline's length in these papers. Measured by:
+    # how the 16 read on the page; a longer cut only if they read as fragments.
+    "headline_fallback_words": 12,
 
     # A 1-2 letter word is dropped only when a longer word remains in the query, so
     # "AI" is searched while "of the police" drops "of" (contract v2.2).
@@ -278,7 +291,7 @@ def tokens(query):
     word remains, because next to "police" the word "of" adds nothing but noise. A query
     of nothing but short words is still a query, never a browse.
     """
-    found = [w.lower() for w in WORD.findall(query or "")]
+    found = [w.lower() for w in WORD.findall(fold(query))]
     longer = [w for w in found if len(w) > KNOBS["short_word_len"]]
     return longer if longer else found
 
@@ -346,7 +359,7 @@ def corpus(filters=None, news=None, intel=None):
     close_news = news is None
     close_intel = intel is None
     news = news or open_ro(NEWS_DB)
-    intel = intel or open_ro(INTEL_DB)
+    intel = intel or open_ro(corpus_intel_path())
     try:
         dates = _dates_in_window(news, filters)
         seats = [s for s in D.load_seats(news, dates) if _seat_allowed(s, filters)]
@@ -356,6 +369,7 @@ def corpus(filters=None, news=None, intel=None):
             # in score_story; `points` is what pick_headline and the row order read.
             s["points"], s["points_why"] = D.seat_points(s, shape)
         stories = D.load_stories(intel, seats)
+        heads = story_headlines(stories, news)
     finally:
         if close_news:
             news.close()
@@ -373,7 +387,6 @@ def corpus(filters=None, news=None, intel=None):
     searched_days = {s["date"] for s in seats if s.get("date")}
 
     for story in stories:
-        head = D.pick_headline(story, {})
         topic = _story_topic(story)
         sid = story["story_id"]
         if topics is not None and topic not in topics:
@@ -393,7 +406,7 @@ def corpus(filters=None, news=None, intel=None):
             story_of_hash[h] = sid
         rows[sid] = {
             "story_id": sid,
-            "headline": head.get("text") or "",
+            "headline": heads[sid],
             "topic": topic,
             "dates": sorted({s["date"] for s in story["seats"] if s["date"]}),
             "papers": len({s["publisher"] for s in story["seats"]}),
@@ -401,6 +414,47 @@ def corpus(filters=None, news=None, intel=None):
         }
     return {"stories": rows, "story_of_hash": story_of_hash,
             "searched_days": len(searched_days), "allowed": set(story_of_hash)}
+
+
+def corpus_intel_path():
+    """The `intel.db` the story grouping is read from: the one the reader uses (item 11).
+
+    `P3_READER_INTEL_DB` when set -- the same variable `p3_reader` reads -- so a test or a
+    script on a copy groups stories from that copy, not from the real file. Read from the
+    environment directly, not through `_R()`, so `corpus()` never imports `p3_reader`.
+    The write guard keeps its own fixed `REAL_INTEL_DB`; this only chooses what is READ.
+    """
+    return Path(os.environ.get("P3_READER_INTEL_DB") or INTEL_DB)
+
+
+def story_headlines(stories, news):
+    """{story_id: headline} -- the digest's pick, never blank (TC-20).
+
+    `p3_digest.pick_headline` first, so a search row and a digest item agree. A story
+    none of whose pieces has a printed headline falls back to the best-placed piece's
+    deck, then to the first line of its body cut at a sentence end. Bodies are read only
+    for those stories (A8: 16 of 7,484).
+    """
+    heads, blank = {}, []
+    for story in stories:
+        text = (D.pick_headline(story, {}).get("text") or "").strip()
+        heads[story["story_id"]] = text
+        if not text:
+            blank.append(story)
+    if not blank:
+        return heads
+    bodies = D.load_bodies(news, sorted({s["text_hash"] for st in blank
+                                         for s in st["seats"]}))
+    budget = KNOBS["headline_fallback_words"]
+    for story in blank:
+        seats = sorted(story["seats"], key=lambda s: (-(s["points"] or 0), s["date"] or "",
+                                                      s["publisher"] or "", s["art_id"] or ""))
+        decks = [" ".join((s.get("deck") or "").split()) for s in seats]
+        lines = [next((ln for ln in (bodies.get(s["text_hash"]) or "").splitlines()
+                       if ln.strip()), "") for s in seats]
+        pick = next((x for x in decks + lines if x.strip()), "")
+        heads[story["story_id"]] = snippet(pick, budget) if pick else ""
+    return heads
 
 
 def _story_topic(story):
@@ -658,7 +712,7 @@ def search(query, filters=None, sort="relevance", limit=20, news=None, intel=Non
     try:
         world = corpus(filters, news=news, intel=intel)
         allowed = world["allowed"]
-        mode, scores, best_passage = "both", {}, {}
+        mode, scores, best_passage = "hybrid", {}, {}
         sim_of, bm25_of = {}, {}
 
         if not browse and allowed:
@@ -763,9 +817,8 @@ def search(query, filters=None, sort="relevance", limit=20, news=None, intel=Non
                "total_stories": len(hits),
                "total_articles": total_articles,
                "stories": shown_hits,
+               "mode": mode,
                "fixture": False}
-        if mode != "both":
-            out["mode"] = mode
         return out
     finally:
         if close_scon:
@@ -1825,6 +1878,7 @@ def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, 
                                     cited + [story_of[h] for h in cited],
                                     KNOBS["pane_results_shown"]),
         "results_total": result["total_stories"],
+        "mode": result["mode"],
         "fixture": False,
     }
     _add_turn(cid, "answer", answer)
@@ -1989,7 +2043,10 @@ def _suggest_connections(story_id, text_hashes):
             "model = ? AND prompt_version = ?",
             (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION)).fetchone()
     if hit:
-        return dict(out, suggestions=json.loads(hit[0]), verdict=hit[1], cost_usd=0.0)
+        # Only a non-empty set is cached, and a pick needs a cosine, so every cached set
+        # was found with both indexes.
+        return dict(out, suggestions=json.loads(hit[0]), verdict=hit[1], cost_usd=0.0,
+                    mode="hybrid")
 
     with _phase("search"):
         exclude = {story_id} | {link["target_story_id"]
@@ -1999,8 +2056,7 @@ def _suggest_connections(story_id, text_hashes):
     picks = [s for s in found["stories"]
              if s.get("similarity") is not None
              and s["similarity"] >= KNOBS["suggest_min_similarity"]][:KNOBS["suggest_max"]]
-    if found.get("mode"):
-        out["mode"] = found["mode"]
+    out["mode"] = found["mode"]
     if not picks:
         # Nothing clears the bar: no call, no cost, and not cached -- the archive grows,
         # so "nothing related" today is worth asking again tomorrow.
@@ -2064,7 +2120,7 @@ def main():
             if e["type"] == "results":
                 r = e["search"]
                 print(f"verdict {r['verdict']} · {r['total_stories']} stories · "
-                      f"mode {r.get('mode', 'both')}")
+                      f"mode {r['mode']}")
             elif e["type"] == "sentence":
                 print(f"  {e['text']}  {e['cites']}")
             elif e["type"] == "error":
@@ -2085,7 +2141,7 @@ def main():
         print(f"dates {f['date_min']} .. {f['date_max']}")
         return 0
     r = search(args.query, sort=args.sort, limit=args.limit)
-    mode = r.get("mode", "both")
+    mode = r["mode"]
     print(f"{r['total_stories']} stories · {r['total_articles']} articles · "
           f"{r['searched_days']} days searched · verdict {r['verdict']} · mode {mode}")
     for i, s in enumerate(r["stories"], start=1):

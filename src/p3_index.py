@@ -9,6 +9,7 @@ WHAT IT DOES
       .venv-embed/bin/python src/p3_index.py build            everything, from scratch
       .venv-embed/bin/python src/p3_index.py update           only texts not yet indexed
       .venv-embed/bin/python src/p3_index.py check            counts, smoke query, totals
+      .venv/bin/python src/p3_index.py fts                    the word index alone, again
   Options: --sample N (the first N texts, for a trial run) · --fake (a hash-based encoder,
   no model loaded, for rehearsal and tests) · --db PATH.
   `build` and `update` need `.venv-embed` because they load the embedding model; `check`
@@ -51,6 +52,16 @@ DATA (one owner per file)
   `search.db` is K3's, derived, and NOT backed up (Q10e): it can be rebuilt from
   `news.db` with one command, so it is grouped by how it changes, not by what it feeds.
 
+THE WORD INDEX READS FOLDED TEXT (FP-2, TC-21)
+  The PDFs carry typesetting ligatures (`proﬁt`, `conﬂict`; 5,643 of 10,794 texts, A9),
+  and the FTS tokenizer keeps `ﬁ` as a letter, so `profit` never matched them. The text
+  handed to the word index is Unicode NFKC-normalised (`fold`), which folds compatibility
+  characters such as `ﬁ` into `fi`; `p3_search` folds each query with the same function.
+  Only the INDEX is folded: `passages` -- what the reader sees and the vectors were made
+  from -- is stored as printed. `fts` rebuilds the word index alone from `passages`, with
+  no re-embedding, so an index built before the fold is brought up to date in seconds.
+  (The FTS5 'rebuild' command must never be used here: it re-reads `passages` unfolded.)
+
 KNOBS
   One block below with reasons. A recipe change bumps CHUNK_VERSION, which is stored in
   the file; `update` refuses to add passages cut by a different recipe to the same index.
@@ -63,6 +74,7 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,6 +82,8 @@ NEWS_DB = ROOT / "data" / "news.db"
 SEARCH_DB = ROOT / "data" / "search.db"
 
 CHUNK_VERSION = "chunk-1"
+# How the text handed to the word index is normalised; stored in meta by `fts`.
+FTS_FOLD = "nfkc"
 RUN_ID = "exam-v1"
 
 # The same model and the same pinned commit as the article vectors (p2_embed MODELS),
@@ -138,6 +152,18 @@ CREATE TABLE IF NOT EXISTS passage_vectors (
 
 
 # ───────────────────────────── the recipe ─────────────────────────────
+
+def fold(text):
+    """Unicode NFKC normalisation, the same on both sides of the word index (TC-21).
+
+    NFKC folds COMPATIBILITY characters into their plain form -- the ligatures the PDFs
+    carry (`ﬁ` U+FB01 -> `fi`) among them. Without it `proﬁt` is one token the reader can
+    never type: measured 4 Nov (A9), word search found 0 of 476 passages that spell
+    "profit" only with the ligature. `p3_search.tokens` folds every query with this same
+    function. Display text is never folded.
+    """
+    return unicodedata.normalize("NFKC", text or "")
+
 
 def sentences(text):
     """The text split at sentence ends. One element when nothing looks like a break."""
@@ -321,7 +347,7 @@ def store(con, rows, encode):
         # external content: the index has to be told, it does not read inserts itself
         for pid, p in zip(ids, pieces):
             con.execute("INSERT INTO passages_fts (rowid, headline, text) VALUES (?,?,?)",
-                        (pid, p["headline"], p["text"]))
+                        (pid, fold(p["headline"]), fold(p["text"])))
         blobs, dim = encode([p["text"] for p in pieces])
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
         con.executemany(
@@ -379,6 +405,42 @@ def cmd_update(args):
     return 0
 
 
+def rebuild_fts(con):
+    """The word index again, from `passages`, folded; vectors and passages untouched.
+
+    External content: 'delete-all' drops the index and nothing else, then every passage
+    is handed in again. One transaction, so a reader sees the old index or the new one.
+    Returns (passages indexed, seconds).
+    """
+    t0 = time.time()
+    with con:
+        con.execute("INSERT INTO passages_fts (passages_fts) VALUES ('delete-all')")
+        n = 0
+        for pid, head, text in con.execute(
+                "SELECT passage_id, headline, text FROM passages ORDER BY passage_id"
+        ).fetchall():
+            con.execute("INSERT INTO passages_fts (rowid, headline, text) VALUES (?,?,?)",
+                        (pid, fold(head), fold(text)))
+            n += 1
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('fts_fold', ?)", (FTS_FOLD,))
+    con.execute("INSERT INTO passages_fts (passages_fts) VALUES ('optimize')")
+    con.commit()
+    return n, time.time() - t0
+
+
+def cmd_fts(args):
+    path = Path(args.db)
+    if not path.exists():
+        sys.exit(f"missing {path} (run `build` first)")
+    con = open_search(path)
+    n, secs = rebuild_fts(con)
+    print(f"{path}: word index rebuilt from {n} passages, folded {FTS_FOLD}, "
+          f"in {secs:.1f}s · passages and vectors untouched")
+    good, _ = report(con)
+    print("PASS" if good else "FAIL")
+    return 0 if good else 1
+
+
 SMOKE_QUERIES = ["tariff", "police", "bank"]
 
 
@@ -405,6 +467,8 @@ def report(con, news=None):
         hits[q] = con.execute(
             "SELECT COUNT(*) FROM passages_fts WHERE passages_fts MATCH ?", (q,)).fetchone()[0]
     print(f"  FTS smoke query {hits}")
+    row = con.execute("SELECT value FROM meta WHERE key = 'fts_fold'").fetchone()
+    print(f"  word index folded: {row[0] if row else 'no (run `fts`)'}")
     ranked = con.execute(
         "SELECT p.text_hash, bm25(passages_fts, ?, ?) AS score FROM passages_fts "
         "JOIN passages p ON p.passage_id = passages_fts.rowid "
@@ -437,7 +501,8 @@ def cmd_check(args):
 def main():
     p = argparse.ArgumentParser(description="the search index (passages + FTS5 + vectors)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("build", cmd_build), ("update", cmd_update), ("check", cmd_check)):
+    for name, fn in (("build", cmd_build), ("update", cmd_update), ("check", cmd_check),
+                     ("fts", cmd_fts)):
         s = sub.add_parser(name)
         s.add_argument("--db", default=str(SEARCH_DB))
         s.add_argument("--sample", type=int, default=None,

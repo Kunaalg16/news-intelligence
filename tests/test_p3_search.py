@@ -31,6 +31,17 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
     word matches whole words only; the user's own quotes cannot become FTS syntax.
   - A missing id raises LookupError; a bad argument raises ValueError.
   - With the embedding service down, `search()` still answers and says `mode fts_only`.
+  FP-2 (fixed 4 Nov before the run, brief fp-1 §6 FP-2):
+  - TC-3 `mode` is always present, exactly "hybrid" or "fts_only", in 4 places -- the
+    search() result, the `results` event, the stored answer (also after a reload), the
+    suggest_connections response -- each with the service up and with a DEAD PORT;
+    "both" never appears in any of them;
+  - item 11: corpus() reads the intel.db the reader reads (P3_READER_INTEL_DB): a copy
+    whose members differ is what corpus() shows;
+  - TC-20: no story headline is blank -- deck, then the body's first line; over all
+    the real archive's days, 0 blank;
+  - TC-21: a query typed with a ligature is folded to plain letters (NFKC); on the real
+    archive, once its word index is folded, `profit` finds the ligature-only passages.
   - `facets()` offers only values with stories behind them, under the CURRENT tag record.
   FP-1 tracing (TC-5; fixed 4 Nov before the run), the REAL SDK on a fake wire whose
   reply takes 2 s and fails once with a retryable 529:
@@ -456,8 +467,8 @@ def mock(tmp):
     check("with the service down search still answers",
           down["stories"][0]["story_id"], "g1")
     check("and says which mode it used", down.get("mode"), "fts_only")
-    check("a both-indexes result does not claim a mode",
-          "mode" in a.find("repo rate"), False)
+    check("a both-indexes result says hybrid (TC-3: mode always present)",
+          a.find("repo rate").get("mode"), "hybrid")
     check("with the service down there is no similarity to report",
           down["stories"][0]["similarity"], None)
     check("but a verdict is still given, from bm25",
@@ -627,7 +638,7 @@ def ask_mock(tmp):
               "model_id", "verdict", "found_count", "sentences", "background", "cited",
               "found", "closest", "passage_set_id", "cost_usd", "attempts", "drops",
               "at", "searched_days", "passage_count", "results", "results_total",
-              "fixture"]))
+              "mode", "fixture"]))
     check("[ask] no background line inside ask()", a1["background"], None)
     check("[ask] the writer saw at most 8 passages, at most 2 per article",
           (a1["passage_count"] <= 8,
@@ -983,7 +994,7 @@ def suggest_mock(tmp):
           {"g1", "g4"} & set(ids), set())
     check("[suggest] the response shape", sorted(got),
           sorted(["story_id", "suggestions", "verdict", "model", "model_id", "cost_usd",
-                  "fixture"]))
+                  "mode", "fixture"]))
     check("[suggest] 1-3 search article rows each",
           all(1 <= len(s["articles"]) <= 3 for s in got["suggestions"]), True)
     check("[suggest] Haiku-priced and logged as 'suggest'",
@@ -1315,6 +1326,195 @@ def followup_real():
           f"articles in the writer's set · alone {len(alone & part_b)}")
 
 
+# ================================================================= FP-2 · search fixes
+
+DEAD_PORT = "http://127.0.0.1:9"      # nothing listens: the service-down path, for real
+
+
+def fp2_mock(tmp):
+    import os
+    import shutil
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query, S.KNOBS["embed_url"],
+             S.KNOBS["embed_timeout_s"])
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    real_embed = S.embed_query
+    up = lambda q, **kw: VECS["rain"]                      # noqa: E731
+    S.KNOBS["embed_url"], S.KNOBS["embed_timeout_s"] = DEAD_PORT, 2
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+    seen = []                                  # every mode value any place handed out
+
+    def mode_of(x):
+        seen.append(x.get("mode"))
+        return x.get("mode")
+
+    try:
+        # --- TC-3 · 4 places x (service up, dead port) -----------------------------
+        # dead port FIRST: the up pass caches g1's set, and a cached set is returned
+        # as found (hybrid) even while the service is down -- checked below.
+        for label, embed, want in (("dead port", real_embed, "fts_only"),
+                                   ("up", up, "hybrid")):
+            S.embed_query = embed
+            check(f"[fp2 · TC-3 · {label}] the dead port really is down"
+                  if embed is real_embed else f"[fp2 · TC-3 · {label}] the stub is up",
+                  embed("probe") is None, embed is real_embed)
+            r = S.search("monsoon Kerala")
+            check(f"[fp2 · TC-3 · {label}] 1 search() result", mode_of(r), want)
+            S._CLIENT = Fake(said(("The monsoon withdrew from Kerala on Wednesday.",
+                                   ["h_rain"]),
+                                  ("The weather office said so.", ["h_rain"])))
+            ev = run(S.ask("Did the monsoon withdraw from Kerala?"))
+            check(f"[fp2 · TC-3 · {label}] 2 the results event",
+                  mode_of(ev[0]["search"]), want)
+            aid = ev[-1]["answer"]["answer_id"]
+            check(f"[fp2 · TC-3 · {label}] 3 the stored answer",
+                  mode_of(ev[-1]["answer"]), want)
+            R.close_all()
+            back = [t["answer"] for t in S.current_conversation()["turns"]
+                    if t["kind"] == "answer" and t["answer"]["answer_id"] == aid]
+            check(f"[fp2 · TC-3 · {label}] 3 ... and after a reload",
+                  [mode_of(a) for a in back], [want])
+            S._CLIENT = Fake(said(("The monsoon withdrew from Kerala on Wednesday.",
+                                   ["h_rain"]),
+                                  ("The weather office said so.", ["h_rain"])))
+            th = run(S.think_harder(aid))[-1]["answer"]
+            check(f"[fp2 · TC-3 · {label}] Think harder carries its parent's mode",
+                  mode_of(th), want)
+            S._CLIENT = Fake(({"whys": [{"story_id": "g2", "why": "Same week."}]}, 900, 60))
+            got = S.suggest_connections("g1")
+            check(f"[fp2 · TC-3 · {label}] 4 the suggest_connections response",
+                  mode_of(got), want)
+        S.embed_query = real_embed                              # service down again
+        S._CLIENT = Fake()
+        cached = S.suggest_connections("g1")
+        check("[fp2 · TC-3] 4 a cached suggest set says hybrid, service down or not "
+              "(only cosine picks are cached)",
+              (mode_of(cached), len(cached["suggestions"]), cached["cost_usd"]),
+              ("hybrid", 1, 0.0))
+        check("[fp2 · TC-3] every place handed out exactly 'hybrid' or 'fts_only', never "
+              "'both' or nothing", sorted(set(seen)), ["fts_only", "hybrid"])
+
+        # --- item 11 · corpus() follows the reader's intel.db -----------------------
+        copy = Path(tmp) / "intel_copy.db"
+        shutil.copy(intel, copy)
+        c = sqlite3.connect(copy)
+        c.execute("UPDATE members SET group_id = 'g9' WHERE text_hash = 'h_view'")
+        c.commit()
+        c.close()
+        os.environ["P3_READER_INTEL_DB"] = str(copy)
+        moved = S.corpus({}, news=S.open_ro(news))["story_of_hash"].get("h_view")
+        os.environ.pop("P3_READER_INTEL_DB")
+        stays = S.corpus({}, news=S.open_ro(news))["story_of_hash"].get("h_view")
+        os.environ["P3_READER_INTEL_DB"] = str(intel)
+        check("[fp2 · item 11] corpus() reads the copy the reader reads (h_view moved to g9)",
+              moved, "g9")
+        check("[fp2 · item 11] with no P3_READER_INTEL_DB it reads INTEL_DB (still g1)",
+              stays, "g1")
+        check("[fp2 · item 11] corpus_intel_path follows the variable",
+              S.corpus_intel_path(), Path(intel))
+
+        # --- TC-20 · never a blank story headline ------------------------------------
+        n = sqlite3.connect(news)
+        n.execute("INSERT INTO texts VALUES (?,?,?,?,?,?)",
+                  ("h_nohead", "", "\n  \nsue. It is nearing the next exam. Something will "
+                   "have to be done before the board meets again in the spring term.\nMore.",
+                   30, RUN, DATE1))
+        n.commit()
+
+        def seat(h, head, deck, points):
+            return {"text_hash": h, "headline": head, "deck": deck, "points": points,
+                    "counts_as_coverage": True, "fragment_like": False, "date": DATE1,
+                    "publisher": "Mint", "art_id": h}
+        stories = [
+            {"story_id": "s_head", "seats": [seat("h_repo", "Repo raised", "A deck", 5)]},
+            {"story_id": "s_deck", "seats": [seat("h_x", "", "", 9),
+                                             seat("h_y", "  ", "Borrowers   to pay more", 2)]},
+            {"story_id": "s_line", "seats": [seat("h_nohead", "", "", 3)]},
+            {"story_id": "s_none", "seats": [seat("h_missing", "", "", 1)]},
+        ]
+        heads = S.story_headlines(stories, n)
+        n.close()
+        check("[fp2 · TC-20] a printed headline is kept", heads["s_head"], "Repo raised")
+        check("[fp2 · TC-20] no headline -> a deck (best-placed with one), spaces tidied",
+              heads["s_deck"], "Borrowers to pay more")
+        check("[fp2 · TC-20] no deck -> the first non-blank body line, cut at a sentence end",
+              heads["s_line"], "sue. It is nearing the next exam.")
+        check("[fp2 · TC-20] nothing at all -> still a string, never None",
+              heads["s_none"], "")
+        check("[fp2 · TC-20] the synthetic archive has no blank story headline",
+              [sid for sid, row in S.corpus({}, news=S.open_ro(news))["stories"].items()
+               if not row["headline"].strip()], [])
+
+        # --- TC-21 · the query is folded --------------------------------------------
+        check("[fp2 · TC-21] a ligature typed in the query is folded",
+              S.tokens("proﬁt and conﬂict"), ["profit", "and", "conflict"])
+        check("[fp2 · TC-21] the same fold as the index side", S.fold is
+              __import__("p3_index").fold, True)
+    finally:
+        S._CLIENT = None
+        R.close_all()
+        (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query, S.KNOBS["embed_url"],
+         S.KNOBS["embed_timeout_s"]) = saved
+        for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+            os.environ.pop(k, None)
+
+
+def fp2_real():
+    """The real archive, read-only: mode with the real service (if up) and a dead port,
+    blank headlines over every stored day, and the ligature probe."""
+    q = "EPFO wage ceiling"
+    service = S.embed_query("probe") is not None
+    if service:
+        check("[fp2 · real] service up -> hybrid", S.search(q, limit=3)["mode"], "hybrid")
+    else:
+        print("  [fp2 · real] embedding service not up: the 'up' half is not checked here")
+    url, t = S.KNOBS["embed_url"], S.KNOBS["embed_timeout_s"]
+    S.KNOBS["embed_url"], S.KNOBS["embed_timeout_s"] = DEAD_PORT, 2
+    try:
+        check("[fp2 · real] dead port -> fts_only", S.search(q, limit=3)["mode"], "fts_only")
+    finally:
+        S.KNOBS["embed_url"], S.KNOBS["embed_timeout_s"] = url, t
+    world = S.corpus({})
+    blank = [sid for sid, row in world["stories"].items() if not row["headline"].strip()]
+    days = len({sid.split(":")[0] for sid in world["stories"]})
+    check(f"[fp2 · real · TC-20] blank story headlines over all {days} days (A8 before: 16)",
+          blank, [])
+    scon = S.open_ro(S.SEARCH_DB)
+    try:
+        folded = scon.execute("SELECT value FROM meta WHERE key='fts_fold'").fetchone()
+        # the ligature spelling at a WORD START (proﬁt, proﬁts, proﬁtable), never inside
+        # a compound: "nonproﬁt" is not found by "profit" in plain letters either
+        import re
+        at_start = re.compile(r"(?<!\w)proﬁt")
+        only = [pid for pid, text in scon.execute(
+            "SELECT passage_id, headline || ' ' || text FROM passages "
+            "WHERE instr(headline || ' ' || text, 'proﬁt') > 0")
+            if at_start.search(text) and "profit" not in text.lower()]
+        hit = {pid for pid, _h, _s in S.fts_rank(scon, ["profit"], None or _All(), 100000)}
+    finally:
+        scon.close()
+    found = sum(1 for pid in only if pid in hit)
+    if folded:
+        check("[fp2 · real · TC-21] folded index: 'profit' finds every ligature-only passage",
+              (found, len(only)), (len(only), len(only)))
+    else:
+        print(f"  [fp2 · real · TC-21] word index NOT yet folded (run `p3_index.py fts`): "
+              f"'profit' finds {found} of {len(only)} ligature-only passages")
+
+
+class _All:
+    """An `allowed` set that holds everything (fts_rank's filter, switched off)."""
+
+    def __contains__(self, _x):
+        return True
+
+
 def D_last_line():
     import p3_digest
     return p3_digest.WRITER_RULES.strip().splitlines()[-1].strip()
@@ -1345,6 +1545,8 @@ def main():
     shapes_mock()
     with tempfile.TemporaryDirectory() as tmp:
         trace_mock(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        fp2_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():
@@ -1352,6 +1554,7 @@ def main():
     else:
         real()
         followup_real()
+        fp2_real()
     if before:
         untouched(before)
 

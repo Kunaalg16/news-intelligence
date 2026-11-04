@@ -299,10 +299,78 @@ def make_news_extra(path):
     con.commit(); con.close()
 
 
+# ------------------------------------------------------------------ 3. the fold (FP-2, TC-21)
+
+def folded(tmp):
+    """Pass line (fixed before the run): `profit` finds the text that prints only `proﬁt`;
+    `fts` rebuilds the word index alone, leaving passages and vectors byte-identical."""
+    news_path = Path(tmp) / "news_fold.db"
+    search_path = Path(tmp) / "search_fold.db"
+    texts = [
+        ("hL", "Firms report higher proﬁt", "The proﬁt rose as conﬂict eased in the ﬁelds.",
+         "2026-10-01", "Mint"),
+        ("hP", "Plain spelling", "Profit fell at another bank after the tariff.", "2026-10-01", "Mint"),
+    ]
+    make_news(news_path, texts)
+    rows = X.load_texts(X.open_ro(news_path))
+
+    check("fold turns the ligature into plain letters", X.fold("proﬁt ﬂ ﬀ"), "profit fl ff")
+    check("fold leaves plain text alone", X.fold("Profit, 25% · ₹4,740"), "Profit, 25% · ₹4,740")
+    check("fold of None is empty", X.fold(None), "")
+
+    def hits(con, word):
+        return sorted(r[0] for r in con.execute(
+            "SELECT p.text_hash FROM passages_fts f JOIN passages p "
+            "ON p.passage_id = f.rowid WHERE passages_fts MATCH ?", (f'"{word}"',)))
+
+    def frozen(con):
+        return (con.execute("SELECT * FROM passages ORDER BY passage_id").fetchall(),
+                con.execute("SELECT * FROM passage_vectors ORDER BY passage_id").fetchall())
+
+    # an index built the OLD way: unfolded text handed to FTS
+    con = X.open_search(search_path, fresh=True)
+    keep = X.fold
+    X.fold = lambda t: t or ""
+    try:
+        X.store(con, rows, X.fake_encoder())
+    finally:
+        X.fold = keep
+    check("before: the unfolded index misses the ligature spelling", hits(con, "profit"),
+          ["hP"])
+    before = frozen(con)
+    con.close()
+
+    args = type("A", (), {"db": str(search_path)})()
+    check("`fts` runs and its report passes", X.cmd_fts(args), 0)
+    con = X.open_search(search_path)
+    check("after: profit finds both", hits(con, "profit"), ["hL", "hP"])
+    check("after: conflict and fields find the ligature text",
+          (hits(con, "conflict"), hits(con, "fields")), (["hL"], ["hL"]))
+    check("passages and vectors byte-identical after `fts`", frozen(con) == before, True)
+    check("the stored passage keeps its printed ligature (display untouched)",
+          "proﬁt" in con.execute("SELECT text FROM passages WHERE text_hash='hL'"
+                                 ).fetchone()[0], True)
+    check("the fold is recorded in meta",
+          con.execute("SELECT value FROM meta WHERE key='fts_fold'").fetchone()[0], X.FTS_FOLD)
+    check("headline column folded too (only hL's headline says profit)", con.execute(
+        "SELECT COUNT(*) FROM passages_fts WHERE passages_fts MATCH 'headline:profit'"
+    ).fetchone()[0], 1)
+    check("`fts` twice is the same index (no duplicates)",
+          (X.cmd_fts(args), hits(X.open_search(search_path), "profit")), (0, ["hL", "hP"]))
+    con.close()
+
+    # a fresh build folds from the start
+    con = X.open_search(search_path, fresh=True)
+    X.store(con, rows, X.fake_encoder())
+    check("a fresh store folds the index text", hits(con, "profit"), ["hL", "hP"])
+    con.close()
+
+
 def main():
     recipe()
     with tempfile.TemporaryDirectory() as tmp:
         whole_file(tmp)
+        folded(tmp)
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:
         print(f"FAIL {n}: got {g!r}, want {w!r}")
