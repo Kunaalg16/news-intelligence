@@ -96,7 +96,9 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
     the same set with hidden_by "reask";
   - after a hide, the next writer prompt and rewriter prompt hold none of the hidden text;
   - Undo restores exactly one hide action; an answer hidden by a re-ask refuses Undo;
-  - hide -> Undo -> ask = 0 summary calls; hide -> ask = 1 (TC-11);
+  - hide -> Undo -> ask = 0 summary calls; hide -> ask = 1 (TC-11; measured through
+    Think harder, which reads the memory as it stood -- a new question past 3 exchanges
+    changes the older set by itself; T-56);
   - two_searches on a chain split -> one_search -> back reuses the original two
     queries with 0 rewriter calls; a scope re-ask keeps the topic decision and
     queries with 0 rewriter calls;
@@ -714,7 +716,7 @@ def ask_mock(tmp):
               "at", "searched_days", "passage_count", "results", "results_total",
               "mode", "not_covered", "similarity_verdict", "top_similarity",
               "topic", "search_query", "carried_from", "safety_net_used",
-              "rewrite_failed", "fixture"]))
+              "rewrite_failed", "replaces_answer_id", "fixture"]))
     check("[ask] no background line inside ask()", a1["background"], None)
     check("[ask] the writer saw at most 8 passages, at most 2 per article",
           (a1["passage_count"] <= 8,
@@ -2077,12 +2079,310 @@ def fp5_mock(tmp):
               raises(lambda: S.get_answer("ans_nope"), LookupError), True)
         check("[fp5] get_answer is re-exported by p3_reader", R.get_answer is S.get_answer,
               True)
+        fp5_reask_hide(R)
     finally:
         S._CLIENT = None
+        S.GUARD_LOG = S._GUARD_LOG_REAL
         S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query = saved
         R.close_all()
         for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
             os.environ.pop(k, None)
+
+
+def _line(tag):
+    """Two sentences no other answer says, so a prompt shows whose text it holds."""
+    return said((f"{tag}: the Reserve Bank raised the repo rate.", ["h_repo"]),
+                (f"{tag}: three large banks raised lending rates.", ["h_banks"]))
+
+
+def _order(R):
+    """The answer ids of the conversation as the reader sees it."""
+    return [t["answer"]["answer_id"] for t in R.current_conversation()["turns"]
+            if t["kind"] == "answer"]
+
+
+def _hidden_by(R, ids):
+    rows = dict(R._intel_ro().execute(
+        "SELECT json_extract(payload, '$.answer_id'), hidden_by FROM turns "
+        "WHERE kind = 'answer'").fetchall())
+    return [rows.get(i) for i in ids]
+
+
+def _refused(fn, kind, fake):
+    """`fn()` refuses with `kind` on its first step, before any event or model call."""
+    n = (len(fake.calls), len(fake.rewrites), len(fake.summaries))
+    try:
+        got = fn()
+        if hasattr(got, "__next__"):
+            got = next(got)
+        return f"no refusal: {got!r:.80}"
+    except kind:
+        return (len(fake.calls), len(fake.rewrites), len(fake.summaries)) == n or "paid"
+    except Exception as e:                                    # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+
+
+def fp5_reask_hide(R):
+    import threading
+    q1, q2, q3 = ("Did the repo rate go up?", "What did the banks do?",
+                  "Was there any rain news?")
+    rewrite_log = []
+
+    def rewriter(prompt):
+        rewrite_log.append(prompt)
+        return as_typed_rewrite(prompt)
+
+    # --- the conversation: a1 (+ Think harder, + background), a2 ------------------
+    S.new_conversation()
+    S._CLIENT = fake = Fake(_line("ALPHA"), _line("THINK"), ({"text": "Context."}, 200, 50),
+                            _line("BRAVO"), rewrite=rewriter)
+    a1 = run(S.ask(q1))[-1]["answer"]["answer_id"]
+    th1 = run(S.think_harder(a1))[-1]["answer"]["answer_id"]
+    S.ask_background(a1)
+    a2 = run(S.ask(q2))[-1]["answer"]["answer_id"]
+
+    def visible_text():
+        return json.dumps(R.current_conversation()["turns"])
+
+    # --- every refusal, before any event and any model call ------------------------
+    check("[fp5] reask: unknown id -> LookupError, nothing paid",
+          _refused(lambda: S.reask("ans_nope"), LookupError, fake), True)
+    check("[fp5] reask: a Think harder id -> ValueError (TC-8)",
+          _refused(lambda: S.reask(th1), ValueError, fake), True)
+    check("[fp5] reask: mode AND scope -> ValueError (TC-26)",
+          _refused(lambda: S.reask(a2, mode="carry", scope={"story_id": "g1"}),
+                   ValueError, fake), True)
+    check("[fp5] reask: a bad mode -> ValueError",
+          _refused(lambda: S.reask(a2, mode="louder"), ValueError, fake), True)
+    check("[fp5] reask two_searches on a never-split chain -> ValueError (TC-6)",
+          _refused(lambda: S.reask(a2, mode="two_searches"), ValueError, fake), True)
+    check("[fp5] unhide: an answer that is not hidden -> ValueError",
+          _refused(lambda: S.unhide_turn(a2), ValueError, fake), True)
+    check("[fp5] hide / unhide: unknown id -> LookupError",
+          (raises(lambda: S.hide_turn("ans_nope"), LookupError),
+           raises(lambda: S.unhide_turn("ans_nope"), LookupError)), (True, True))
+
+    # --- hide sets (TC-7, gap 4) and Undo of exactly one action (TC-12) -------------
+    shown_before = R.current_conversation()["turns"]
+    h = S.hide_turn(a1)
+    kinds = [t["kind"] for t in R.current_conversation()["turns"]]
+    check("[fp5] hide a Haiku answer -> it + its Think harder; background turn gone too",
+          (sorted(h["hidden"]), h["hide_action_id"].startswith("h_"), _order(R),
+           "background" in kinds), (sorted([a1, th1]), True, [a2], False))
+    check("[fp5] hiding a hidden answer again -> ValueError",
+          raises(lambda: S.hide_turn(a1), ValueError), True)
+    check("[fp5] reask: a hidden answer -> ValueError",
+          _refused(lambda: S.reask(a1), ValueError, fake), True)
+    check("[fp5] hidden answers stay readable by get_answer",
+          S.get_answer(a1)["answer_id"], a1)
+    u = S.unhide_turn(a1)
+    check("[fp5] Undo brings back exactly that action's turns, in place",
+          (sorted(u["unhidden"]), R.current_conversation()["turns"] == shown_before),
+          (sorted([a1, th1]), True))
+    h_th = S.hide_turn(th1)
+    check("[fp5] hide a Think harder answer -> only it; its parent stays",
+          (h_th["hidden"], a1 in _order(R), th1 in _order(R)), ([th1], True, False))
+    h_a1 = S.hide_turn(a1)
+    check("[fp5] a later hide of the parent leaves the earlier-hidden child alone",
+          h_a1["hidden"], [a1])
+    check("[fp5] Undo of the parent restores only its action (the child stays hidden)",
+          (S.unhide_turn(a1)["unhidden"], _order(R)), ([a1], [a1, a2]))
+    S.unhide_turn(th1)
+    check("[fp5] after both Undos the conversation is as it was",
+          R.current_conversation()["turns"] == shown_before, True)
+
+    # --- after a hide, no hidden text reaches the writer or the rewriter ------------
+    S.hide_turn(a1)
+    S._CLIENT = fake = Fake(_line("CHARLIE"), rewrite=rewriter)
+    run(S.ask(q3))
+    seen = fake.calls[-1]["prompt"] + "\n" + rewrite_log[-1]
+    check("[fp5] hidden text is in neither the writer's nor the rewriter's prompt",
+          (q1 in seen, "ALPHA" in seen, "THINK" in seen, "Context." in seen,
+           q2 in seen, "BRAVO" in seen), (False, False, False, False, True, True))
+    S.unhide_turn(a1)
+
+    # --- TC-11: the summary is rebuilt lazily -------------------------------------
+    # A NEW question adds an exchange, and past `memory_full_exchanges` that alone
+    # changes the older set; Think harder re-reads the memory as it stood when its
+    # parent was asked, so it isolates what the hide did (T-56).
+    S.new_conversation()
+    S._CLIENT = fake = Fake(*[_line(f"S{chr(65 + i)}") for i in range(6)],
+                            *[_line(f"STH{chr(65 + i)}") for i in range(3)], rewrite=rewriter)
+    ids = [run(S.ask(f"Repo question number {w}?"))[-1]["answer"]["answer_id"]
+           for w in ("one", "two", "three", "four", "five", "six")]
+    n0 = len(fake.summaries)
+    run(S.think_harder(ids[5]))
+    n1 = len(fake.summaries)
+    S.hide_turn(ids[2])
+    S.unhide_turn(ids[2])
+    run(S.think_harder(ids[5]))
+    n2 = len(fake.summaries)
+    S.hide_turn(ids[0])
+    run(S.think_harder(ids[5]))
+    check("[fp5] TC-11 summaries: 2 while asking · cache hit 0 · hide -> Undo -> 0 · "
+          "hide -> 1", (n0, n1 - n0, n2 - n1, len(fake.summaries) - n2), (2, 0, 0, 1))
+    check("[fp5] TC-11 the rebuilt summary covers no hidden answer",
+          ids[0] in json.dumps(R._intel_ro().execute(
+              "SELECT summary FROM conversations WHERE conversation_id = ?",
+              (R.current_conversation()["conversation_id"],)).fetchone()[0]), False)
+
+    # --- re-ask keeps the position, through a chain of 3, after a reload ----------
+    S.new_conversation()
+    S._CLIENT = fake = Fake(_line("KILO"), _line("LIMA"), _line("LIMATH"),
+                            ({"text": "Context two."}, 200, 50), _line("MIKE"),
+                            _line("B"), _line("C"), _line("D"), rewrite=rewriter)
+    r1 = run(S.ask(q1))[-1]["answer"]["answer_id"]
+    r2 = run(S.ask(q2))[-1]["answer"]["answer_id"]
+    r2th = run(S.think_harder(r2))[-1]["answer"]["answer_id"]
+    S.ask_background(r2)
+    r3 = run(S.ask(q3))[-1]["answer"]["answer_id"]
+    n_rw = len(rewrite_log)
+    ev = run(S.reask(r2))
+    b = ev[-1]["answer"]
+    view = rewrite_log[-1]
+    check("[fp5] reask: the same events as ask, the new answer names what it replaced",
+          ([e["type"] for e in ev][0], ev[-1]["type"], b["replaces_answer_id"],
+           b["question"]), ("results", "done", r2, q2))
+    check("[fp5] reask: the rewriter sees only the visible exchanges BEFORE the turn",
+          (len(rewrite_log) - n_rw, q1 in view, "KILO" in view, q3 in view, "MIKE" in view,
+           "LIMA:" in view), (1, True, True, False, False, False))
+    check("[fp5] reask: takes the old answer's place",
+          _order(R), [r1, b["answer_id"], r3])
+    check("[fp5] gap 4: the replaced answer, its Think harder and background hidden by reask",
+          (_hidden_by(R, [r2, r2th]), R._intel_ro().execute(
+              "SELECT hidden_by FROM turns WHERE kind = 'background' AND "
+              "json_extract(payload, '$.answer_id') = ?", (r2,)).fetchone()[0]),
+          (["reask", "reask"], "reask"))
+    c = run(S.reask(b["answer_id"]))[-1]["answer"]
+    d = run(S.reask(c["answer_id"]))[-1]["answer"]
+    R.close_all()
+    check("[fp5] a chain of 3 re-asks: the newest stands in the first one's place, "
+          "after a reload", _order(R), [r1, d["answer_id"], r3])
+    check("[fp5] the chain links back", (d["replaces_answer_id"], c["replaces_answer_id"]),
+          (c["answer_id"], b["answer_id"]))
+    check("[fp5] a replaced answer refuses Undo and re-ask",
+          (_refused(lambda: S.unhide_turn(r2), ValueError, fake),
+           _refused(lambda: S.reask(b["answer_id"]), ValueError, fake)), (True, True))
+    check("[fp5] every new answer says what it replaces (None for a plain ask)",
+          S.get_answer(r1)["replaces_answer_id"], None)
+
+    # --- two_searches (TC-6) and a scope re-ask (gap 5): kept queries, 0 rewrites ---
+    S.new_conversation()
+    two = ["repo rate banks", "bank lending rates"]
+
+    def splitter(prompt):
+        rewrite_log.append(prompt)
+        q = _new_question(prompt)
+        queries = two if q == q2 else [q]
+        return ({"decision": "follow_up", "queries": queries, "carried_from": 1,
+                 "topic_label": "rates and banks"}, 1200, 40)
+
+    S._CLIENT = fake = Fake(*[_line(f"T{chr(65 + i)}") for i in range(5)], rewrite=splitter)
+    run(S.ask(q1))
+    s = run(S.ask(q2))[-1]["answer"]
+    o = run(S.reask(s["answer_id"], mode="one_search"))[-1]["answer"]
+    n_rw = len(fake.rewrites)
+    t = run(S.reask(o["answer_id"], mode="two_searches"))[-1]["answer"]
+    check("[fp5] split -> one_search -> two_searches reuses the split's two queries, "
+          "0 rewriter calls",
+          (s["topic"], s["search_query"], o["topic"], t["topic"], t["search_query"],
+           len(fake.rewrites) - n_rw),
+          ("two_searches", two, "one_search", "two_searches", two, 0))
+    story = {"story_id": "g1", "text_hashes": [], "filters": {}}
+    u2 = run(S.reask(t["answer_id"], scope=story))[-1]["answer"]
+    check("[fp5] a scope re-ask keeps the topic and queries, new scope, 0 rewriter calls",
+          (u2["topic"], u2["search_query"], u2["scope"]["story_id"],
+           len(fake.rewrites) - n_rw), ("two_searches", two, "g1", 0))
+
+    # --- the in-flight guard (TC-4, TC-4b) ----------------------------------------
+    S.GUARD_LOG = Path(R._intel_path()).parent / "k3_guard.log"
+    S.new_conversation()
+    S._CLIENT = Fake(_line("GOLF"), _line("GTH"), rewrite=rewriter)
+    g = run(S.ask(q1))[-1]["answer"]["answer_id"]
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(Fake):
+        def __call__(self, prompt, system, purpose, model, schema):
+            if purpose == "ask_background":
+                started.set()
+                release.wait(10)
+            return super().__call__(prompt, system, purpose, model, schema)
+
+    S._CLIENT = slow = Slow(({"text": "Slow context."}, 200, 50))
+    box = {}
+    worker = threading.Thread(target=lambda: box.update(r=S.ask_background(g)))
+    worker.start()
+    started.wait(10)
+    n_calls = len(slow.calls)
+    second = raises(lambda: S.ask_background(g), ValueError)
+    msg = ""
+    try:
+        S.ask_background(g)
+    except ValueError as e:
+        msg = str(e)
+    paid_by_refusals = len(slow.calls) - n_calls
+    release.set()
+    worker.join(10)
+    rows = R._intel_ro().execute("SELECT COUNT(*) FROM cost_log WHERE purpose = "
+                                 "'ask_background' AND target_id = ?", (g,)).fetchone()[0]
+    logged = [json.loads(x) for x in S.GUARD_LOG.read_text().splitlines()] \
+        if S.GUARD_LOG.exists() else []
+    check("[fp5] guard: a second background while one runs -> ValueError, no call",
+          (second, "already running" in msg, paid_by_refusals), (True, True, 0))
+    check("[fp5] guard: the first still finishes; one cost_log row",
+          (box.get("r", {}).get("text"), rows), ("Slow context.", 1))
+    check("[fp5] guard: each refusal logged (time, action, id)",
+          [(x["action"], x["id"], bool(x["at"])) for x in logged],
+          [("ask_background", g, True)] * 2)
+    # free again after a raised exception
+    S.new_conversation()
+    S._CLIENT = Fake(_line("ECHO"), RateLimitError("busy"), ({"text": "Later."}, 200, 50),
+                     rewrite=rewriter)
+    e1 = run(S.ask(q1))[-1]["answer"]["answer_id"]
+    check("[fp5] guard: free after a raised exception",
+          (raises(lambda: S.ask_background(e1), ValueError),
+           S.ask_background(e1)["text"]), (True, "Later."))
+    # a stream held open refuses a twin; closed early, it frees the lock
+    S._CLIENT = fake = Fake(_line("THA"), _line("THB"), rewrite=rewriter)
+    held = S.think_harder(e1)
+    next(held)                                       # its first sentence: running
+    check("[fp5] guard: a second Think harder while one is open -> ValueError, no call",
+          _refused(lambda: S.think_harder(e1), ValueError, fake), True)
+    held.close()
+    check("[fp5] guard: free again after an early-closed stream",
+          run(S.think_harder(e1))[-1]["type"], "done")
+    held_r = S.reask(e1)
+    S._CLIENT = fake = Fake(_line("ROMEO"), rewrite=rewriter)
+    next(held_r)
+    check("[fp5] guard: a second re-ask of the same answer while one runs -> ValueError",
+          _refused(lambda: S.reask(e1), ValueError, fake), True)
+    held_r.close()
+
+    # --- double_paid_rows (TC-4b) --------------------------------------------------
+    S.new_conversation()
+    S._CLIENT = Fake(said(("x", ["bad"])), _line("RETRY"), rewrite=rewriter)
+    rt = run(S.ask(q1))[-1]["answer"]
+    con = R._intel_w()
+    day = R._now()[:10]
+    for _ in range(2):
+        con.execute("INSERT INTO cost_log (at, purpose, model, in_tokens, out_tokens, usd, "
+                    "note, target_id) VALUES (?, 'think_harder', 'm', 1, 1, 0.01, NULL, "
+                    "'ans_planted')", (R._now(),))
+    con.commit()
+    pairs = S.double_paid_rows(day)
+    check("[fp5] a real check retry: 2 rows, the second marked check_retry",
+          (rt["attempts"], [n for (n,) in R._intel_ro().execute(
+              "SELECT note FROM cost_log WHERE target_id = ? ORDER BY rowid",
+              (rt["answer_id"],))]), (2, [None, "check_retry"]))
+    found = [(p["purpose"], p["target_id"], len(p["rows"])) for p in pairs]
+    check("[fp5] double_paid_rows finds the planted pair, not the check retry",
+          (("think_harder", "ans_planted", 2) in found,
+           [f for f in found if f[1] == rt["answer_id"]]), (True, []))
+    check("[fp5] double_paid_rows: a re-ask's rows never pair with the ask it replaced",
+          [f for f in found if f[0] == "ask"], [])
+    check("[fp5] p3_reader re-exports reask, hide_turn, unhide_turn, double_paid_rows",
+          all(getattr(R, n, None) is getattr(S, n) for n in
+              ("reask", "hide_turn", "unhide_turn", "double_paid_rows")), True)
 
 
 def fp4_real():

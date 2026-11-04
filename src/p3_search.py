@@ -1015,6 +1015,7 @@ COST_KINDS = {"ask": ("ask", MODEL_IDS["haiku"]),
 
 SUMMARY_NOTE = "conversation_summary"       # cost_log.note of a memory summary call
 REWRITE_NOTE = "rewrite"                    # cost_log.note of a follow-up rewrite call
+CHECK_RETRY_NOTE = "check_retry"            # cost_log.note of a writer's repair call (FP-5)
 
 # The answer rules ARE the digest's writer rules, with the question put first. Reusing
 # `WRITER_RULES` whole keeps its last line, the injection defence, word for word.
@@ -1621,14 +1622,36 @@ def _conversation_id(given):
     return _current_id()
 
 
-def _turns(cid, visible_only=False):
-    """The conversation's turns in order. `visible_only`: without hidden ones (schema 3
-    `hidden_at`); the rewriter reads only those (FP-4; FP-5 adds hide itself)."""
+def _display_turns(cid):
+    """The VISIBLE turns in the order the reader sees them (FP-5): hidden turns are out,
+    and an answer that replaced another (a re-ask) stands where the FIRST answer of its
+    chain stood, so a re-ask keeps its place, through any chain. Other turns -- dividers,
+    Think harder answers, background lines -- stay where they were written. Same tuples
+    as `_turns`. The conversation, the rewriter's view and the writer's memory are all
+    read through this, so "hidden" means hidden everywhere (call 3 a)."""
     rows = _R()._intel_ro().execute(
-        "SELECT turn_id, kind, payload, at FROM turns WHERE conversation_id = ? "
-        + ("AND hidden_at IS NULL " if visible_only else "") +
-        "ORDER BY rowid", (cid,)).fetchall()
-    return [(tid, kind, json.loads(payload), at) for tid, kind, payload, at in rows]
+        "SELECT turn_id, kind, payload, at, hidden_at, hidden_by FROM turns "
+        "WHERE conversation_id = ? ORDER BY rowid", (cid,)).fetchall()
+    turns = [(tid, kind, json.loads(payload), at, hid, by)
+             for tid, kind, payload, at, hid, by in rows]
+    answer_ids = {t[2].get("answer_id") for t in turns if t[1] == "answer"}
+    replaced_by = {t[2]["replaces_answer_id"]: t for t in turns
+                   if t[1] == "answer" and t[2].get("replaces_answer_id") in answer_ids}
+    out = []
+    for t in turns:
+        tid, kind, p, at, hid, by = t
+        if kind == "answer" and p.get("replaces_answer_id") in answer_ids:
+            continue                                  # shown at its chain's first place
+        if kind == "answer" and by == "reask":
+            newest = t
+            while newest[5] == "reask" and newest[2]["answer_id"] in replaced_by:
+                newest = replaced_by[newest[2]["answer_id"]]
+            if newest[4] is None:
+                out.append(newest[:4])
+            continue
+        if hid is None:
+            out.append(t[:4])
+    return out
 
 
 def _add_turn(cid, kind, payload):
@@ -1654,7 +1677,7 @@ def current_conversation():
     started = _R()._intel_ro().execute(
         "SELECT started_at FROM conversations WHERE conversation_id = ?", (cid,)).fetchone()[0]
     return {"conversation_id": cid, "started_at": started,
-            "turns": [_render_turn(k, p) for _t, k, p, _a in _turns(cid)]}
+            "turns": [_render_turn(k, p) for _t, k, p, _a in _display_turns(cid)]}
 
 
 def new_conversation():
@@ -1699,7 +1722,7 @@ def _memory(cid, spent, before=None):
     `before` = an answer id: the conversation as it stood when that question was asked
     (Think harder re-reads THAT moment, and so pays for no new summary)."""
     turns = []
-    for _t, k, p, _a in _turns(cid):
+    for _t, k, p, _a in _display_turns(cid):
         if k == "answer" and p["answer_id"] == before:
             break
         if k == "divider" or (k == "answer" and not p.get("parent_answer_id")):
@@ -1770,7 +1793,7 @@ def _rewriter_view(cid, before=None):
     conversation as it stood before that answer (a re-ask, FP-5). Hidden turns never
     appear (gap 6: every turn hidden -> no exchange -> a first question)."""
     turns = []
-    for _t, k, p, _a in _turns(cid, visible_only=True):
+    for _t, k, p, _a in _display_turns(cid):
         if k == "answer" and p.get("answer_id") == before:
             break
         if k == "divider" or (k == "answer" and not p.get("parent_answer_id")):
@@ -1990,6 +2013,30 @@ def _plan_search(question, scope, filters, view, mode=None, spent=None,
     return plan, result, chosen
 
 
+def _fixed_search(question, filters, fixed):
+    """A plan kept from an earlier answer (FP-5: a scope re-ask keeps its topic decision
+    and queries, gap 5; `two_searches` reuses a split's two queries, TC-6), searched as it
+    is: no rewriter call, no safety net (an explicit choice, TC-24)."""
+    limit = KNOBS["ask_search_limit"]
+    queries = fixed["search_query"]
+    queries = list(queries) if isinstance(queries, list) else [queries]
+    halves = []
+    for q in queries:
+        ranked = []
+        halves.append((q, search(q, filters=filters, limit=limit, ranked_out=ranked), ranked))
+    plan = dict(fixed, safety_net_used=False, rewrite_failed=False,
+                _verdicts={"final": None})
+    if len(halves) == 2:
+        plan["search_query"] = [halves[0][0], halves[1][0]]
+        result = _merge_results(question, halves, limit)
+        chosen = _choose_two(halves[0][2], halves[1][2])
+    else:
+        plan["search_query"] = halves[0][0]
+        result, chosen = halves[0][1], _choose_passages(halves[0][2])
+    plan["_verdicts"]["final"] = result["verdict"]
+    return plan, result, chosen
+
+
 # ---------------------------------------------------------------- passage sets
 
 def _choose_passages(ranked):
@@ -2086,8 +2133,10 @@ def _write(question, chosen, memory, model_key, purpose, spent, story=False):
     for attempt in range(1 + KNOBS["check_retries"]):
         attempts = attempt + 1
         with _phase("writer_call" if attempt == 0 else "check_retry_call"):
+            # the repair row is marked, so `double_paid_rows` never reads one answer's
+            # check retry as a second press (T-3); the request itself is unchanged
             reply = _call(purpose, MODEL_IDS[model_key], prompt, rules, "sentences",
-                          spent)
+                          spent, note=None if attempt == 0 else CHECK_RETRY_NOTE)
         if story and reply.get("not_covered") is True:
             return [], attempts, drops, True
         with _phase("checks"):
@@ -2145,13 +2194,20 @@ def ask(question, scope=None, conversation_id=None, mode=None):
     yield from _traced_stream("ask", {}, _ask(question, scope, conversation_id, mode))
 
 
-def _ask(question, scope, conversation_id, mode=None):
-    if mode not in ASK_MODES:
+def _ask(question, scope, conversation_id, mode=None, reask=None):
+    """`reask` (FP-5) = {answer_id, conversation_id, fixed}: the answer this one replaces.
+    The rewriter and the writer's memory then see the conversation as it stood BEFORE
+    that answer; `fixed` = a plan kept from the chain (scope re-ask, two_searches), searched
+    as it is with no rewriter call. Its cost rows name the NEW answer, as an ask's do: a
+    second press on the replaced one is refused (hidden), so there is nothing to repeat,
+    and naming the old id would pair its rows with the original ask's (T-55)."""
+    if reask is None and mode not in ASK_MODES:
         raise ValueError(f"mode must be one of {ASK_MODES[1:]} or None, got {mode!r}")
     R = _R()
     aid = R._new_id("ans")
     _set_target(aid)
-    cid = _conversation_id(conversation_id)
+    cid = reask["conversation_id"] if reask else _conversation_id(conversation_id)
+    before = reask["answer_id"] if reask else None
     filters = _scope_filters(scope)
     # The cap is read BEFORE the rewriter, so a reader at the cap pays nothing new: the
     # question is then searched as typed and the cap event follows the results.
@@ -2159,9 +2215,12 @@ def _ask(question, scope, conversation_id, mode=None):
         blocked = _cap_blocks("ask")
     spent = []
     with _phase("search"):
-        plan, result, chosen = _plan_search(
-            question, scope, filters, _rewriter_view(cid), mode, spent,
-            skip_rewrite=bool(blocked or R.FIXTURES["assistant_error"]))
+        if reask and reask.get("fixed"):
+            plan, result, chosen = _fixed_search(question, filters, reask["fixed"])
+        else:
+            plan, result, chosen = _plan_search(
+                question, scope, filters, _rewriter_view(cid, before=before), mode, spent,
+                skip_rewrite=bool(blocked or R.FIXTURES["assistant_error"]))
     result["query"] = question
     result["search_query"] = plan["search_query"]
     yield {"type": "results", "search": result}
@@ -2185,7 +2244,7 @@ def _ask(question, scope, conversation_id, mode=None):
     if not empty:
         try:
             with _phase("memory"):
-                memory = _memory(cid, spent)
+                memory = _memory(cid, spent, before=before)
             sentences, attempts, drops, not_covered = _write(
                 question, chosen, memory, "haiku", "ask", spent, story=story)
         except Exception as e:                                # noqa: BLE001
@@ -2195,7 +2254,9 @@ def _ask(question, scope, conversation_id, mode=None):
             return
     with _phase("store"):
         answer = _ask_answer(R, aid, cid, question, scope, result, chosen, sentences,
-                             empty, spent, attempts, drops, story, plan)
+                             empty, spent, attempts, drops, story, plan, before)
+        if reask:
+            _hide(cid, before, "reask")
     for s in sentences:
         yield {"type": "sentence", "text": s["text"], "cites": s["cites"]}
     yield {"type": "done", "answer": answer}
@@ -2209,7 +2270,7 @@ def _top_similarity(result):
 
 
 def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, spent,
-                attempts, drops, story=False, plan=None):
+                attempts, drops, story=False, plan=None, replaces=None):
     """The stored answer object of one `ask()`, written as its turn.
     Inside a story (TC-1, TC-2, TC-23) `verdict` is the OUTCOME -- "enough" when
     sentences were written, "empty" when not covered (the writer said so, or fewer than
@@ -2241,6 +2302,7 @@ def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, 
                                     KNOBS["pane_results_shown"]),
         "results_total": result["total_stories"],
         "mode": result["mode"],
+        "replaces_answer_id": replaces,
         "fixture": False,
     }
     # FP-4's fields (contract §11.2 + v2.5 line 4): topic, search_query, carried_from,
@@ -2255,9 +2317,12 @@ def think_harder(answer_id):
     """The SAME passages read again by Sonnet (contract §7): no `results` event, no new
     search, the parent's `passage_set_id`. One-shot -- nothing here is remembered, so
     the next `ask()` is Haiku again (`think_harder_sticky` = False). Traced (FP-1); its
-    `cost_log` rows name the PARENT answer, the id a second press would repeat."""
+    `cost_log` rows name the PARENT answer, the id a second press would repeat. A second
+    call on the same answer while one runs -> ValueError on the first `next()` (TC-4)."""
     yield from _traced_stream("think_harder", {"parent_answer_id": answer_id},
-                              _think_harder(answer_id), target=answer_id)
+                              _guarded_stream("think_harder", answer_id,
+                                              _think_harder(answer_id)),
+                              target=answer_id)
 
 
 def _think_harder(answer_id):
@@ -2313,9 +2378,11 @@ def ask_background(answer_id):
     """A paragraph from the model's own knowledge, for ANY answer without one (v2.1).
     An answer that already has one -> ValueError. A cap hit or a failed call is also a
     ValueError: this route returns an object, not a stream, so the reason has to travel
-    as the error's message (the app answers 400 with it, not 500). Traced (FP-1)."""
-    return _traced_call("ask_background", {"answer_id": answer_id}, answer_id,
-                        _ask_background, answer_id)
+    as the error's message (the app answers 400 with it, not 500). Traced (FP-1). A
+    second call on the same answer while one runs -> ValueError "already running" (TC-4)."""
+    with _in_flight("ask_background", answer_id):
+        return _traced_call("ask_background", {"answer_id": answer_id}, answer_id,
+                            _ask_background, answer_id)
 
 
 def _ask_background(answer_id):
@@ -2348,6 +2415,215 @@ def _ask_background(answer_id):
                                       "cost_usd": cost, "at": R._now()})
     return {"answer_id": answer_id, "text": text, "model": "haiku",
             "model_id": MODEL_IDS["haiku"], "cost_usd": cost, "fixture": False}
+
+
+# ================================================================ RE-ASK, HIDE, GUARD (FP-5)
+#
+# SOFT DELETE. A hidden turn is MARKED (schema 3 `turns.hidden_at`, `hidden_by`,
+# `hide_action_id`), never removed, so Undo can bring it back. Hidden means out of the
+# conversation, out of the rewriter's view and out of the writer's memory: all three read
+# `_display_turns` (call 3 a, "hide always forgets"). A re-ask hides what it replaces with
+# `hidden_by = "reask"`, and a replaced answer never comes back.
+#
+# IN-FLIGHT DE-DUPLICATION. A paid action that is already running for the same answer
+# (or story) refuses a second identical press instead of paying twice (TC-4). The lock
+# lives in this process, which is the server's: the app runs one.
+
+REASK_MODES = (None, "as_typed", "carry", "one_search", "two_searches")
+GUARD_LOG = ROOT / "data" / "logs" / "k3_guard.log"
+_GUARD_LOG_REAL = GUARD_LOG
+_IN_FLIGHT, _IN_FLIGHT_LOCK = set(), threading.Lock()
+
+
+def _log_refusal(action, key):
+    """One JSON line per refused press (TC-4b). Like the trace, the REAL log is written
+    only for the real client on the real file; a suite repoints `GUARD_LOG` to a copy."""
+    if GUARD_LOG == _GUARD_LOG_REAL and (
+            _CLIENT is not None or Path(_R()._intel_path()).resolve() != REAL_INTEL_DB):
+        return
+    GUARD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(GUARD_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": _R()._now(), "action": action, "id": key}) + "\n")
+
+
+@contextlib.contextmanager
+def _in_flight(action, key):
+    """Hold the (action, key) lock for the block; already held -> ValueError, logged."""
+    with _IN_FLIGHT_LOCK:
+        if (action, key) in _IN_FLIGHT:
+            _log_refusal(action, key)
+            raise ValueError(f"{action} is already running for {key}")
+        _IN_FLIGHT.add((action, key))
+    try:
+        yield
+    finally:
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.discard((action, key))
+
+
+def _guarded_stream(action, key, events):
+    """`events` with the lock taken at the first `next()` -- before the first event and
+    before any model call -- and released when the stream ends, raises or is closed early
+    (a closed generator runs its `finally`)."""
+    with _in_flight(action, key):
+        yield from events
+
+
+def _hide_status(turn_id):
+    return _R()._intel_ro().execute(
+        "SELECT hidden_at, hidden_by, hide_action_id FROM turns WHERE turn_id = ?",
+        (turn_id,)).fetchone()
+
+
+def _hide_set(cid, answer_id):
+    """The turns one hide takes away (TC-7, gap 4): a Haiku answer with its Think harder
+    children and its background lines; a Think harder answer alone (its parent then
+    shows unfolded). Only turns not hidden already, so each Undo reverses one action.
+    Returns (turn_ids, answer_ids)."""
+    rows = _R()._intel_ro().execute(
+        "SELECT turn_id, kind, payload FROM turns WHERE conversation_id = ? "
+        "AND hidden_at IS NULL ORDER BY rowid", (cid,)).fetchall()
+    tids, aids = [], []
+    me = next((json.loads(p) for _t, k, p in rows if k == "answer"
+               and json.loads(p).get("answer_id") == answer_id), None)
+    child_too = me is not None and not me.get("parent_answer_id")
+    for tid, kind, payload in rows:
+        p = json.loads(payload)
+        if kind == "answer" and (p.get("answer_id") == answer_id or
+                                 (child_too and p.get("parent_answer_id") == answer_id)):
+            tids.append(tid)
+            aids.append(p["answer_id"])
+        elif kind == "background" and child_too and p.get("answer_id") == answer_id:
+            tids.append(tid)
+    return tids, aids
+
+
+def _hide(cid, answer_id, by):
+    tids, aids = _hide_set(cid, answer_id)
+    action = "h_" + uuid.uuid4().hex[:12]
+    con = _writer()
+    con.executemany("UPDATE turns SET hidden_at = ?, hidden_by = ?, hide_action_id = ? "
+                    "WHERE turn_id = ?", [(_R()._now(), by, action, t) for t in tids])
+    con.commit()
+    return {"hidden": aids, "hide_action_id": action}
+
+
+def hide_turn(answer_id):
+    """Hide an answer (contract v2.5 line 7) -> {hidden: [answer_ids], hide_action_id}.
+    A Haiku answer takes its Think harder child and its background with it; a Think
+    harder answer goes alone. Unknown -> LookupError; already hidden -> ValueError.
+    Free: no model call. The summary is rebuilt lazily at the next question (TC-11)."""
+    tid, cid, _answer = _find_answer(answer_id)
+    if _hide_status(tid)[0] is not None:
+        raise ValueError(f"that answer is already hidden: {answer_id}")
+    return _hide(cid, answer_id, "hide")
+
+
+def unhide_turn(answer_id):
+    """Undo (contract v2.5 line 8) -> {unhidden: [answer_ids]}: reverses exactly the one
+    hide action that hid this answer (TC-12). Not hidden, or replaced by a re-ask ->
+    ValueError (a replaced answer never comes back). Unknown -> LookupError."""
+    tid, cid, _answer = _find_answer(answer_id)
+    hidden_at, by, action = _hide_status(tid)
+    if hidden_at is None:
+        raise ValueError(f"that answer is not hidden: {answer_id}")
+    if by != "hide":
+        raise ValueError(f"that answer was replaced by a re-ask and cannot come back: "
+                         f"{answer_id}")
+    con = _writer()
+    back = [json.loads(p).get("answer_id") for k, p in con.execute(
+        "SELECT kind, payload FROM turns WHERE hide_action_id = ? AND kind = 'answer' "
+        "ORDER BY rowid", (action,))]
+    con.execute("UPDATE turns SET hidden_at = NULL, hidden_by = NULL, hide_action_id = NULL "
+                "WHERE hide_action_id = ?", (action,))
+    con.commit()
+    return {"unhidden": back}
+
+
+def _split_up_chain(answer):
+    """The nearest answer up the `replaces_answer_id` chain (this one first) whose search
+    was split in two, or None."""
+    seen = set()
+    while answer is not None and answer["answer_id"] not in seen:
+        seen.add(answer["answer_id"])
+        if isinstance(answer.get("search_query"), list) and len(answer["search_query"]) == 2:
+            return answer
+        up = answer.get("replaces_answer_id")
+        answer = _find_answer(up)[2] if up else None
+    return None
+
+
+def reask(answer_id, mode=None, scope=None):
+    """Ask an answer's question again IN PLACE (contract §11.2, v2.5 lines 5, 6): the same
+    events as `ask()`; the new answer stores `replaces_answer_id` and takes the old one's
+    place in the conversation; the old one, its Think harder child and its background are
+    hidden with `hidden_by = "reask"`. `mode` = the reader's correction ("as_typed",
+    "carry", "one_search", or "two_searches": the two queries of the nearest split answer
+    up the chain, TC-6); `scope` = the same topic decision and queries searched in a new
+    scope (gap 5). Neither runs a rewriter call except a plain or mode re-ask.
+    Refused on the first `next()`, before any event or model call: unknown id ->
+    LookupError; a Think harder answer (TC-8), a hidden answer, `mode` and `scope`
+    together (TC-26), a bad mode, `two_searches` with no split in the chain, or a re-ask
+    of the same answer already running (TC-4) -> ValueError."""
+    yield from _traced_stream("reask", {"replaces_answer_id": answer_id},
+                              _guarded_stream("reask", answer_id,
+                                              _reask(answer_id, mode, scope)),
+                              target=answer_id)
+
+
+def _reask(answer_id, mode, scope):
+    tid, cid, old = _find_answer(answer_id)
+    if old.get("parent_answer_id"):
+        raise ValueError("a Think harder answer is re-asked through its parent: "
+                         f"{old['parent_answer_id']}")
+    if _hide_status(tid)[0] is not None:
+        raise ValueError(f"that answer is hidden: {answer_id}")
+    if mode is not None and scope is not None:
+        raise ValueError("one change at a time: give mode or scope, not both")
+    if mode not in REASK_MODES:
+        raise ValueError(f"mode must be one of {REASK_MODES[1:]} or None, got {mode!r}")
+    kept = {k: old[k] for k in ("topic", "search_query", "carried_from", "topic_label",
+                                "earlier_label") if k in old}
+    fixed = None
+    if mode == "two_searches":
+        split = _split_up_chain(old)
+        if split is None:
+            raise ValueError("no answer in this chain was ever split into two searches")
+        fixed = {k: split[k] for k in ("search_query", "carried_from", "topic_label",
+                                       "earlier_label") if k in split}
+        fixed["topic"] = "two_searches"
+        mode = None
+    elif scope is not None:
+        fixed = dict(kept, search_query=kept.get("search_query") or old["question"],
+                     topic=kept.get("topic") or "first")
+    yield from _ask(old["question"], old.get("scope") if scope is None else scope, cid,
+                    mode, reask={"answer_id": answer_id, "conversation_id": cid,
+                                 "fixed": fixed})
+
+
+def double_paid_rows(day):
+    """TC-4b, read-only: paid `cost_log` rows of `day` (YYYY-MM-DD) that look like ONE
+    press paid twice -- two or more rows of the same purpose and note on the same target.
+    A writer's check retry is marked `check_retry` and never counts (T-3); nor do memory
+    summaries, a side cost any action may trigger on its target; rows from before schema 3
+    have no target and are not read. Two Think harder presses one after the other ARE
+    listed: that is what the list is for. -> [{purpose, target_id, note,
+    rows: [{at, model, usd, request_id}]}]"""
+    con = _R()._intel_ro()
+    out = []
+    for purpose, target, note in con.execute(
+            "SELECT purpose, target_id, note FROM cost_log WHERE at LIKE ? "
+            "AND target_id IS NOT NULL AND (note IS NULL OR note NOT IN (?, ?)) "
+            "GROUP BY purpose, target_id, note HAVING COUNT(*) >= 2 ORDER BY MIN(rowid)",
+            (f"{day}%", CHECK_RETRY_NOTE, SUMMARY_NOTE)).fetchall():
+        rows = con.execute(
+            "SELECT at, model, usd, request_id FROM cost_log WHERE at LIKE ? AND "
+            "purpose = ? AND target_id = ? AND note IS ? ORDER BY rowid",
+            (f"{day}%", purpose, target, note)).fetchall()
+        out.append({"purpose": purpose, "target_id": target, "note": note,
+                    "rows": [{"at": a, "model": m, "usd": u, "request_id": r}
+                             for a, m, u, r in rows]})
+    return out
 
 
 # ================================================================ SUGGEST CONNECTIONS (§8)
@@ -2397,9 +2673,11 @@ def suggest_connections(story_id, text_hashes=None):
     the relevance bar, never padded, with one Haiku `why` each. Excludes the story and
     everything in its thread (in search a story IS its thread root) and the reader's own
     links. WRITES only `suggest_cache` and `cost_log` -- never `links` or any K2 table.
-    Traced (FP-1); its `cost_log` row names the story."""
-    return _traced_call("suggest_connections", {"story_id": story_id}, story_id,
-                        _suggest_connections, story_id, text_hashes)
+    Traced (FP-1); its `cost_log` row names the story. A second call on the same story
+    while one runs -> ValueError "already running" (TC-4)."""
+    with _in_flight("suggest_connections", story_id):
+        return _traced_call("suggest_connections", {"story_id": story_id}, story_id,
+                            _suggest_connections, story_id, text_hashes)
 
 
 def _suggest_connections(story_id, text_hashes):
