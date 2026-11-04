@@ -133,3 +133,13 @@ def hide_turn(answer_id):
     CALLS.append(("hide_turn", answer_id))
     _known(answer_id)
     HIDDEN.append(answer_id)
+    return {"hidden": [answer_id], "hide_action_id": "h_" + answer_id}
+
+
+def unhide_turn(answer_id):
+    CALLS.append(("unhide_turn", answer_id))
+    _known(answer_id)
+    if answer_id not in HIDDEN:
+        raise ValueError(f"that answer is not hidden: {answer_id}")
+    HIDDEN.remove(answer_id)
+    return {"unhidden": [answer_id]}

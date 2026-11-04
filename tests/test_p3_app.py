@@ -4696,9 +4696,12 @@ def _http(method, path, query=b"", payload=b""):
         if payload:
             headers += [(b"content-type", b"application/json"),
                         (b"content-length", str(len(payload)).encode())]
+        # (fo-1 F4) `path` decoded, `raw_path` as sent: what uvicorn hands the app, so a
+        # story id's %3A reaches the route as ":" here as it does in the browser.
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-                 "method": method, "scheme": "http", "path": path,
-                 "raw_path": path.encode(), "query_string": query, "root_path": "",
+                 "method": method, "scheme": "http",
+                 "path": urllib.parse.unquote(path), "raw_path": path.encode(),
+                 "query_string": query, "root_path": "",
                  "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8765),
                  "headers": headers}
         sent, done, calls = [], asyncio.Event(), {"n": 0}
@@ -5682,8 +5685,7 @@ def i8_routes():
     - hide_turn: 200 {hidden}; the turn is gone from /api/conversation, which still
       carries every other answer's topic and search_query (they survive a reload); an
       unknown answer is 404.
-    - On the real reader, while K3's final pass has not landed: both routes answer 501
-      naming K3, never 500. (Once it lands this is skipped, and says so.)
+    - (Retired in fo-1 F4: "the real reader answers 501"; f4_routes covers the real one.)
     - The flag ships off.
     """
     import p3_app as A
@@ -5711,7 +5713,8 @@ def i8_routes():
     status, _b = _post("/api/reask", {"mode": "carry"})
     check("[fixture] I8 · no answer_id is 400", status, 400)
     status, body = _post("/api/hide_turn", {"answer_id": "f3"})
-    check("[fixture] I8 · hide_turn answers what it hid", [status, body], [200, {"hidden": "f3"}])
+    check("[fixture] I8 · hide_turn answers what it hid", [status, body],
+          [200, {"hidden": ["f3"], "hide_action_id": "h_f3"}])
     status, _h, raw = _get("/api/conversation")
     turns = [t["answer"] for t in json.loads(raw)["turns"]]
     check("[fixture] I8 · the hidden turn is gone from the conversation",
@@ -5724,15 +5727,132 @@ def i8_routes():
     check("[fixture] I8 · hiding an unknown answer is 404", status, 404)
     S.reset()
     A.data = R
-    if hasattr(R, "reask") or hasattr(R, "hide_turn"):
-        skip("I8 · the real reader answers 501", "K3's reask / hide_turn exist now: flip "
-             "followup_rewrite and run the follow-up checks on the real reader")
-        return
-    a, body_a = _post("/api/reask", {"answer_id": "x", "mode": "carry"})
-    b, body_b = _post("/api/hide_turn", {"answer_id": "x"})
-    check("I8 · on the real reader, before K3's final pass, both routes say 501 naming K3",
-          [a, b, "K3's final pass" in body_a["detail"], "K3's final pass" in body_b["detail"]],
-          [501, 501, True, True])
+    # (fo-1 F4) The "real reader answers 501" check is retired: K3's final pass landed, and
+    # f4_routes runs these routes on the real reader; the 501 path is checked there with
+    # a data layer that lacks the functions.
+
+
+def _stream_or_error(path, body):
+    """POST a streamed route; -> (status, events) for a stream, (status, detail) for an
+    error answered before the first event."""
+    status, headers, raw = _http("POST", path, b"", json.dumps(body).encode())
+    if headers.get("content-type", "").startswith("application/x-ndjson"):
+        return status, [json.loads(l) for l in raw.decode().splitlines() if l.strip()]
+    return status, json.loads(raw)["detail"]
+
+
+def _pane_ids():
+    status, _h, raw = _get("/api/conversation")
+    return [t["answer"]["answer_id"] for t in json.loads(raw)["turns"]
+            if t.get("kind") == "answer"]
+
+
+F4_STORY = []   # (story id, article count) the story route was checked on, for the summary
+
+
+def f4_routes():
+    """fo-1 F4 · /api/reask, /api/hide_turn, /api/unhide_turn and /api/story onto K3's real
+    functions, through the ASGI app, on the section's copy of intel.db, fake model.
+
+    Pass lines, written before the run:
+    - reask: streams results first and done last; the new answer names the one it
+      replaces and takes its place in /api/conversation (the old id gone). A scope
+      re-ask streams too and keeps the scope it was sent.
+    - reask refusals come back as a status BEFORE any event, with K3's own message:
+      unknown answer 404; a hidden (re-asked) answer, mode and scope together, a bad
+      mode -> 400.
+    - hide_turn: 200 with K3's {hidden: [ids], hide_action_id}; the answer leaves the
+      conversation; again 400 ("already hidden"); unknown 404.
+    - unhide_turn: 200 {unhidden: [the id]}; the answer is back, in its old place; again
+      400; a re-asked answer 400 ("cannot come back"); unknown 404; no answer_id 400.
+    - story: GET /api/story/<id with %3A> = K3's get_story(<id with ":">), every article
+      (article_count = len(articles)); an unknown id 404.
+    - A data layer without unhide_turn / get_story / hide_turn / reask answers 501, never 500.
+    What would pass while broken: a route that returned its own {hidden: id} (the shape
+    check catches it); a path left undecoded (the %3A story would 404).
+    """
+    import types
+    import p3_app as A
+    A.data = R
+    first = list(R.ask("police", None))[-1]["answer"]
+    second = list(R.ask("and the courts", None))[-1]["answer"]
+    a1, a2 = first["answer_id"], second["answer_id"]
+
+    status, events = _stream_or_error("/api/reask", {"answer_id": a2, "mode": "as_typed"})
+    new = events[-1].get("answer", {}) if status == 200 else {}
+    check("[fixture] F4 · /api/reask on the real reader streams results first, done last",
+          [status, events[0]["type"], events[-1]["type"]], [200, "results", "done"])
+    check("[fixture] F4 · the re-asked answer names the one it replaces and takes its place",
+          [new.get("replaces_answer_id"), _pane_ids()], [a2, [a1, new.get("answer_id")]])
+    a3 = new.get("answer_id")
+    everyone = {"story_id": None, "text_hashes": [], "filters": {}}
+    status, events = _stream_or_error("/api/reask", {"answer_id": a3, "scope": everyone})
+    check("[fixture] F4 · a scope re-ask streams and keeps the scope it was sent",
+          [status, events[-1].get("answer", {}).get("scope", {}).get("story_id", "x")],
+          [200, None])
+    a4 = events[-1]["answer"]["answer_id"]
+
+    refusals = [({"answer_id": "ans_never", "mode": "carry"}, 404, "no such answer"),
+                ({"answer_id": a2, "mode": "carry"}, 400, "that answer is hidden"),
+                ({"answer_id": a4, "mode": "carry", "scope": everyone}, 400,
+                 "one change at a time"),
+                ({"answer_id": a4, "mode": "twice"}, 400, "mode must be one of")]
+    got = []
+    for body, want_status, words in refusals:
+        status, detail = _stream_or_error("/api/reask", body)
+        got.append([status, isinstance(detail, str) and words in detail])
+    check("[fixture] F4 · reask refusals are a status with K3's message, before any event",
+          got, [[w, True] for _b, w, _x in refusals])
+
+    status, body = _post("/api/hide_turn", {"answer_id": a1})
+    check("[fixture] F4 · hide_turn answers K3's {hidden: [ids], hide_action_id}",
+          [status, body.get("hidden"), str(body.get("hide_action_id", "")).startswith("h_")],
+          [200, [a1], True])
+    check("[fixture] F4 · the hidden answer leaves the conversation", _pane_ids(), [a4])
+    again, b_again = _post("/api/hide_turn", {"answer_id": a1})
+    never, _b = _post("/api/hide_turn", {"answer_id": "ans_never"})
+    check("[fixture] F4 · hiding twice is 400 with K3's message; an unknown answer 404",
+          [again, "already hidden" in b_again["detail"], never], [400, True, 404])
+
+    status, body = _post("/api/unhide_turn", {"answer_id": a1})
+    check("[fixture] F4 · unhide_turn answers {unhidden: [the id]}", [status, body],
+          [200, {"unhidden": [a1]}])
+    check("[fixture] F4 · and the answer is back in its old place", _pane_ids(), [a1, a4])
+    again, b_again = _post("/api/unhide_turn", {"answer_id": a1})
+    gone, b_gone = _post("/api/unhide_turn", {"answer_id": a2})
+    never, _b = _post("/api/unhide_turn", {"answer_id": "ans_never"})
+    bare, _b = _post("/api/unhide_turn", {})
+    check("[fixture] F4 · unhide refusals: not hidden 400, re-asked 400, unknown 404, "
+          "no id 400",
+          [again, "not hidden" in b_again["detail"], gone,
+           "cannot come back" in b_gone["detail"], never, bare],
+          [400, True, 400, True, 404, 400])
+
+    # The latest digest's story with the most articles, so "every article" can see a cut
+    # list (the police results were all one-article stories on 5 Nov).
+    story_id = max((st["story_id"] for st in digest_stories() if ":" in st["story_id"]),
+                   key=lambda sid: R.get_story(sid)["article_count"])
+    status, _h, raw = _get("/api/story/" + urllib.parse.quote(story_id, safe=""))
+    body = json.loads(raw)
+    want = R.get_story(story_id)
+    F4_STORY.append((story_id, want["article_count"]))
+    check("[fixture] F4 · /api/story/<id with %3A> is K3's get_story(<id>)",
+          [status, body], [200, json.loads(json.dumps(want))])
+    check("[fixture] F4 · and carries every article", body["article_count"],
+          len(body["articles"]))
+    status, _h, raw = _get("/api/story/" + urllib.parse.quote("2026-01-01:000000000000",
+                                                              safe=""))
+    check("[fixture] F4 · an unknown story is 404 with K3's message",
+          [status, "no such story" in json.loads(raw)["detail"]], [404, True])
+
+    A.data = types.SimpleNamespace(FIXTURES=R.FIXTURES)
+    got = [_post("/api/reask", {"answer_id": a1})[0],
+           _post("/api/hide_turn", {"answer_id": a1})[0],
+           _post("/api/unhide_turn", {"answer_id": a1})[0],
+           _get("/api/story/x")[0]]
+    A.data = R
+    check("[fixture] F4 · a data layer without the function answers 501, never 500",
+          got, [501, 501, 501, 501])
 
 
 # ------------------------------------------------------------- I9 · every button pressed
@@ -7056,7 +7176,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -7074,6 +7194,8 @@ def main():
           f"meaning search (verdicts, suggestions) were seen in this mode")
     print(f"I4 page cut through the app, three real pages: {PAGE_MS} ms")
     print(f"state 4 (weak match) reached with: {STATE4_SEEN or 'none of ' + str(STATE4_WORDS)}")
+    for sid, n in F4_STORY:
+        print(f"F4 /api/story checked on {sid}: {n} articles")
     for n in I8_COUNTS:
         print(f"I8 flag off: {n} pane buttons pressed, none reached reask or hide_turn")
     for pressed, distinct, found, disabled, moves, states in I9_COUNTS:

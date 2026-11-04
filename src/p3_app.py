@@ -139,9 +139,10 @@ FLAGS = {
 
     # --- K1 integration, brief §4.5 ------------------------------------------
     # The grey "what was done" line after an answer with its one correction, re-ask in
-    # place, the scope undo and Remove. OFF until K3's final pass lands `reask`,
-    # `hide_turn` and the answer's `topic`; until then /api/reask and /api/hide_turn
-    # answer 501. The Q/A turn layout does not hang on it (brief: always).
+    # place, the scope undo and Remove. K3's final pass landed `reask`, `hide_turn`,
+    # `unhide_turn` and the answer's `topic`, and the routes call them (fo-1 F4); the flag
+    # stays OFF until fo-1 F9 turns it on, and stays a flag so it can go off again.
+    # The Q/A turn layout does not hang on it (brief: always).
     "followup_rewrite": False,
 }
 
@@ -846,12 +847,13 @@ def think_harder(payload: dict = Body(...)):
 
 
 def _not_built(name):
-    """(I8) K3's final pass adds `reask` and `hide_turn`; until it lands the data layer has
-    neither, and the route says so as a 501 rather than a 500 from an AttributeError."""
+    """(I8) A data layer without this function (an older reader, a stub that leaves it
+    out) is said as a 501 rather than a 500 from an AttributeError. K3's final pass has
+    all four the routes below call (fo-1 F4); the path stays for a reader without them."""
     fn = getattr(data, name, None)
     if fn is None:
         raise HTTPException(status_code=501,
-                            detail=f"{name} is not built yet: it waits on K3's final pass")
+                            detail=f"{name} is not built in this data layer")
     return fn
 
 
@@ -871,13 +873,35 @@ def reask(payload: dict = Body(...)):
 
 @app.post("/api/hide_turn")
 def hide_turn(payload: dict = Body(...)):
-    """(I8) Take one answer out of the conversation and out of the model's memory. The
-    row stays in intel.db, marked hidden; the contract has no way back (no Undo)."""
+    """(I8, fo-1 F4) Take one answer out of the conversation and out of the model's
+    memory: K3's `hide_turn`, answered as it is, `{hidden: [answer_ids], hide_action_id}`
+    (a Haiku answer takes its Think harder child and its background with it). The rows
+    stay in intel.db, marked hidden. Unknown answer 404; already hidden 400."""
     (answer_id,) = _need(payload, "answer_id")
     run = _not_built("hide_turn")
     with _mapped():
-        run(answer_id)
-    return {"hidden": answer_id}
+        return run(answer_id)
+
+
+@app.post("/api/unhide_turn")
+def unhide_turn(payload: dict = Body(...)):
+    """(fo-1 F4) The toast's Undo: K3's `unhide_turn` reverses exactly the one hide action
+    that hid this answer -> `{unhidden: [answer_ids]}`. Not hidden, or replaced by a
+    re-ask (it never comes back) 400; unknown 404."""
+    (answer_id,) = _need(payload, "answer_id")
+    run = _not_built("unhide_turn")
+    with _mapped():
+        return run(answer_id)
+
+
+@app.get("/api/story/{story_id}")
+def story(story_id: str):
+    """(fo-1 F4) One story with EVERY article in it, K3's `get_story` (the outside story
+    page, F8). Ids carry a colon ("2026-11-04:ab12…"), which the page sends as %3A and
+    the server decodes before routing. Unknown story 404."""
+    run = _not_built("get_story")
+    with _mapped():
+        return run(story_id)
 
 
 @app.post("/api/background")
