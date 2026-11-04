@@ -2221,6 +2221,29 @@ def fp5_reask_hide(R):
     run(S.think_harder(ids[5]))
     check("[fp5] TC-11 summaries: 2 while asking · cache hit 0 · hide -> Undo -> 0 · "
           "hide -> 1", (n0, n1 - n0, n2 - n1, len(fake.summaries) - n2), (2, 0, 0, 1))
+    # control with NEW questions (T-56): hide -> Undo before the 6th question costs
+    # what the same conversation without them costs, and leaves the same summary
+    def sixth(hide_undo):
+        S.new_conversation()
+        S._CLIENT = fk = Fake(*[_line(f"C{chr(65 + i)}") for i in range(6)],
+                              rewrite=rewriter)
+        got = [run(S.ask(f"Repo question {w}?"))[-1]["answer"]["answer_id"]
+               for w in ("alpha", "bravo", "charlie", "delta", "echo")]
+        before = len(fk.summaries)
+        if hide_undo:
+            S.hide_turn(got[1])
+            S.unhide_turn(got[1])
+        run(S.ask("Repo question foxtrot?"))
+        cid = R.current_conversation()["conversation_id"]
+        row = json.loads(R._intel_ro().execute(
+            "SELECT summary FROM conversations WHERE conversation_id = ?",
+            (cid,)).fetchone()[0])
+        covers = [got.index(a) for a in row["covers"]]
+        return len(fk.summaries) - before, covers, row["text"]
+    with_hu, without = sixth(True), sixth(False)
+    check("[fp5] TC-11 control: hide -> Undo before a new question costs and summarises "
+          "exactly as without it (the 6th question's own rebuild: 1, covering #1-#2)",
+          (with_hu, with_hu[:2]), (without, (1, [0, 1])))
     check("[fp5] TC-11 the rebuilt summary covers no hidden answer",
           ids[0] in json.dumps(R._intel_ro().execute(
               "SELECT summary FROM conversations WHERE conversation_id = ?",

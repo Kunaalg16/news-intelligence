@@ -2565,10 +2565,10 @@ def reask(answer_id, mode=None, scope=None):
     LookupError; a Think harder answer (TC-8), a hidden answer, `mode` and `scope`
     together (TC-26), a bad mode, `two_searches` with no split in the chain, or a re-ask
     of the same answer already running (TC-4) -> ValueError."""
+    # no `target=` here: `_ask` names the NEW answer as the target (T-55)
     yield from _traced_stream("reask", {"replaces_answer_id": answer_id},
                               _guarded_stream("reask", answer_id,
-                                              _reask(answer_id, mode, scope)),
-                              target=answer_id)
+                                              _reask(answer_id, mode, scope)))
 
 
 def _reask(answer_id, mode, scope):
