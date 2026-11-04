@@ -6661,6 +6661,27 @@ def s5_server():
         finally:
             A.APP_DIR, A.SERVER_FILE = kept
 
+    # F4 · Cache-Control, through the ASGI app. What would pass while broken: a header
+    # set on every answer (PDFs included) -- guarded by the PDF rows wanting none.
+    def cc(path, query=b""):
+        status, headers, _b = _get(path, query)
+        return status, headers.get("cache-control")
+    check("[page] F4 · the page's files: no-cache (an ordinary reload asks the server)",
+          [cc(p) for p in ("/", "/app.js", "/app.css")],
+          [(200, "no-cache")] * 3)
+    check("[page] F4 · JSON answers: no-store, an error too",
+          [cc("/api/status"), cc("/api/digest"), cc("/api/conversation"),
+           cc("/api/digest", b"ref=no-such-digest")],
+          [(200, "no-store"), (200, "no-store"), (200, "no-store"), (404, "no-store")])
+    live = R.get_digest("latest")
+    link = next(r["page_link"] for s_ in live["stories"] for r in s_["coverage"]["rows"]
+                if r.get("page_link") and r["page_link"].get("pdf"))
+    page = cc("/api/page", urllib.parse.urlencode(
+        {"pdf": link["pdf"], "page": link["pdf_page"]}).encode())
+    whole = cc("/pdf/" + link["pdf"].removeprefix("archive/"))
+    check("[page] F4 · PDFs are left as they were (no Cache-Control added)",
+          [page, whole], [(200, None), (200, None)])
+
 
 def main():
     before = _checksum(REAL_INTEL)

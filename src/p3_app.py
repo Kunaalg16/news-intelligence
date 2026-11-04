@@ -136,6 +136,40 @@ FLAGS = {
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,
               redoc_url=None, openapi_url=None)
 
+# F4 · caching. The page's own files are `no-cache`: the browser may keep them but must
+# ask the server on every load, so even an ordinary reload gets the latest file (the old
+# tab ran a stale app.js, T-14). JSON answers are `no-store`: they describe the reader's
+# state now and are never worth keeping. PDFs (/api/page, /pdf/) are left as they were:
+# an archive page never changes.
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _CacheHeaders:
+    """Adds `Cache-Control: no-store` to every JSON or NDJSON answer under /api/ that
+    does not set its own. Plain ASGI, so a stream's chunks pass through untouched."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            return await self.inner(scope, receive, send)
+
+        async def send_with(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                kind = dict(headers).get(b"content-type", b"")
+                if (kind.startswith((b"application/json", b"application/x-ndjson"))
+                        and not any(k.lower() == b"cache-control" for k, _ in headers)):
+                    message = dict(message, headers=headers + [(b"cache-control",
+                                                                b"no-store")])
+            await send(message)
+
+        await self.inner(scope, receive, send_with)
+
+
+app.add_middleware(_CacheHeaders)
+
 
 # ------------------------------------------------------------------ small helpers
 
@@ -207,8 +241,8 @@ def page():
     if not index.is_file():
         return HTMLResponse("<h1>News Intelligence</h1><p>The page is not built yet "
                             "(step A3). The JSON routes work: try /api/digest.</p>",
-                            status_code=200)
-    return HTMLResponse(index.read_text())
+                            status_code=200, headers=NO_CACHE)
+    return HTMLResponse(index.read_text(), headers=NO_CACHE)
 
 
 @app.get("/app.css")
@@ -216,7 +250,7 @@ def stylesheet():
     path = APP_DIR / "app.css"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="not built yet")
-    return PlainTextResponse(path.read_text(), media_type="text/css")
+    return PlainTextResponse(path.read_text(), media_type="text/css", headers=NO_CACHE)
 
 
 @app.get("/app.js")
@@ -224,7 +258,8 @@ def script():
     path = APP_DIR / "app.js"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="not built yet")
-    return PlainTextResponse(path.read_text(), media_type="text/javascript")
+    return PlainTextResponse(path.read_text(), media_type="text/javascript",
+                             headers=NO_CACHE)
 
 
 # ------------------------------------------------------------------ flags, status
