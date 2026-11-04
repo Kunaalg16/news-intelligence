@@ -1,5 +1,5 @@
 """
-test_p3_store.py -- TEST (free, no API key, no internet). Checks src/p3_store.py (K3 schema 2).
+test_p3_store.py -- TEST (free, no API key, no internet). Checks src/p3_store.py (K3 schema 3).
 
 WHAT IT DOES
     Never touches data/intel.db. Everything happens on a fresh file and on a COPY of the
@@ -19,6 +19,9 @@ WHAT IT DOES
                       intact; the vote CHECK refuses +1; a pin's article_ids and payload
                       agree; the read-only connection refuses to write; fingerprint()
                       depends on the SET and not on the order it arrived in
+      5. schema 3   : (FP-1, 4 Nov) on a copy of the real file, 2 -> 3 adds the nine
+                      columns and nothing else; a failure part-way changes nothing; the
+                      safety copy is the file as it was
 
 WHY IT EXISTS
     `intel.db` holds two strands' tables in one file. K3 is allowed to add to it and
@@ -43,6 +46,15 @@ PASS LINES (fixed before the run, K3 brief §B2-1)
     - The read-only connection raises on a write.
     - A schema-1 file with a row in a reshaped table is refused, by name, with its row
       and its schema row intact.
+    Schema 3 (FP-1, fixed 4 Nov before the run):
+    - On a copy of the real file: K2's tables (DDL, counts, every row) and
+      meta.schema_version byte-identical; every cost_log and turns row keeps every old
+      column's value and has NULL in each new one; meta.k3_schema_version = '3'.
+    - A re-run is a no-op: sqlite_master and every table's content identical.
+    - An ALTER that fails part-way leaves the file at schema 2 with none of the columns.
+    - The safety copy is the file as it was (schema 2, same content); an existing copy
+      is not overwritten.
+    - A fresh file and a schema-1 file both end at schema 3 with all nine columns.
     A failed line is answered by error analysis, not by moving the line.
 
 WHEN TO RUN
@@ -53,6 +65,7 @@ USAGE (from ~/news-intel)
     .venv/bin/python tests/test_p3_store.py --mock       fresh file only (no copy)
 """
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -96,7 +109,8 @@ def fresh(tmp):
     check("fresh file has all seventeen K3 tables", len(S.K3_TABLES), 17)
     check("fresh file has meta", "meta" in present, True)
     check("K3 schema row written",
-          con.execute("SELECT value FROM meta WHERE key=?", (S.K3_SCHEMA_KEY,)).fetchone()[0], "2")
+          con.execute("SELECT value FROM meta WHERE key=?", (S.K3_SCHEMA_KEY,)).fetchone()[0], "3")
+    check("fresh file has every schema-3 column", S.missing_at_3(con), [])
     check("K2's schema row NOT invented by K3",
           con.execute("SELECT value FROM meta WHERE key=?", (S.K2_SCHEMA_KEY,)).fetchone(), None)
     check("no K2 table created by K3", [t for t in S.K2_TABLES if t in present], [])
@@ -143,7 +157,7 @@ def on_copy(tmp):
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     was = S.k3_version(con)
     con.close()
-    check("the real file is at a K3 schema this code can open", was in (1, 2), True)
+    check("the real file is at a K3 schema this code can open", was in (1, 2, 3), True)
 
     con = S.open_intel(path, quiet=True)
     con.close()
@@ -159,9 +173,12 @@ def on_copy(tmp):
     check("K2 counts are not all zero (a real copy)",
           all(v == 0 for v in before["counts"].values()), False)
 
-    # the migration's own promise: these five are not reshaped, additive only
-    check("visit_records, both caches, cost_log and viewer_prefs keep their DDL",
-          kept_after["ddl"], kept_before["ddl"])
+    # the migration's own promise: these five are not reshaped, additive only. Schema 3
+    # adds columns to cost_log, so its DDL moves (part 5 checks exactly how); the other
+    # four keep theirs byte for byte.
+    check("visit_records, both caches and viewer_prefs keep their DDL",
+          [r for r in kept_after["ddl"] if r[2] != "cost_log"],
+          [r for r in kept_before["ddl"] if r[2] != "cost_log"])
     check("and keep every row", kept_after["counts"], kept_before["counts"])
     check("cost_log had rows to protect", kept_before["counts"]["cost_log"] > 0, True)
 
@@ -172,7 +189,7 @@ def on_copy(tmp):
     con.close()
     check("copy: no K3 table missing", d["missing_k3"], [])
     check("copy: no K2 table missing", d["missing_k2"], [])
-    check("copy: K3 schema row = 2", d["k3_schema"], "2")
+    check("copy: K3 schema row = 3", d["k3_schema"], "3")
     check("copy: K2 schema row = 2", d["k2_schema"], "2")
     check("copy: read_state is now text_hash + read_at, with no keep_unread column",
           reshaped_cols["read_state"], ["text_hash", "read_at"])
@@ -193,6 +210,9 @@ def on_copy(tmp):
     # The copy's own viewer_prefs (e.g. current_conversation_id, written by the ask pane
     # since 3 Nov) must survive too, so the expectation is real rows + the one added.
     real_prefs = con.execute("SELECT key, value FROM viewer_prefs").fetchall()
+    # Likewise the copy's own read_state (Kunaal's reads since 3 Nov evening): expected
+    # = real rows + the one added (FP-0 found 11 real rows failing the old expectation).
+    real_reads = con.execute("SELECT text_hash, read_at FROM read_state").fetchall()
     con.execute("INSERT INTO viewer_prefs VALUES ('window', ?, '2026-11-01T06:00:00')",
                 (json.dumps("day"),))
     con.execute("INSERT INTO read_state VALUES ('abc123', '2026-11-01T06:01:00')")
@@ -206,8 +226,9 @@ def on_copy(tmp):
     version = S.k3_version(con)
     con.close()
     check("re-run keeps K3 rows", sorted(prefs), sorted(real_prefs + [("window", '"day"')]))
-    check("re-run keeps read_state rows", reads, [("abc123", "2026-11-01T06:01:00")])
-    check("re-run leaves the schema row at 2", version, 2)
+    check("re-run keeps read_state rows", sorted(reads),
+          sorted(real_reads + [("abc123", "2026-11-01T06:01:00")]))
+    check("re-run leaves the schema row at 3", version, 3)
     check("re-run still leaves K2 alone", k2_fingerprint(path)["counts"], again["counts"])
     check("re-run still leaves K2 DDL alone", k2_fingerprint(path)["ddl"], before["ddl"])
     # a re-run must not migrate a second time: if it did, the reshaped tables would be
@@ -216,7 +237,7 @@ def on_copy(tmp):
     reshaped_counts = S.counts(con, S.RESHAPED_AT_2)
     con.close()
     check("re-run does not re-migrate (the row written after the reshape is still there)",
-          reshaped_counts, {"read_state": 1, "boards": 0, "pins": 0, "feedback": 0})
+          reshaped_counts["read_state"], len(real_reads) + 1)
     check("re-run leaves cost_log's real rows alone",
           keepsafe_fingerprint(path)["counts"]["cost_log"], kept_before["counts"]["cost_log"])
 
@@ -269,8 +290,14 @@ def reshape(tmp):
     version = S.k3_version(con)
     con.close()
     check("schema 1 → 2: the reshape ran", cols, ["text_hash", "read_at"])
-    check("schema 1 → 2: the schema row moved to 2", version, 2)
+    check("schema 1 → 3: the schema row moved to 3 (via 2)", version, 3)
     check("schema 1 → 2: cost_log's row survived", spend, 1)
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    check("schema 1 → 3: every schema-3 column is there", S.missing_at_3(con), [])
+    check("schema 1 → 3: the kept cost_log row has NULL timing",
+          con.execute("SELECT duration_ms, attempts, target_id FROM cost_log").fetchone(),
+          (None, None, None))
+    con.close()
     check("schema 1 → 2: the new tables are there",
           [t for t in S.K3_TABLES if t not in present], [])
 
@@ -336,8 +363,9 @@ SAMPLES = {
     "feedback": ("INSERT INTO feedback VALUES (?,?,?,?,?,?,?,?)",
                  ("f1", "writeup", "2026-10-24:abc", json.dumps(["h1"]), "down",
                   "wrong number", "2026-11-01T06:00:00", "v1")),
-    "cost_log": ("INSERT INTO cost_log VALUES (?,?,?,?,?,?,?,?)",
-                 ("2026-11-01T06:00:00", "writeup", "claude-haiku-5-5", 3000, 200, 0.0004, "v1", None)),
+    "cost_log": ("INSERT INTO cost_log VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("2026-11-01T06:00:00", "writeup", "claude-haiku-5-5", 3000, 200, 0.0004, "v1", None,
+                  4210, None, 2, json.dumps(["status 529"]), "req_1", "ans_1")),
     "viewer_prefs": ("INSERT INTO viewer_prefs VALUES (?,?,?)",
                      ("sort", json.dumps("relevance"), "2026-11-01T06:00:00")),
     "visits": ("INSERT INTO visits VALUES (?,?,?,?,?)",
@@ -348,10 +376,10 @@ SAMPLES = {
                     json.dumps(["h3"]), "2026-11-01T06:00:00")),
     "conversations": ("INSERT INTO conversations VALUES (?,?,?,?)",
                       ("c_0001", "2026-11-01T06:00:00", None, "2026-11-01T06:10:00")),
-    "turns": ("INSERT INTO turns VALUES (?,?,?,?,?)",
+    "turns": ("INSERT INTO turns VALUES (?,?,?,?,?,?,?,?)",
               ("t_0001", "c_0001", "answer",
                json.dumps({"answer_id": "a_1", "sentences": [{"text": "A.", "cites": ["h1"]}]}),
-               "2026-11-01T06:05:00")),
+               "2026-11-01T06:05:00", None, None, None)),
     "passage_sets": ("INSERT INTO passage_sets VALUES (?,?,?,?)",
                      ("ps_0001", json.dumps(["h1", "h2"]),
                       json.dumps([{"text_hash": "h1", "text": "A passage."}]),
@@ -425,6 +453,131 @@ def usable(tmp):
     check("fingerprint of nothing still works", len(S.fingerprint([])), 16)
 
 
+# ------------------------------------------------------------------ 5. schema 3
+
+def content(path, names):
+    """{table: sha256 of its DDL and every row in rowid order}, read-only."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    out = {}
+    for t in names:
+        h = hashlib.sha256(repr(con.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (t,)).fetchone()).encode())
+        for row in con.execute(f"SELECT * FROM {t} ORDER BY rowid"):
+            h.update(repr(row).encode())
+        out[t] = h.hexdigest()[:16]
+    con.close()
+    return out
+
+
+def as_schema_2(src, dest):
+    """A schema-2 file made from `src`: the copy with schema 3's columns dropped again
+    (the real file may already be at 3 by the time this runs)."""
+    shutil.copy2(src, dest)
+    con = sqlite3.connect(dest)
+    for t, c, _ty in S.ADDED_AT_3:
+        if c in {r[1] for r in con.execute(f"PRAGMA table_info({t})")}:
+            con.execute(f"ALTER TABLE {t} DROP COLUMN {c}")
+    con.execute("UPDATE meta SET value='2' WHERE key=?", (S.K3_SCHEMA_KEY,))
+    con.commit()
+    con.close()
+
+
+def schema_3(tmp):
+    path = Path(tmp) / "intel_s2.db"
+    as_schema_2(REAL_DB, path)
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    old = {t: con.execute(f"SELECT * FROM {t} ORDER BY rowid").fetchall()
+           for t in ("cost_log", "turns")}
+    k2_meta = con.execute("SELECT value FROM meta WHERE key=?", (S.K2_SCHEMA_KEY,)).fetchone()
+    con.close()
+    k2_before = content(path, S.K2_TABLES)
+    others = [t for t in S.K3_TABLES if t not in ("cost_log", "turns")]
+    k3_before = content(path, others)
+    check("[s3] the copy starts at schema 2, with rows to protect",
+          (S.k3_version(sqlite3.connect(f"file:{path}?mode=ro", uri=True)),
+           len(old["cost_log"]) > 0, len(old["turns"]) > 0), (2, True, True))
+
+    safety = Path(tmp) / "intel_before_schema3_test.db"
+    before_all = content(path, sorted(S.K3_TABLES + S.K2_TABLES))
+    con = sqlite3.connect(path)
+    added = S.migrate_2_to_3(con, safety_copy=safety, quiet=True)
+    con.close()
+    check("[s3] exactly the nine columns were added", sorted(added), sorted(S.ADDED_AT_3))
+    check("[s3] K2 tables byte-identical (DDL + every row)", content(path, S.K2_TABLES), k2_before)
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    check("[s3] K2 schema row untouched",
+          con.execute("SELECT value FROM meta WHERE key=?", (S.K2_SCHEMA_KEY,)).fetchone(),
+          k2_meta)
+    check("[s3] K3 schema row = 3", S.k3_version(con), 3)
+    check("[s3] the other fifteen K3 tables byte-identical", content(path, others), k3_before)
+    for t in ("cost_log", "turns"):
+        width = len(old[t][0])
+        new = con.execute(f"SELECT * FROM {t} ORDER BY rowid").fetchall()
+        check(f"[s3] {t}: every row keeps every old column", [r[:width] for r in new], old[t])
+        check(f"[s3] {t}: every new column is NULL on the old rows",
+              {v for r in new for v in r[width:]}, {None})
+    con.close()
+    check("[s3] the safety copy is the file as it was",
+          content(safety, sorted(S.K3_TABLES + S.K2_TABLES)), before_all)
+
+    # a re-run (open_intel, as every connection does) is a no-op
+    once = content(path, sorted(S.K3_TABLES + S.K2_TABLES + ("meta",)))
+    master = sqlite3.connect(f"file:{path}?mode=ro", uri=True).execute(
+        "SELECT * FROM sqlite_master ORDER BY name").fetchall()
+    S.open_intel(path, quiet=True).close()
+    check("[s3] re-run: every table identical",
+          content(path, sorted(S.K3_TABLES + S.K2_TABLES + ("meta",))), once)
+    check("[s3] re-run: sqlite_master identical",
+          sqlite3.connect(f"file:{path}?mode=ro", uri=True).execute(
+              "SELECT * FROM sqlite_master ORDER BY name").fetchall(), master)
+
+    # an existing safety copy is not overwritten
+    stamp = safety.stat().st_mtime_ns
+    con = sqlite3.connect(path)
+    S.migrate_2_to_3(con, safety_copy=safety, quiet=True)
+    con.close()
+    check("[s3] an existing safety copy is left alone", safety.stat().st_mtime_ns, stamp)
+
+    # a failure part-way: `turns` is made a VIEW, so its ALTER fails after cost_log's
+    # six have run -- the transaction must take those six back too
+    bad = Path(tmp) / "intel_s2_bad.db"
+    as_schema_2(REAL_DB, bad)
+    con = sqlite3.connect(bad)
+    con.execute("ALTER TABLE turns RENAME TO turns_real")
+    con.execute("CREATE VIEW turns AS SELECT * FROM turns_real")
+    con.commit()
+    try:
+        S.migrate_2_to_3(con, quiet=True)
+        raised = False
+    except sqlite3.Error:
+        raised = True
+    con.close()
+    con = sqlite3.connect(f"file:{bad}?mode=ro", uri=True)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(cost_log)")}
+    check("[s3] a failing ALTER raises", raised, True)
+    check("[s3] ... and leaves the file at schema 2", S.k3_version(con), 2)
+    check("[s3] ... with none of cost_log's new columns",
+          cols & {c for t, c, _ty in S.ADDED_AT_3}, set())
+    con.close()
+
+    # two processes opening one schema-2 file at once: the second finds nothing to add
+    two = Path(tmp) / "intel_s2_two.db"
+    as_schema_2(REAL_DB, two)
+    first, second = sqlite3.connect(two), sqlite3.connect(two)
+    check("[s3] two connections migrate one after the other: 9 added, then 0",
+          (len(S.migrate_2_to_3(first, quiet=True)), len(S.migrate_2_to_3(second, quiet=True)),
+           S.k3_version(second)), (9, 0, 3))
+    first.close()
+    second.close()
+
+    # only the real path gets a safety copy, and it goes to _work/, dated
+    check("[s3] a copy elsewhere gets no safety copy", S._safety_path(path), None)
+    real = S._safety_path(S.INTEL_DB)
+    check("[s3] the real file's safety copy is _work/intel_before_schema3_<date>.db",
+          (real.parent, real.name.startswith("intel_before_schema3_"), real.suffix),
+          (ROOT / "_work", True, ".db"))
+
+
 def refuses(con, sql, values):
     try:
         con.execute(sql, values)
@@ -446,6 +599,7 @@ def main():
             print(f"copy of the real intel.db: SKIPPED ({REAL_DB} not found)")
         else:
             on_copy(tmp)
+            schema_3(tmp)
 
     bad = [(n, g, w) for n, g, w in CHECKS if g != w]
     for n, g, w in bad:

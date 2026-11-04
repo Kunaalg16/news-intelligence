@@ -32,6 +32,16 @@ PASS LINES (fixed before the run, brief 2 §3 B2-4)
   - A missing id raises LookupError; a bad argument raises ValueError.
   - With the embedding service down, `search()` still answers and says `mode fts_only`.
   - `facets()` offers only values with stories behind them, under the CURRENT tag record.
+  FP-1 tracing (TC-5; fixed 4 Nov before the run), the REAL SDK on a fake wire whose
+  reply takes 2 s and fails once with a retryable 529:
+  - the trace names >= 90% of the action's wall time by phase;
+  - attempts = 2 and the reason is recorded, in the trace and on the cost_log row;
+  - the cost_log row has duration_ms, attempts, retry_reasons, request_id and
+    target_id; first_token_ms is NULL (nothing is streamed; FP-1 may not change that);
+  - first_sentence_ms <= total; a timeout attempt is recorded as "timeout";
+  - one trace line per paid action, for the real client on the real file only: a fake
+    client, or the real client on a copy, writes none;
+  - a stream resumed on different threads still names >= 90% of its time.
   A failed line is answered by error analysis, not by moving the line.
 
 WHEN TO RUN
@@ -1069,6 +1079,218 @@ def shapes_mock():
             os.environ["ANTHROPIC_API_KEY"] = saved_key
 
 
+def trace_mock(tmp):
+    """FP-1 (TC-5): where a paid call's time goes. The REAL anthropic SDK runs, with its
+    HTTP transport replaced in-process: no socket is opened, the key is a fake string,
+    the env-file loader is stubbed so no file is read. The synthetic intel.db stands in
+    for "the real file" (REAL_INTEL_DB and TRACE_LOG repointed) so a trace line can be
+    written and read back; the true data/intel.db and data/logs/ are never named."""
+    import logging
+    import os
+    import re
+    import threading
+    import time
+    import types
+    import httpx2
+
+    news, intel, search_p = build_archive(tmp)
+    work = Path(tmp) / "work"
+    work.mkdir()
+    os.environ.update(P3_READER_INTEL_DB=str(intel), P3_READER_NEWS_DB=str(news),
+                      P3_READER_WORK=str(work))
+    saved = (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query, S.REAL_INTEL_DB,
+             S.TRACE_LOG, httpx2.HTTPTransport.handle_request)
+    S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB = news, intel, search_p
+    mode = {"v": "repo"}
+    S.embed_query = lambda q, **kw: VECS[mode["v"]]
+    S.REAL_INTEL_DB = Path(intel).resolve()
+    S.TRACE_LOG = Path(tmp) / "logs" / "k3_trace.log"
+    import p3_reader as R
+    R.close_all()
+    R._intel_w()
+
+    wire = {"sleep": 0.0, "fail": []}      # fail: per attempt, None | 529 | "timeout"
+    sent = []
+
+    def reply(body):
+        tools = body.get("tools") or []
+        props = (tools[0]["input_schema"]["properties"] if tools else
+                 body["output_config"]["format"]["schema"]["properties"])
+        if "sentences" in props:
+            data = GOOD[0]
+        elif "whys" in props:
+            data = {"whys": [{"story_id": i, "why": "Same week."} for i in re.findall(
+                r'story_id="([^"]+)"', body["messages"][0]["content"])]}
+        else:
+            data = {"text": "Earlier: repo rate questions."}
+        content = ([{"type": "tool_use", "id": "t1", "name": "answer", "input": data}]
+                   if tools else [{"type": "text", "text": json.dumps(data)}])
+        return {"id": "m1", "type": "message", "role": "assistant", "model": body["model"],
+                "content": content, "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3000, "output_tokens": 200}}
+
+    def fake_wire(self, request):
+        request.read()
+        sent.append(1)
+        n = len(sent)
+        time.sleep(wire["sleep"])
+        failing = wire["fail"].pop(0) if wire["fail"] else None
+        if failing == "timeout":
+            raise httpx2.ReadTimeout("fake read timeout", request=request)
+        if failing:
+            return httpx2.Response(failing, headers={"request-id": f"req_{n}"},
+                                   json={"type": "error", "error": {
+                                       "type": "overloaded_error", "message": "busy"}})
+        return httpx2.Response(200, headers={"request-id": f"req_{n}"},
+                               json=reply(json.loads(request.content)))
+
+    httpx2.HTTPTransport.handle_request = fake_wire
+    dot = types.ModuleType("dotenv")
+    dot.load_dotenv = lambda *a, **k: None
+    saved_mods = {"dotenv": sys.modules.get("dotenv")}
+    saved_key = os.environ.get("ANTHROPIC_API_KEY")
+    sys.modules["dotenv"] = dot
+    os.environ["ANTHROPIC_API_KEY"] = "fake-not-a-key"
+    log = logging.getLogger(S._SDK_LOGGER)
+    saved_log = (log.level, list(log.handlers))
+    S._CLIENT, S._LIVE = None, None
+
+    def last_cost():
+        return R._intel_ro().execute(
+            "SELECT purpose, duration_ms, first_token_ms, attempts, retry_reasons, "
+            "request_id, target_id FROM cost_log ORDER BY rowid DESC LIMIT 1").fetchone()
+
+    def lines():
+        if not S.TRACE_LOG.exists():
+            return []
+        return [json.loads(x) for x in S.TRACE_LOG.read_text().splitlines()]
+
+    try:
+        S.new_conversation()
+        # --- the pass line: 2 s per attempt, one retryable 529 ----------------------
+        wire.update(sleep=2.0, fail=[529])
+        t0 = time.monotonic()
+        ev = run(S.ask("Did the repo rate go up?"))
+        wall = time.monotonic() - t0
+        tr = S.LAST_TRACE
+        a = ev[-1]["answer"]
+        check("[trace] the stream is unchanged by the trace",
+              [e["type"] for e in ev], ["results", "sentence", "sentence", "done"])
+        check("[trace] the fake wire really took two 2 s attempts", wall >= 4.0, True)
+        check("[trace] >= 90% of the wall time is named by phase",
+              tr["named_share"] >= 0.90, True)
+        check("[trace] attempts = 2, the reason recorded",
+              (tr["attempts"], tr["retry_reasons"]), (2, ["status 529"]))
+        check("[trace] the writer call holds both attempts and the wait",
+              tr["phases_ms"]["writer_call"] >= 4000, True)
+        check("[trace] search and embed are named", {"search", "embed"} <= set(tr["phases_ms"]),
+              True)
+        row = last_cost()
+        check("[trace] cost_log row: attempts, reasons, answering request id, target",
+              (row[0], row[3], json.loads(row[4]), row[5], row[6]),
+              ("ask", 2, ["status 529"], "req_2", a["answer_id"]))
+        check("[trace] cost_log row: duration_ms covers both attempts", row[1] >= 4000, True)
+        check("[trace] cost_log row: first_token_ms NULL (nothing is streamed)", row[2], None)
+        check("[trace] first_sentence_ms is set and <= total",
+              tr["first_sentence_ms"] is not None and
+              tr["first_sentence_ms"] <= tr["total_ms"], True)
+        check("[trace] one line in the trace log, same numbers",
+              [(x["action"], x["attempts"], x["ids"].get("answer_id")) for x in lines()],
+              [("ask", 2, a["answer_id"])])
+        check("[trace] the line names the request ids", lines()[-1]["request_ids"], ["req_2"])
+
+        # --- a timeout attempt -------------------------------------------------------
+        wire.update(sleep=0.0, fail=["timeout"])
+        run(S.ask("What did the banks do on rates?"))
+        check("[trace] a timed-out attempt is recorded as 'timeout'",
+              (S.LAST_TRACE["attempts"], S.LAST_TRACE["retry_reasons"],
+               json.loads(last_cost()[4])), (2, ["timeout"], ["timeout"]))
+
+        # --- resumed on different threads, as the app's thread pool does -------------
+        wire.update(sleep=0.3, fail=[])
+        gen = S.ask("Did the repo rate go up again?")
+        got = []
+
+        def step():
+            try:
+                got.append(next(gen))
+            except StopIteration:
+                got.append(None)
+        while not got or got[-1] is not None:
+            th = threading.Thread(target=step)
+            th.start()
+            th.join()
+        check("[trace] a stream resumed on other threads: same events",
+              [e["type"] for e in got[:-1]], ["results", "sentence", "sentence", "done"])
+        check("[trace] ... still names >= 90% of its time",
+              S.LAST_TRACE["named_share"] >= 0.90, True)
+        check("[trace] ... and its cost row still names its answer",
+              last_cost()[6], got[-2]["answer"]["answer_id"])
+
+        # --- the other three paid actions (a 0.3 s wire: a few-ms call would measure
+        # the clock's resolution, not the phases) ----------------------------------
+        wire.update(sleep=0.3, fail=[])
+        first = a["answer_id"]
+        run(S.think_harder(first))
+        check("[trace] think_harder traced; its cost row names the PARENT answer",
+              (S.LAST_TRACE["action"], last_cost()[0], last_cost()[6]),
+              ("think_harder", "think_harder", first))
+        S.ask_background(first)
+        check("[trace] ask_background traced; its cost row names the answer",
+              (S.LAST_TRACE["action"], last_cost()[0], last_cost()[6]),
+              ("ask_background", "ask_background", first))
+        mode["v"] = "rain"
+        S.suggest_connections("g1")
+        check("[trace] suggest_connections traced; its cost row names the story",
+              (S.LAST_TRACE["action"], last_cost()[0], last_cost()[6]),
+              ("suggest_connections", "suggest", "g1"))
+        check("[trace] every action named >= 90% of its time",
+              all(x["named_share"] >= 0.90 for x in lines()), True)
+        check("[trace] one line per paid action, in order",
+              [x["action"] for x in lines()],
+              ["ask", "ask", "ask", "think_harder", "ask_background", "suggest_connections"])
+
+        # --- where lines are NOT written ---------------------------------------------
+        n = len(lines())
+        S.REAL_INTEL_DB = Path(tmp) / "elsewhere.db"            # a copy, not "the file"
+        mode["v"] = "repo"
+        run(S.ask("Did the repo rate go up, on a copy?"))
+        check("[trace] the real client on a copy writes no trace line", len(lines()), n)
+        S.REAL_INTEL_DB = Path(intel).resolve()
+        # A fake client aimed at "the real file" is refused by the write guard before
+        # any row or line could exist, so the fake rule is checked on `_finish` itself.
+        S._CLIENT = Fake(GOOD)
+        tr = S._Trace("ask", {})
+        tr.calls.append({"attempts": 1, "retry_reasons": [], "request_id": None})
+        S._finish(tr)
+        check("[trace] a fake client writes no trace line, even for the real file",
+              len(lines()), n)
+        S.REAL_INTEL_DB = Path(tmp) / "elsewhere.db"
+        run(S.ask("Did the repo rate go up, with a fake?"))
+        check("[trace] each fake call counts as 1 attempt, no request id",
+              ({c["attempts"] for c in S.LAST_TRACE["calls"]}, last_cost()[3],
+               last_cost()[5]), ({1}, 1, None))
+        S._CLIENT = None
+    finally:
+        S._CLIENT, S._LIVE = None, None
+        R.close_all()
+        (S.NEWS_DB, S.INTEL_DB, S.SEARCH_DB, S.embed_query, S.REAL_INTEL_DB, S.TRACE_LOG,
+         httpx2.HTTPTransport.handle_request) = saved
+        log.setLevel(saved_log[0])
+        log.handlers[:] = saved_log[1]
+        for m, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(m, None)
+            else:
+                sys.modules[m] = v
+        if saved_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = saved_key
+        for k in ("P3_READER_INTEL_DB", "P3_READER_NEWS_DB", "P3_READER_WORK"):
+            os.environ.pop(k, None)
+
+
 def followup_real():
     """Contract §8's pass line on the REAL archive, read-only: after the Musk question
     (Q10), the follow-up "what did the government say?" -- searched as `ask()` searches
@@ -1121,6 +1343,8 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         suggest_mock(tmp)
     shapes_mock()
+    with tempfile.TemporaryDirectory() as tmp:
+        trace_mock(tmp)
     if mock_only:
         print("the real archive: SKIPPED (--mock)")
     elif not (data / "search.db").exists():

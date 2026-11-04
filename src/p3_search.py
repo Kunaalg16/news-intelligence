@@ -60,10 +60,14 @@ HOW TO RUN (from ~/news-intel; the service is optional)
 """
 
 import argparse
+import contextlib
 import json
+import logging
 import re
 import sqlite3
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -662,7 +666,8 @@ def search(query, filters=None, sort="relevance", limit=20, news=None, intel=Non
             fts = fts_rank(scon, words, allowed, per) if "fts" in indexes else []
             vec = []
             if "vector" in indexes:
-                qvec = (embed or embed_query)(query)
+                with _phase("embed"):
+                    qvec = (embed or embed_query)(query)
                 if qvec is None:
                     # The service is not up. Say so in the result rather than failing or
                     # quietly returning word-only answers as if nothing were missing.
@@ -1007,6 +1012,7 @@ def _live_client():
     load_dotenv(Path.home() / ".config" / "news-intel" / ".env")
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise KeyMissing("no ANTHROPIC_API_KEY in the project's env file")
+    _watch_sdk()                      # reads the SDK's log records; sends nothing new
     sdk = anthropic.Anthropic(max_retries=KNOBS["live_max_retries"],
                               timeout=KNOBS["live_timeout_s"])
 
@@ -1144,33 +1150,275 @@ def price(model_id, in_tokens, out_tokens):
     return round(in_tokens / 1e6 * p_in + out_tokens / 1e6 * p_out, 6)
 
 
-def _log_cost(purpose, model_id, in_tokens, out_tokens, note=None):
+def _log_cost(purpose, model_id, in_tokens, out_tokens, note=None, timing=None):
     """One `cost_log` row per paid call, priced for ITS model, written before anything
     else can check the cap. Returns the row's `usd`, which is what the answer's own cost
-    line adds up -- so the two are the same numbers, not two computations (§9)."""
+    line adds up -- so the two are the same numbers, not two computations (§9).
+    `timing` (schema 3, TC-5) is the call's own numbers from `_timing`."""
     usd = price(model_id, in_tokens, out_tokens)
+    t = timing or {}
+    tr = getattr(_TLS, "trace", None)
     con = _writer()
     con.execute("INSERT INTO cost_log (at, purpose, model, in_tokens, out_tokens, usd, "
-                "visit_id, note) VALUES (?,?,?,?,?,?,?,?)",
-                (_R()._now(), purpose, model_id, in_tokens, out_tokens, usd, None, note))
+                "visit_id, note, duration_ms, first_token_ms, attempts, retry_reasons, "
+                "request_id, target_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_R()._now(), purpose, model_id, in_tokens, out_tokens, usd, None, note,
+                 t.get("duration_ms"), t.get("first_token_ms"), t.get("attempts"),
+                 json.dumps(t["retry_reasons"]) if "retry_reasons" in t else None,
+                 t.get("request_id"), tr.target if tr else None))
     con.commit()
     return usd
 
 
 def _call(purpose, model_id, prompt, system, schema, spent, note=None):
     """One model call, logged whatever happens to its answer. `spent` collects the
-    `usd` of every row written, including a reply that was charged and unusable."""
+    `usd` of every row written, including a reply that was charged and unusable.
+    Its time, attempts and request id go on its `cost_log` row and into the trace."""
+    _TLS.attempts, t0 = [], time.monotonic()
     try:
-        reply, in_tok, out_tok = _client()(prompt=prompt, system=system, purpose=purpose,
-                                           model=model_id, schema=schema)
+        try:
+            reply, in_tok, out_tok = _client()(prompt=prompt, system=system,
+                                               purpose=purpose, model=model_id,
+                                               schema=schema)
+        finally:
+            timing = _timing(t0)
     except MalformedReply as e:
-        e.usd = _log_cost(purpose, model_id, e.in_tokens, e.out_tokens, note)
+        _note_call(purpose, note, timing, "malformed")
+        e.usd = _log_cost(purpose, model_id, e.in_tokens, e.out_tokens, note, timing)
         spent.append(e.usd)
         raise
-    spent.append(_log_cost(purpose, model_id, in_tok, out_tok, note))
+    except Exception as e:                                    # noqa: BLE001
+        _note_call(purpose, note, timing, _reason_of(e))
+        raise
+    _note_call(purpose, note, timing, "ok")
+    spent.append(_log_cost(purpose, model_id, in_tok, out_tok, note, timing))
     if not isinstance(reply, dict):
         raise MalformedReply()
     return reply
+
+
+# ================================================================ TRACING (FP-1, TC-5)
+#
+# Where a paid action's time goes (latency attribution). Each traced action -- `ask`,
+# `think_harder`, `ask_background`, `suggest_connections` -- carries one `_Trace`, and
+# the code it runs marks named PHASES with a monotonic clock. Phase times are
+# EXCLUSIVE: a phase inside another (`embed` inside `search`, `summary_call` inside
+# `memory`) is subtracted from its parent, so the phases add up to at most the wall
+# time, and what is left over is the time no phase names.
+#
+# The SDK's attempts are read from its OWN log records (logger `anthropic._base_client`,
+# SDK 1.7.0): "Sending HTTP Request", "HTTP Response ... <status>", "request_id: ...",
+# "Retrying request ... in N seconds", "Encountered httpx2.TimeoutException". Reading
+# them changes nothing that is sent. The SDK's middleware would have given the same
+# facts but adds a header to every request (FP-0, A4), so it is not used. Nothing is
+# streamed, so a call has no first token: `first_token_ms` stays NULL until a purpose
+# streams, and an attempt's time is request sent -> whole reply read.
+#
+# The trace follows the THREAD that runs the code, not the generator: the app resumes a
+# streaming generator on whichever pool thread is free, so `_traced_stream` sets the
+# current trace again on every resume and clears it before handing the event out.
+#
+# One JSON line per paid action goes to `data/logs/k3_trace.log`, and only for the real
+# client on the real `data/intel.db`: a fake model's timings mean nothing, and a suite
+# working on a copy must not write there.
+
+TRACE_LOG = ROOT / "data" / "logs" / "k3_trace.log"
+LAST_TRACE = None                  # the last finished trace (any client), for the tests
+_TLS = threading.local()
+_TRACE_LOCK = threading.Lock()
+_SDK_LOGGER = "anthropic._base_client"
+
+
+class _Trace:
+    def __init__(self, action, ids, target=None):
+        self.action, self.ids, self.target = action, dict(ids), target
+        self.at = _R()._now()
+        self.t0 = time.monotonic()
+        self.phases, self.stack, self.calls = {}, [], []
+        self.first_sentence_ms, self.error = None, None
+
+    def ms(self):
+        return round((time.monotonic() - self.t0) * 1000)
+
+    def add(self, name, seconds):
+        self.phases[name] = self.phases.get(name, 0.0) + seconds
+
+    def record(self):
+        took = time.monotonic() - self.t0
+        phases = {k: round(v * 1000) for k, v in self.phases.items()}
+        # the share from the unrounded seconds: on a call of a few ms, whole-ms rounding
+        # of each phase alone would read as a quarter of the time unnamed
+        named = sum(self.phases.values()) / took if took else 1.0
+        return {"at": self.at, "action": self.action, "ids": self.ids,
+                "target_id": self.target, "total_ms": round(took * 1000),
+                "phases_ms": phases, "named_share": round(min(named, 1.0), 3),
+                "first_sentence_ms": self.first_sentence_ms,
+                "attempts": sum(c["attempts"] for c in self.calls),
+                "retry_reasons": [r for c in self.calls for r in c["retry_reasons"]],
+                "request_ids": [c["request_id"] for c in self.calls if c["request_id"]],
+                "calls": self.calls, "error": self.error, "live": _CLIENT is None}
+
+
+@contextlib.contextmanager
+def _phase(name):
+    """Time the block as phase `name` of the trace open on this thread (no trace: no-op).
+    Never put a `yield` of the event stream inside one: the reader's time between events
+    is the wrapper's `consumer` phase, not this block's."""
+    tr = getattr(_TLS, "trace", None)
+    if tr is None:
+        yield
+        return
+    frame = [name, time.monotonic(), 0.0]          # name, start, time spent in children
+    tr.stack.append(frame)
+    try:
+        yield
+    finally:
+        tr.stack.pop()
+        took = time.monotonic() - frame[1]
+        tr.add(name, took - frame[2])
+        if tr.stack:
+            tr.stack[-1][2] += took
+
+
+def _set_target(target_id):
+    """The id this action's `cost_log` rows are paid for (known only once it starts)."""
+    tr = getattr(_TLS, "trace", None)
+    if tr is not None:
+        tr.target = target_id
+
+
+def _traced_stream(action, ids, events, target=None):
+    """`events`, a generator, passed through unchanged, with its trace around it."""
+    tr = _Trace(action, ids, target)
+    try:
+        while True:
+            prev, _TLS.trace = getattr(_TLS, "trace", None), tr
+            try:
+                event = next(events)
+            except StopIteration:
+                return
+            finally:
+                _TLS.trace = prev
+            kind = event.get("type")
+            if kind == "sentence" and tr.first_sentence_ms is None:
+                tr.first_sentence_ms = tr.ms()
+            elif kind == "error":
+                tr.error = event.get("reason") or event.get("code")
+            elif kind == "done":
+                tr.ids.update(answer_id=event["answer"].get("answer_id"),
+                              conversation_id=event["answer"].get("conversation_id"))
+            handed = time.monotonic()
+            yield event
+            tr.add("consumer", time.monotonic() - handed)
+    except Exception as e:
+        tr.error = tr.error or type(e).__name__
+        raise
+    finally:
+        events.close()
+        _finish(tr)
+
+
+def _traced_call(action, ids, target, fn, *args):
+    """`fn(*args)`, an action that returns one object, with its trace around it."""
+    tr = _Trace(action, ids, target)
+    prev, _TLS.trace = getattr(_TLS, "trace", None), tr
+    try:
+        return fn(*args)
+    except Exception as e:
+        tr.error = type(e).__name__
+        raise
+    finally:
+        _TLS.trace = prev
+        _finish(tr)
+
+
+def _finish(tr):
+    global LAST_TRACE
+    LAST_TRACE = rec = tr.record()
+    # Written for the real model acting on the real file only (the write guard's own
+    # test): a suite or a scratch script on a copy never adds lines to the live log.
+    if not tr.calls or _CLIENT is not None or \
+            Path(_R()._intel_path()).resolve() != REAL_INTEL_DB:
+        return
+    try:
+        with _TRACE_LOCK:
+            TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(TRACE_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+    except OSError as e:
+        print(f"k3 trace line not written: {e}", file=sys.stderr)
+
+
+class _SdkAttempts(logging.Handler):
+    """The SDK's log records -> one dict per HTTP attempt of the model call open on this
+    thread (`_TLS.attempts`, set by `_call`). Never raises: a record it cannot read must
+    not break a paid call. Reads only status, request id and wait; nothing is kept of
+    the request itself."""
+
+    def emit(self, record):
+        try:
+            got = getattr(_TLS, "attempts", None)
+            if got is None:
+                return
+            msg, args, now = str(record.msg), record.args or (), time.monotonic()
+            if msg.startswith("Sending HTTP Request"):
+                got.append({"sent": now, "done": None, "status": None, "error": None,
+                            "request_id": None, "wait_s": None})
+            elif not got:
+                return
+            elif msg.startswith("HTTP Response"):
+                got[-1].update(done=now, status=int(args[2]))
+            elif msg.startswith("request_id"):
+                got[-1]["request_id"] = args[0]
+            elif msg.startswith("Encountered httpx2.TimeoutException"):
+                got[-1].update(done=now, error="timeout")
+            elif msg.startswith("Encountered Exception"):
+                got[-1].update(done=now, error="connection")
+            elif msg.startswith("Retrying request"):
+                got[-1]["wait_s"] = float(args[1])
+        except Exception:                                     # noqa: BLE001
+            pass
+
+
+def _watch_sdk():
+    """Attach the attempt reader once. DEBUG on this one SDK logger only: nothing in
+    src/ configures the root logger, so the records reach this handler and nowhere else."""
+    log = logging.getLogger(_SDK_LOGGER)
+    if not any(isinstance(h, _SdkAttempts) for h in log.handlers):
+        log.addHandler(_SdkAttempts())
+    log.setLevel(logging.DEBUG)
+
+
+def _timing(t0):
+    """The model call opened at `t0`, in `cost_log`'s schema-3 terms. With no SDK
+    records (a fake client) the one call made counts as one attempt."""
+    got = getattr(_TLS, "attempts", None) or []
+    _TLS.attempts = None
+    end = time.monotonic()
+    tries = [{"ms": round(((a["done"] or end) - a["sent"]) * 1000),
+              "status": a["status"], "error": a["error"], "request_id": a["request_id"],
+              "wait_ms": None if a["wait_s"] is None else round(a["wait_s"] * 1000)}
+             for a in got]
+    failed = [t["error"] or f"status {t['status']}" for t in tries
+              if t["error"] or not (t["status"] and 200 <= t["status"] < 300)]
+    answered = [t["request_id"] for t in tries if t["status"] and 200 <= t["status"] < 300]
+    return {"duration_ms": round((end - t0) * 1000), "first_token_ms": None,
+            "attempts": len(tries) or 1, "retry_reasons": failed,
+            "request_id": (answered or [t["request_id"] for t in tries
+                                        if t["request_id"]] or [None])[-1],
+            "tries": tries}
+
+
+def _note_call(purpose, note, timing, outcome):
+    tr = getattr(_TLS, "trace", None)
+    if tr is None:
+        return
+    tr.calls.append({"purpose": purpose, "note": note,
+                     "phase": tr.stack[-1][0] if tr.stack else None,
+                     "ms": timing["duration_ms"], "attempts": timing["attempts"],
+                     "retry_reasons": timing["retry_reasons"],
+                     "request_id": timing["request_id"], "tries": timing["tries"],
+                     "outcome": outcome})
 
 
 def _cap_blocks(kind):
@@ -1332,8 +1580,9 @@ def _memory(cid, spent, before=None):
             text = cached["text"]
         else:
             record = "\n\n".join(_exchange_text(p) for p in older)
-            reply = _call("ask", MODEL_IDS["haiku"], record, SUMMARY_RULES, "text", spent,
-                          note=SUMMARY_NOTE)
+            with _phase("summary_call"):
+                reply = _call("ask", MODEL_IDS["haiku"], record, SUMMARY_RULES, "text",
+                              spent, note=SUMMARY_NOTE)
             text = (reply.get("text") or "").strip()
             con = _writer()
             con.execute("UPDATE conversations SET summary = ? WHERE conversation_id = ?",
@@ -1450,9 +1699,12 @@ def _write(question, chosen, memory, model_key, purpose, spent):
     prompt, kept, attempts, drops = base, [], 0, 0
     for attempt in range(1 + KNOBS["check_retries"]):
         attempts = attempt + 1
-        reply = _call(purpose, MODEL_IDS[model_key], prompt, ASK_RULES, "sentences", spent)
-        kept, cite_drops = D.check_citations(reply.get("sentences") or [], set(by_id))
-        kept, number_drops = D.check_sentence_numbers(kept, by_id)
+        with _phase("writer_call" if attempt == 0 else "check_retry_call"):
+            reply = _call(purpose, MODEL_IDS[model_key], prompt, ASK_RULES, "sentences",
+                          spent)
+        with _phase("checks"):
+            kept, cite_drops = D.check_citations(reply.get("sentences") or [], set(by_id))
+            kept, number_drops = D.check_sentence_numbers(kept, by_id)
         drops += len(cite_drops) + len(number_drops)
         problems = [d["reason"] for d in cite_drops + number_drops]
         if len(kept) >= KNOBS["answer_min_sentences"] or not problems:
@@ -1493,24 +1745,33 @@ def _scope_filters(scope):
 def ask(question, scope=None, conversation_id=None):
     """Answer a question from the archive (contract §7). A GENERATOR of events:
     `results` first, then checked `sentence`s, then `done` -- or `error` instead of
-    `done`, never a raise. An `empty` verdict makes NO model call."""
+    `done`, never a raise. An `empty` verdict makes NO model call. Traced (FP-1)."""
+    yield from _traced_stream("ask", {}, _ask(question, scope, conversation_id))
+
+
+def _ask(question, scope, conversation_id):
     R = _R()
+    aid = R._new_id("ans")
+    _set_target(aid)
     cid = _conversation_id(conversation_id)
     filters, limit = _scope_filters(scope), KNOBS["ask_search_limit"]
     ranked = []
-    result = search(question, filters=filters, limit=limit, ranked_out=ranked)
-    query = _search_query(question, cid)
-    if query != question and result["verdict"] != "empty":
-        # A short follow-up is searched again WITH the previous question -- but only
-        # when it is about something the archive has. Carried unconditionally, "Who won
-        # the Melbourne Cup?" after an EPFO question would find EPFO and be answered.
-        ranked = []
-        result = search(query, filters=filters, limit=limit, ranked_out=ranked)
-        result["search_query"] = query
+    with _phase("search"):
+        result = search(question, filters=filters, limit=limit, ranked_out=ranked)
+        query = _search_query(question, cid)
+        if query != question and result["verdict"] != "empty":
+            # A short follow-up is searched again WITH the previous question -- but only
+            # when it is about something the archive has. Carried unconditionally, "Who
+            # won the Melbourne Cup?" after an EPFO question would find EPFO and be
+            # answered.
+            ranked = []
+            result = search(query, filters=filters, limit=limit, ranked_out=ranked)
+            result["search_query"] = query
     result["query"] = question
     yield {"type": "results", "search": result}
 
-    blocked = _cap_blocks("ask")
+    with _phase("cap"):
+        blocked = _cap_blocks("ask")
     if blocked:
         yield _cap_event(blocked)
         return
@@ -1525,7 +1786,8 @@ def ask(question, scope=None, conversation_id=None):
     spent, sentences, attempts, drops = [], [], 0, 0
     if not empty:
         try:
-            memory = _memory(cid, spent)
+            with _phase("memory"):
+                memory = _memory(cid, spent)
             sentences, attempts, drops = _write(question, chosen, memory, "haiku", "ask",
                                                 spent)
         except Exception as e:                                # noqa: BLE001
@@ -1533,11 +1795,22 @@ def ask(question, scope=None, conversation_id=None):
             # charged is already in cost_log via `_call`.
             yield _error_event(_reason_of(e), e)
             return
+    with _phase("store"):
+        answer = _ask_answer(R, aid, cid, question, scope, result, chosen, sentences,
+                             empty, spent, attempts, drops)
+    for s in sentences:
+        yield {"type": "sentence", "text": s["text"], "cites": s["cites"]}
+    yield {"type": "done", "answer": answer}
+
+
+def _ask_answer(R, aid, cid, question, scope, result, chosen, sentences, empty, spent,
+                attempts, drops):
+    """The stored answer object of one `ask()`, written as its turn."""
     verdict = result["verdict"] if sentences or empty else "empty"
     cited = sorted({h for s in sentences for h in s["cites"]})
     story_of = {p["text_hash"]: p["story_id"] for p in chosen}
     answer = {
-        "answer_id": R._new_id("ans"), "conversation_id": cid, "parent_answer_id": None,
+        "answer_id": aid, "conversation_id": cid, "parent_answer_id": None,
         "question": question, "scope": dict(scope or {}),
         "model": "haiku", "model_id": MODEL_IDS["haiku"],
         "verdict": verdict, "found_count": result["total_articles"],
@@ -1555,17 +1828,23 @@ def ask(question, scope=None, conversation_id=None):
         "fixture": False,
     }
     _add_turn(cid, "answer", answer)
-    for s in sentences:
-        yield {"type": "sentence", "text": s["text"], "cites": s["cites"]}
-    yield {"type": "done", "answer": answer}
+    return answer
 
 
 def think_harder(answer_id):
     """The SAME passages read again by Sonnet (contract §7): no `results` event, no new
     search, the parent's `passage_set_id`. One-shot -- nothing here is remembered, so
-    the next `ask()` is Haiku again (`think_harder_sticky` = False)."""
-    _tid, cid, parent = _find_answer(answer_id)
-    blocked = _cap_blocks("think_harder")
+    the next `ask()` is Haiku again (`think_harder_sticky` = False). Traced (FP-1); its
+    `cost_log` rows name the PARENT answer, the id a second press would repeat."""
+    yield from _traced_stream("think_harder", {"parent_answer_id": answer_id},
+                              _think_harder(answer_id), target=answer_id)
+
+
+def _think_harder(answer_id):
+    with _phase("load"):
+        _tid, cid, parent = _find_answer(answer_id)
+    with _phase("cap"):
+        blocked = _cap_blocks("think_harder")
     if blocked:
         yield _cap_event(blocked)
         return
@@ -1575,26 +1854,29 @@ def think_harder(answer_id):
         yield _error_event("model_busy" if switch is True else
                            switch if switch in ERROR_RETRYABLE else "other")
         return
-    chosen = _load_passage_set(parent["passage_set_id"])
+    with _phase("load"):
+        chosen = _load_passage_set(parent["passage_set_id"])
     spent, sentences, attempts, drops = [], [], 0, 0
     if chosen:
         try:
-            memory = _memory(cid, spent, before=answer_id)
+            with _phase("memory"):
+                memory = _memory(cid, spent, before=answer_id)
             sentences, attempts, drops = _write(parent["question"], chosen, memory,
                                                 "sonnet", "think_harder", spent)
         except Exception as e:                                # noqa: BLE001
             yield _error_event(_reason_of(e), e)
             return
-    cited = sorted({h for s in sentences for h in s["cites"]})
-    cited_stories = {p["story_id"] for p in chosen if p["text_hash"] in cited}
-    answer = dict(parent, answer_id=R._new_id("ans"), parent_answer_id=answer_id,
-                  model="sonnet", model_id=MODEL_IDS["sonnet"], sentences=sentences,
-                  background=None, cited=cited,
-                  results=[dict(r, mark="cited" if r["story_id"] in cited_stories
-                                else "found") for r in parent.get("results") or []],
-                  passage_count=len(chosen), cost_usd=round(sum(spent), 6),
-                  attempts=attempts, drops=drops, at=R._now())
-    _add_turn(cid, "answer", answer)
+    with _phase("store"):
+        cited = sorted({h for s in sentences for h in s["cites"]})
+        cited_stories = {p["story_id"] for p in chosen if p["text_hash"] in cited}
+        answer = dict(parent, answer_id=R._new_id("ans"), parent_answer_id=answer_id,
+                      model="sonnet", model_id=MODEL_IDS["sonnet"], sentences=sentences,
+                      background=None, cited=cited,
+                      results=[dict(r, mark="cited" if r["story_id"] in cited_stories
+                                    else "found") for r in parent.get("results") or []],
+                      passage_count=len(chosen), cost_usd=round(sum(spent), 6),
+                      attempts=attempts, drops=drops, at=R._now())
+        _add_turn(cid, "answer", answer)
     for s in sentences:
         yield {"type": "sentence", "text": s["text"], "cites": s["cites"]}
     yield {"type": "done", "answer": answer}
@@ -1604,28 +1886,39 @@ def ask_background(answer_id):
     """A paragraph from the model's own knowledge, for ANY answer without one (v2.1).
     An answer that already has one -> ValueError. A cap hit or a failed call is also a
     ValueError: this route returns an object, not a stream, so the reason has to travel
-    as the error's message (the app answers 400 with it, not 500)."""
-    tid, cid, answer = _find_answer(answer_id)
+    as the error's message (the app answers 400 with it, not 500). Traced (FP-1)."""
+    return _traced_call("ask_background", {"answer_id": answer_id}, answer_id,
+                        _ask_background, answer_id)
+
+
+def _ask_background(answer_id):
+    with _phase("load"):
+        tid, cid, answer = _find_answer(answer_id)
     if answer.get("background"):
         raise ValueError("that answer already has a background line")
-    blocked = _cap_blocks("background")
+    with _phase("cap"):
+        blocked = _cap_blocks("background")
     if blocked:
         raise ValueError(_cap_event(blocked)["message"])
     spent = []
     try:
-        reply = _call("ask_background", MODEL_IDS["haiku"],
-                      f"QUESTION: {answer['question']}", BACKGROUND_RULES, "text", spent)
+        with _phase("writer_call"):
+            reply = _call("ask_background", MODEL_IDS["haiku"],
+                          f"QUESTION: {answer['question']}", BACKGROUND_RULES, "text",
+                          spent)
     except Exception as e:                                    # noqa: BLE001
         raise ValueError(f"background not written: {ERROR_MESSAGES[_reason_of(e)]}") from e
     text = (reply.get("text") or "").strip()
     cost = round(sum(spent), 6)
     answer["background"] = text
     R = _R()
-    con = _writer()
-    con.execute("UPDATE turns SET payload = ? WHERE turn_id = ?", (json.dumps(answer), tid))
-    con.commit()
-    _add_turn(cid, "background", {"answer_id": answer_id, "text": text, "cost_usd": cost,
-                                  "at": R._now()})
+    with _phase("store"):
+        con = _writer()
+        con.execute("UPDATE turns SET payload = ? WHERE turn_id = ?",
+                    (json.dumps(answer), tid))
+        con.commit()
+        _add_turn(cid, "background", {"answer_id": answer_id, "text": text,
+                                      "cost_usd": cost, "at": R._now()})
     return {"answer_id": answer_id, "text": text, "model": "haiku",
             "model_id": MODEL_IDS["haiku"], "cost_usd": cost, "fixture": False}
 
@@ -1676,23 +1969,33 @@ def suggest_connections(story_id, text_hashes=None):
     """Other stories that may belong with this one (contract §8): 0-5, each clearing
     the relevance bar, never padded, with one Haiku `why` each. Excludes the story and
     everything in its thread (in search a story IS its thread root) and the reader's own
-    links. WRITES only `suggest_cache` and `cost_log` -- never `links` or any K2 table."""
+    links. WRITES only `suggest_cache` and `cost_log` -- never `links` or any K2 table.
+    Traced (FP-1); its `cost_log` row names the story."""
+    return _traced_call("suggest_connections", {"story_id": story_id}, story_id,
+                        _suggest_connections, story_id, text_hashes)
+
+
+def _suggest_connections(story_id, text_hashes):
     R = _R()
-    row, top, query = _story_seed(story_id)
+    with _phase("seed"):
+        row, top, query = _story_seed(story_id)
     hashes = sorted(text_hashes or row["seat_of_hash"])
     key = ST.fingerprint(hashes)
     out = {"story_id": story_id, "model": "haiku", "model_id": MODEL_IDS["haiku"],
            "fixture": False}
-    hit = R._intel_ro().execute(
-        "SELECT suggestions, verdict FROM suggest_cache WHERE fingerprint = ? AND "
-        "model = ? AND prompt_version = ?",
-        (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION)).fetchone()
+    with _phase("cache"):
+        hit = R._intel_ro().execute(
+            "SELECT suggestions, verdict FROM suggest_cache WHERE fingerprint = ? AND "
+            "model = ? AND prompt_version = ?",
+            (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION)).fetchone()
     if hit:
         return dict(out, suggestions=json.loads(hit[0]), verdict=hit[1], cost_usd=0.0)
 
-    exclude = {story_id} | {link["target_story_id"] for link in R.list_user_links(hashes)}
-    found = search(query, filters={"exclude_story_ids": sorted(exclude)},
-                   limit=KNOBS["suggest_candidates"])
+    with _phase("search"):
+        exclude = {story_id} | {link["target_story_id"]
+                                for link in R.list_user_links(hashes)}
+        found = search(query, filters={"exclude_story_ids": sorted(exclude)},
+                       limit=KNOBS["suggest_candidates"])
     picks = [s for s in found["stories"]
              if s.get("similarity") is not None
              and s["similarity"] >= KNOBS["suggest_min_similarity"]][:KNOBS["suggest_max"]]
@@ -1703,7 +2006,8 @@ def suggest_connections(story_id, text_hashes=None):
         # so "nothing related" today is worth asking again tomorrow.
         return dict(out, suggestions=[], verdict=found["verdict"], cost_usd=0.0)
 
-    blocked = _cap_blocks("suggest")
+    with _phase("cap"):
+        blocked = _cap_blocks("suggest")
     if blocked:
         raise ValueError(_cap_event(blocked)["message"])
     record = [f'STORY: {row["headline"]}\n{top.get("summary") or ""}', "CANDIDATES:"]
@@ -1713,8 +2017,9 @@ def suggest_connections(story_id, text_hashes=None):
                       f'{lead}\n</candidate>')
     spent = []
     try:
-        reply = _call("suggest", MODEL_IDS["haiku"], "\n\n".join(record), SUGGEST_RULES,
-                      "whys", spent, note=story_id)
+        with _phase("writer_call"):
+            reply = _call("suggest", MODEL_IDS["haiku"], "\n\n".join(record),
+                          SUGGEST_RULES, "whys", spent, note=story_id)
     except Exception as e:                                    # noqa: BLE001
         raise ValueError(f"suggestions not written: {ERROR_MESSAGES[_reason_of(e)]}") from e
     whys = {w.get("story_id"): (w.get("why") or "").strip()
@@ -1723,12 +2028,14 @@ def suggest_connections(story_id, text_hashes=None):
                     "dates": s["dates"], "papers": s["papers"],
                     "why": whys[s["story_id"]], "articles": s["articles"]}
                    for s in picks if whys.get(s["story_id"])]
-    con = _writer()
-    con.execute("INSERT OR REPLACE INTO suggest_cache (fingerprint, model, prompt_version, "
-                "suggestions, verdict, created_at) VALUES (?,?,?,?,?,?)",
-                (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION, json.dumps(suggestions),
-                 found["verdict"], R._now()))
-    con.commit()
+    with _phase("store"):
+        con = _writer()
+        con.execute("INSERT OR REPLACE INTO suggest_cache (fingerprint, model, "
+                    "prompt_version, suggestions, verdict, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (key, MODEL_IDS["haiku"], SUGGEST_PROMPT_VERSION,
+                     json.dumps(suggestions), found["verdict"], R._now()))
+        con.commit()
     return dict(out, suggestions=suggestions, verdict=found["verdict"],
                 cost_usd=round(sum(spent), 6))
 

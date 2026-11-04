@@ -1,6 +1,8 @@
-"""p3_store.py — Phase 3 · K3's tables in `data/intel.db` (K3 schema 2).
+"""p3_store.py — Phase 3 · K3's tables in `data/intel.db` (K3 schema 3).
   v0.1 1 Nov 2026 (K3 B1-2): the nine tables of K3 build brief 1 §B1-2, additive only.
   v0.2 3 Nov 2026 (K3 B2-1): K3 schema 2 — the reader tables reshaped, eight tables added.
+  v0.3 4 Nov 2026 (K3 FP-1): K3 schema 3 — additive: `cost_log` gains the timing of each
+       paid call (TC-5), `turns` gains the hide columns FP-5 needs (one bump, not two).
 
 THE ONE NON-ADDITIVE CHANGE (schema 1 → 2, and why it was allowed exactly once)
   Schema 1's reader tables were never written to; reshaped once (brief 2 of 2 Nov 2026,
@@ -12,6 +14,16 @@ THE ONE NON-ADDITIVE CHANGE (schema 1 → 2, and why it was allowed exactly once
   closed: `migrate_1_to_2` REFUSES to drop a table that holds rows, and says which one.
   From schema 2 on, changes are additive only (§8c) — new tables, new columns, never a
   rewrite — so an older build keeps working against a newer file.
+
+SCHEMA 2 → 3 (additive, 4 Nov 2026)
+  Nine columns, `ADDED_AT_3`, added with `ALTER TABLE … ADD COLUMN` in ONE transaction,
+  so a failure part-way leaves the file at schema 2 with none of them. Existing rows keep
+  NULL in every new column; no row is rewritten. When the file is the real
+  `data/intel.db`, a safety copy is written first to `_work/intel_before_schema3_<date>.db`
+  (SQLite's online backup, so a reader mid-transaction is copied consistently).
+  NOTE for a running app: this module's `open_intel` refuses a file NEWER than its own
+  schema, so an app process still running the schema-2 code fails on its next new
+  connection once another process has migrated the file. Restart the app after pulling.
 
 WHAT IT DOES
   Owns the K3 side of `data/intel.db`: creates its tables if they are missing, hands
@@ -91,7 +103,7 @@ INTEL_DB = ROOT / "data" / "intel.db"
 
 # ---------------------------------------------------------------- KNOBS / versions
 
-K3_SCHEMA_VERSION = 2              # own row, `meta.k3_schema_version`; additive from 2 on
+K3_SCHEMA_VERSION = 3              # own row, `meta.k3_schema_version`; additive from 2 on
 K3_SCHEMA_KEY = "k3_schema_version"
 
 # K2's row and tables. Listed to be left alone: the test checks their row counts are
@@ -118,6 +130,22 @@ K3_TABLES = OWN_TABLES + CACHE_TABLES
 # recreates these and NOTHING else: `visit_records`, both schema-1 caches, `cost_log`
 # (11 rows of real spend) and `viewer_prefs` (already the right shape) are never touched.
 RESHAPED_AT_2 = ("read_state", "boards", "pins", "feedback")
+
+# Schema 3's columns, (table, column, type). Added to an existing schema-2 file by
+# `migrate_2_to_3`; a new file gets them from SCHEMA directly. Kept as one list so the
+# migration and the test name the same nine.
+ADDED_AT_3 = (
+    ("cost_log", "duration_ms", "INTEGER"),     # the whole client call, attempts + waits
+    ("cost_log", "first_token_ms", "INTEGER"),  # NULL while no purpose is streamed
+    ("cost_log", "attempts", "INTEGER"),        # HTTP attempts the SDK made for this row
+    ("cost_log", "retry_reasons", "TEXT"),      # JSON list, one entry per failed attempt
+    ("cost_log", "request_id", "TEXT"),         # the API's id of the attempt that answered
+    ("cost_log", "target_id", "TEXT"),          # what the call was paid for (see p3_search)
+    ("turns", "hidden_at", "TEXT"),             # FP-5: soft delete
+    ("turns", "hidden_by", "TEXT"),             # 'hide' | 'reask'
+    ("turns", "hide_action_id", "TEXT"),        # one id per hide, so Undo reverses one
+)
+SAFETY_COPY_DIR = ROOT / "_work"
 
 # Closed sets, repeated here so a caller can check without parsing the DDL comments.
 CREATED_BY = ("app", "assistant", "claude_mcp")
@@ -294,7 +322,12 @@ CREATE TABLE IF NOT EXISTS cost_log (
     in_tokens INTEGER, out_tokens INTEGER,
     usd REAL,
     visit_id TEXT,
-    note TEXT
+    note TEXT,
+    -- schema 3 (TC-5): where the call's time went. NULL on rows written before it.
+    duration_ms INTEGER, first_token_ms INTEGER, attempts INTEGER,
+    retry_reasons TEXT,               -- JSON list: one reason per failed attempt
+    request_id TEXT,
+    target_id TEXT                    -- answer id, or story id for 'suggest'
 );
 CREATE INDEX IF NOT EXISTS cost_log_at ON cost_log (at);
 
@@ -336,7 +369,10 @@ CREATE TABLE IF NOT EXISTS turns (
     conversation_id TEXT NOT NULL,
     kind TEXT NOT NULL,               -- 'answer' | 'divider' | 'background'
     payload TEXT NOT NULL,            -- JSON: the answer object, or the divider fields
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    -- schema 3 (FP-5): a hidden turn is marked, never deleted, so Undo can restore it
+    hidden_at TEXT, hidden_by TEXT,   -- hidden_by: 'hide' | 'reask'
+    hide_action_id TEXT
 );
 CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, at);
 
@@ -409,13 +445,63 @@ def migrate_1_to_2(con, quiet=False):
     for t in RESHAPED_AT_2:
         con.execute(f"DROP TABLE IF EXISTS {t}")
     con.executescript(SCHEMA)
-    con.execute("UPDATE meta SET value=? WHERE key=?", (str(K3_SCHEMA_VERSION), K3_SCHEMA_KEY))
+    # The tables kept from schema 1 (cost_log among them) are not rebuilt by SCHEMA, so
+    # they still lack schema 3's columns: this step ends at 2 and 2 → 3 follows.
+    con.execute("UPDATE meta SET value='2' WHERE key=?", (K3_SCHEMA_KEY,))
     con.commit()
     if not quiet:
-        print(f"intel.db: K3 schema 1 → {K3_SCHEMA_VERSION} · reshaped "
+        print(f"intel.db: K3 schema 1 → 2 · reshaped "
               f"{', '.join(RESHAPED_AT_2)} (all empty) · added the schema-2 tables · "
               f"K2 tables and K2's schema row untouched")
     return [t for t in K3_TABLES if t not in present]
+
+
+def missing_at_3(con):
+    """The schema-3 columns this file does not have yet, as (table, column, type)."""
+    have = {t: {r[1] for r in con.execute(f"PRAGMA table_info({t})")}
+            for t in {t for t, _c, _ty in ADDED_AT_3}}
+    return [(t, c, ty) for t, c, ty in ADDED_AT_3 if c not in have[t]]
+
+
+def migrate_2_to_3(con, safety_copy=None, quiet=False):
+    """Schema 2 → 3: add the nine columns, all in one transaction, then the version row.
+
+    `safety_copy`, a path, gets a full copy of the file first (the real file only; see
+    `_safety_path`). A column already present is skipped, so a file some earlier build
+    half-migrated still ends complete. K2's tables and K2's schema row are never named.
+    """
+    if safety_copy is not None and not Path(safety_copy).exists():
+        Path(safety_copy).parent.mkdir(parents=True, exist_ok=True)
+        dest = sqlite3.connect(safety_copy)
+        con.backup(dest)
+        dest.close()
+    con.commit()
+    # IMMEDIATE takes the write lock BEFORE the columns are read: two processes opening
+    # the file at once (the app and a script) then migrate one after the other, and the
+    # second finds nothing left to add instead of failing on a duplicate column.
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        todo = missing_at_3(con)
+        for t, c, ty in todo:
+            con.execute(f"ALTER TABLE {t} ADD COLUMN {c} {ty}")
+        con.execute("UPDATE meta SET value=? WHERE key=?", ("3", K3_SCHEMA_KEY))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    if not quiet:
+        print(f"intel.db: K3 schema 2 → 3 · added {len(todo)} columns "
+              f"({', '.join(f'{t}.{c}' for t, c, _ty in todo) or 'none missing'})"
+              + (f" · safety copy {safety_copy}" if safety_copy else ""))
+    return todo
+
+
+def _safety_path(path):
+    """Where the real file's pre-migration copy goes; None for any other file."""
+    if Path(path).resolve() != INTEL_DB.resolve():
+        return None
+    import datetime as dt
+    return SAFETY_COPY_DIR / f"intel_before_schema3_{dt.date.today().isoformat()}.db"
 
 
 def open_intel(path=INTEL_DB, quiet=False):
@@ -434,11 +520,13 @@ def open_intel(path=INTEL_DB, quiet=False):
                  f"({K3_SCHEMA_VERSION}); update the code, do not downgrade the file")
     if found == 1:
         migrate_1_to_2(con, quiet=quiet)
-        return con
+        found = 2
     con.executescript(SCHEMA)       # additive from schema 2 on (§8c)
     if found is None:
         con.execute("INSERT INTO meta VALUES (?, ?)", (K3_SCHEMA_KEY, str(K3_SCHEMA_VERSION)))
     con.commit()
+    if found == 2:
+        migrate_2_to_3(con, safety_copy=_safety_path(path), quiet=quiet)
     return con
 
 
