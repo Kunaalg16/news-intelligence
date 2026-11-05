@@ -131,6 +131,7 @@ USAGE (from ~/news-intel)
 """
 
 import collections
+import datetime as dt
 import hashlib
 import json
 import os
@@ -3007,7 +3008,8 @@ def contrast():
 # F5 · the kinds of small grey line the style rule names (brief fo-1 §4.2), by class.
 F5_GREY_KINDS = (".answer-line", ".topic-line", ".answer-hint", ".answer-weak", ".mode-note",
                  ".results-fold", ".mark", ".pane .block-label", ".kind-label",
-                 ".answer-working", ".still-working", ".turn-remove")
+                 ".answer-working", ".still-working", ".turn-remove",
+                 ".date-line", ".first-seen", ".pin-answer-line", ".pin-answer-fold")
 
 
 def _look(css, selector):
@@ -5170,11 +5172,12 @@ def l4_outside():
 
     Pass lines, written before the run:
     - Opening a real archive story that is not in the live digest sends ONE GET
-      /api/search (a browse limited to that story) and no paid route; opening it again
-      sends none (kept in memory).
+      /api/story/<id> (K3's get_story, F8 call 8 A) and no search and no paid route;
+      opening it again sends none (kept in memory).
     - The page shows its real headline, "Not in this digest", its dates, papers and
-      article count as the search counts them, each listed article's headline with its
-      page link, and "the best-placed 3 of N" when the story has more than it lists.
+      article count as get_story counts them, "Articles · N" with N = every article,
+      EVERY article's headline in get_story's order, each with its page link and its
+      "whole paper" link; never "best-placed".
     - Its thread is drawn when /api/thread has one; a single-day story draws none.
     - The pane's scope becomes that story by id with NO text_hashes (hashes would narrow
       a question to the listed few).
@@ -5182,8 +5185,9 @@ def l4_outside():
     - An id the archive does not have says "That story could not be found."; nothing
       answering says the app isn't running.
     What would pass while broken: a page that drew a canned headline -> compared with the
-    real row read through the ASGI app; a count read from the listed articles -> a story
-    with more than it lists is chosen on purpose.
+    real row read through the ASGI app; a page still cut to the best-placed 3 -> a story
+    with more than 3 articles is chosen on purpose, and the order is compared.
+    (F8: was one /api/search browse and "the best-placed 3 of N"; meaning changed.)
     """
     digest = R.get_digest("latest")
     in_digest = {s["story_id"] for s in digest["stories"]}
@@ -5195,19 +5199,25 @@ def l4_outside():
         q = ("q=&sort=newest&limit=1&story_ids=" + urllib.parse.quote(sid)).encode()
         _st, _h, raw = _get("/api/search", q)
         reply = json.loads(raw)
-        if big is None and reply["total_articles"] > len(reply["stories"][0]["articles"]) \
+        if big is None and reply["total_articles"] > 3 \
                 and len(reply["stories"][0]["dates"]) >= 2 \
                 and _thread_of(sid):
-            big = (sid, reply)
+            big = sid
         if small is None and reply["total_articles"] == 1:
-            small = (sid, reply)
+            small = sid
         if big and small:
             break
-    check("L-4 · the archive has an outside story with a thread listing fewer articles "
-          "than it counts, and a one-article one", [big is not None, small is not None],
-          [True, True])
+    check("L-4 · the archive has an outside story with a thread and more than 3 articles, "
+          "and a one-article one", [big is not None, small is not None], [True, True])
     if not (big and small):
         return
+    stories = {}
+    for sid in (big, small):
+        _st, _h, raw = _get("/api/story/" + urllib.parse.quote(sid, safe=""))
+        stories[sid] = json.loads(raw)
+    big, small = (big, stories[big]), (small, stories[small])
+    _st, _h, raw = _get("/api/facets")
+    facets = json.loads(raw)
     threads = {}
     for sid, _r in (big, small):
         threads[sid] = _thread_of(sid)
@@ -5215,50 +5225,69 @@ def l4_outside():
 async function main() {
   ST.digest = DATA.digest; ST.flags.assistant = true;
   ST.scope = {story_id: null, text_hashes: [], filters: {}};
+  REPLIES['/api/facets'] = [200, DATA.facets];
   function world(sid) {
-    REPLIES['/api/search'] = [200, DATA.replies[sid]];
+    REPLIES['/api/story/' + encodeURIComponent(sid)] = [200, DATA.replies[sid]];
     REPLIES['/api/thread/' + encodeURIComponent(sid)] =
       [200, DATA.threads[sid] || {thread_id: sid, thread: null}];
   }
   world(DATA.big);
   await APP.openStory(DATA.big);
   OUT.big_text = textOf(document.byId.reading);
-  OUT.big_search = sent('/api/search').length;
+  OUT.big_search = [sent('/api/story/' + encodeURIComponent(DATA.big)).length,
+                    sent('/api/search').length];
+  OUT.titles = nodesOf(document.byId.reading, "button").filter(function (b) {
+    return (" " + b.className + " ").indexOf(" outside-open ") >= 0; }).map(textOf);
+  var list = (function find(n) {
+    if ((" " + (n.className || "") + " ").indexOf(" outside-articles ") >= 0) return n;
+    for (var i = 0; i < (n.children || []).length; i++) { var f = find(n.children[i]); if (f) return f; }
+    return null; })(document.byId.reading);
+  OUT.whole = nodesOf(list, "a").filter(function (a) {
+    return (" " + a.className + " ").indexOf(" whole-paper ") >= 0; }).length;
   OUT.paid = CALLS.filter(function (c) {
     return /\/api\/(ask|think_harder|background|suggest|reask)$/.test(c[1]); }).length;
   OUT.scope = [ST.scope.story_id, ST.scope.text_hashes];
   OUT.links = nodesOf(document.byId.reading, "a").map(function (a) { return a.attrs.href; });
   OUT.thread_drawn = classesOf(document.byId.reading).indexOf("thread") >= 0;
   await APP.openStory(DATA.big);
-  OUT.again_search = sent('/api/search').length;
+  OUT.again_search = sent('/api/story/' + encodeURIComponent(DATA.big)).length;
   world(DATA.small);
   await APP.openStory(DATA.small);
   OUT.small_text = textOf(document.byId.reading);
   OUT.small_thread = classesOf(document.byId.reading).indexOf("thread") >= 0;
   OUT.read_posts = sent('/api/read').length;
-  REPLIES['/api/search'] = [200, {stories: [], total_articles: 0}];
+  REPLIES['/api/story/' + encodeURIComponent("2000-01-01:never")] = [404, {detail: "no such story"}];
   await APP.openStory("2000-01-01:never");
   OUT.gone = textOf(document.byId.reading);
-  REPLIES['/api/search'] = 'down';
+  REPLIES['/api/story/' + encodeURIComponent("2000-01-02:never")] = 'down';
   await APP.openStory("2000-01-02:never");
   OUT.down = textOf(document.byId.reading);
 }
 main().then(function () { print(JSON.stringify(OUT)); },
             function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
 """, {"digest": digest, "big": big[0], "small": small[0],
-      "replies": {big[0]: big[1], small[0]: small[1]}, "threads": threads})
+      "replies": {big[0]: big[1], small[0]: small[1]}, "threads": threads,
+      "facets": facets})
     check("L-4 · the page's async checks ran to the end", got.get("crash"), None)
     if got.get("crash"):
         return
-    row, total = big[1]["stories"][0], big[1]["total_articles"]
+    row = big[1]
+    total = row["article_count"]
     text = got["big_text"]
     check("[behaviour] L-4 · an outside story opens with its real headline, not 'Choose a story.'",
           [row["headline"] in text, "Choose a story." in text], [True, False])
     check("[behaviour] L-4 · it says it is not in this digest and has no write-up",
           ["Not in this digest" in text, "no write-up" in text], [True, True])
-    check("[behaviour] L-4 · papers and articles as the search counts them, and 'of N'",
+    check("[behaviour] L-4 · F8 · papers and articles as get_story counts them, "
+          "'Articles · N' with every article, never 'best-placed'",
           [f"{row['papers']} paper" in text, f"{total} articles" in text,
-           f"the best-placed {len(row['articles'])} of {total}" in text], [True] * 3)
+           f"Articles · {total}" in text, total == len(row["articles"]) > 3,
+           "best-placed" in text], [True] * 4 + [False])
+    check("[behaviour] L-4 · F8 · every article listed, in get_story's order (best-placed "
+          "first), each with a 'whole paper' link",
+          [got["titles"], got["whole"]],
+          [[a["headline"] for a in row["articles"]],
+           sum(1 for a in row["articles"] if (a.get("page_link") or {}).get("pdf"))])
     check("[behaviour] L-4 · every listed article's headline is there, with its page link",
           [[a["headline"] in text, any("/api/page?" in (h or "") and
                                        urllib.parse.quote(a["page_link"]["pdf"], safe="") in (h or "")
@@ -5268,13 +5297,25 @@ main().then(function () { print(JSON.stringify(OUT)); },
     check("[behaviour] L-4 · its thread is drawn when it has one, and not when it has none",
           [threads[big[0]] is not None, got["thread_drawn"], got["small_thread"]],
           [True, True, threads[small[0]] is not None])
-    check("[page] L-4 · one free read: one search, nothing paid, none on opening it again",
-          [got["big_search"], got["paid"], got["again_search"]], [1, 0, 1])
+    check("[page] L-4 · one free read: one /api/story (no search), nothing paid, none on "
+          "opening it again", [got["big_search"], got["paid"], got["again_search"]],
+          [[1, 0], 0, 1])
     check("[page] L-4 · the pane asks about it by story id, with no text_hashes",
           got["scope"], [big[0], []])
-    check("[page] L-4 · a one-article story says so, with no 'of N'",
-          ["1 article" in got["small_text"], "best-placed" in got["small_text"]],
-          [True, False])
+    check("[page] L-4 · a one-article story says so: 'Articles · 1', no 'best-placed'",
+          ["1 article" in got["small_text"], "Articles · 1" in got["small_text"],
+           "best-placed" in got["small_text"]], [True, True, False])
+    if threads[small[0]] is None:
+        first = small[1]["dates"][0]
+        check("[behaviour] F8 · the one-article outside story (no thread) has the first-day "
+              "line, dated from the archive's first paper-day",
+              f"no earlier coverage in your papers since " in got["small_text"]
+              and f"{int(facets['date_min'][8:10])} " in got["small_text"]
+              and ("First seen today" if first == dt.date.today().isoformat()
+                   else "First seen on ") in got["small_text"], True)
+    else:
+        skip("F8 · the first-day line on a real outside story",
+             "the one-article story found has a thread")
     check("[page] L-4 · leaving an outside story marks nothing read", got["read_posts"], 0)
     check("[page] L-4 · an id the archive does not have says it could not be found",
           "That story could not be found." in got["gone"], True)
@@ -6403,6 +6444,269 @@ def f7_routes():
            status2, body2.get("unhidden"), s1 in _pane_ids()],
           [200, [s1], True, False, 200, [s1], True])
 
+
+def f8_page():
+    """fo-1 F8 · R5-1, date lines, the first-day line and the compact answer pin (brief
+    §3.6), on the stub's turns, flag on. (The outside story page is L-4's, on real data.)
+
+    Pass lines, written before the run:
+    - R5-1: a Think harder answer K3 lists LAST (f8, parent f3) is drawn right after f3,
+      before f4; nothing else moves; the latest answer is still f7 (the only one not
+      `is-older`). A Think harder running on f3 streams its live turn right after f3,
+      before f4, and sets no pane event while it streams or when it is done (L-13 keep);
+      when done the stored f8 stands in the live turn's place. On the last answer (f7)
+      the live turn is still drawn after it.
+    - Date lines: turns on 2 Nov, 2 Nov, 3 Nov, a divider on 4 Nov, then 4 Nov -> exactly
+      two lines, "Tue 3 Nov" before f3 and "Wed 4 Nov" before the divider (above it);
+      a re-asked answer (f6, written 5 Nov) and a Think harder answer (f8, 5 Nov) draw
+      none; a one-day conversation draws none; a new question streaming after a 4 Nov
+      turn gets one line with today's date before it (none if today is 4 Nov).
+    - First-day line: no thread + first date today -> "First seen today · no earlier
+      coverage in your papers since 16 Sep" (date_min 2026-09-16); another first date ->
+      "First seen on Wed 4 Nov · …"; no date_min -> ends "in your papers"; a story with a
+      thread, an unread thread, or a developing story -> no line. Opening an outside
+      story with no thread reads /api/facets once, and not again for the next.
+    - Compact answer pin, from payload.snapshot: closed = the question, the FIRST
+      sentence only, "▸ 3 sentences · 2 sources" (2 distinct cites); pressing it reads
+      /api/passages/<set> once and opens in place: "▾ Haiku · 0.08¢" and every sentence
+      with its chips (3 article chips, no dead chip); pressing again closes, no second
+      read. Not covered: "Not in this story", the line "Haiku · 0.08¢", nothing to open.
+      A pin made before snapshots reads its payload; no cost -> "▾ Haiku". A story pin is
+      the plain row as before. The pane's Pin sends the answer's cost_usd.
+    - CSS: the date line, first-day line, the pin's answer line and fold are the small
+      grey line (F5_GREY_KINDS, in look_i7); the date line has a rule either side.
+    What would pass while broken: a live turn drawn after f3 only because f3 is last (f3
+    is the third of seven); date lines read from every answer's time (f6 and f8 would add
+    two more); a closed pin that hid only the 2nd sentence by luck (3 sentences, the 2nd
+    and 3rd checked absent).
+    """
+    S.reset()
+    conv = json.loads(json.dumps(S.FOLLOWUP_CONVERSATION))
+    sonnet = dict(conv["turns"][2]["answer"], answer_id="f8", parent_answer_id="f3",
+                  model="sonnet", at="2026-11-05T09:00:00")
+    with_kid = json.loads(json.dumps(conv))
+    with_kid["turns"].append({"kind": "answer", "answer": sonnet})
+    days = json.loads(json.dumps(with_kid))
+    when = {"f1": "2026-11-02T08:00:00", "f2": "2026-11-02T21:00:00",
+            "f3": "2026-11-03T09:00:00", "f4": "2026-11-04T08:01:00",
+            "f5": "2026-11-04T08:02:00", "f6": "2026-11-05T10:00:00",
+            "f7": "2026-11-04T12:00:00", "f8": "2026-11-05T09:00:00"}
+    for t in days["turns"]:
+        t["answer"]["at"] = when[t["answer"]["answer_id"]]
+    days["turns"].insert(3, {"kind": "divider", "story_id": "s_x", "headline": "X",
+                             "at": "2026-11-04T08:00:00"})
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+function anchors() {
+  var body = byClass(pane(), "pane-body")[0];
+  return body.children.map(function (k) { return k.attrs["data-anchor"]; })
+    .filter(function (k) { return k !== undefined; });   // the spacer has none
+}
+function older() {
+  return turns().filter(function (t) { return (" " + t.className + " ").indexOf(" is-older ") < 0; })
+    .map(function (t) { return t.attrs["data-anchor"]; });
+}
+async function flush() { for (var i = 0; i < 40; i++) await null; }
+async function main() {
+  // --- R5-1 · the stored Think harder answer under its own question
+  CONV = DATA.with_kid; fresh();
+  OUT.order = anchors();
+  OUT.latest = older();
+  // --- R5-1 · a running Think harder on f3 streams under f3
+  CONV = DATA.conv; fresh();
+  var EVENTS = [], ev = null;
+  Object.defineProperty(ST, "paneEvent", {configurable: true,
+    get: function () { return ev; }, set: function (v) { if (v) EVENTS.push(v); ev = v; }});
+  var open = gateStream('/api/think_harder');
+  REPLIES['/api/conversation'] = [200, DATA.with_kid];
+  var run = APP.runThinkHarder("f3");
+  await flush();
+  OUT.live_order = anchors();
+  open([{type: "sentence", text: "Sonnet says.", cites: []},
+        {type: "done", answer: DATA.sonnet}]);
+  await run; await flush();
+  OUT.done_order = anchors();
+  OUT.events = EVENTS;
+  delete ST.paneEvent; ST.paneEvent = null;
+  // --- the last answer: the live turn after it, as before
+  CONV = DATA.conv; fresh();
+  ST.live = {question: "what about the floods", sentences: [], results: null, error: null,
+             parentOf: "f7"};
+  OUT.last_order = anchors();
+  ST.live = null;
+
+  // --- date lines
+  CONV = DATA.days; fresh();
+  var body = byClass(pane(), "pane-body")[0];
+  OUT.days = anchors();
+  OUT.day_words = byClass(body, "date-line").map(textOf);
+  CONV = DATA.conv; fresh();
+  OUT.one_day = byClass(pane(), "date-line").length;
+  ST.live = {question: "a new one", sentences: [], results: null, error: null};
+  var a = anchors();
+  OUT.live_day = [a.slice(-2), APP.todayISO()];
+  ST.live = null;
+
+  // --- the first-day line
+  var today = APP.todayISO();
+  ST.facets = {date_min: "2026-09-16"};
+  ST.threads = {s1: null, s2: {entries: [{}]}};
+  function line(story) { var n = APP.firstSeenLine(story); return n ? textOf(n) : null; }
+  OUT.first = [line({story_id: "s1", dates: [today]}),
+               line({story_id: "s1", dates: ["2026-11-04", "2026-11-05"]}),
+               line({story_id: "s2", dates: [today]}),
+               line({story_id: "s9", dates: [today]}),
+               line({story_id: "s1", dates: [today], developing: true})];
+  ST.facets = {};
+  OUT.first.push(line({story_id: "s1", dates: ["2026-11-04"]}));
+  ST.facets = null; CALLS = [];
+  ST.digest = {stories: [], window: null};
+  ST.flags.assistant = false;
+  function outside(sid) {
+    REPLIES['/api/story/' + encodeURIComponent(sid)] = [200, {story_id: sid, headline: "H " + sid,
+      dates: ["2026-11-04"], papers: 1, article_count: 1, articles: []}];
+    REPLIES['/api/thread/' + encodeURIComponent(sid)] = [200, {thread_id: sid, thread: null}];
+  }
+  REPLIES['/api/facets'] = [200, {date_min: "2026-09-16", date_max: "2026-11-04"}];
+  outside("2026-11-04:aa"); outside("2026-11-04:bb");
+  await APP.openStory("2026-11-04:aa");
+  OUT.first_open = [byClass(document.byId.reading, "first-seen").map(textOf),
+                    sent('/api/facets').length];
+  await APP.openStory("2026-11-04:bb");
+  OUT.first_open.push(sent('/api/facets').length);
+  ST.flags.assistant = true;
+
+  // --- the compact answer pin
+  REPLIES['/api/passages/ps1'] = [200, {passages: DATA.rows}];
+  ST.passages = {}; ST.pinOpen = {}; CALLS = [];
+  ST.screen = 'boards'; ST.openBoardId = "b1"; ST.boards = [{board_id: "b1", name: "B"}];
+  ST.pins = DATA.pins;
+  function board() { var n = new Node('div'); APP.boardsScreen(n); return n; }
+  function card(i) { return byClass(board(), "pin-answer")[i]; }
+  var c = card(0);
+  OUT.closed = [textOf(c), byClass(c, "pin-answer-fold").map(textOf)];
+  await press(byClass(c, "pin-answer-fold")[0]);
+  c = card(0);
+  OUT.opened = [byClass(c, "pin-answer-fold").map(textOf), textOf(c),
+                byClass(c, "chip").length, byClass(c, "chip-dead").length,
+                sent('/api/passages/ps1').length];
+  await press(byClass(c, "pin-answer-fold")[0]);
+  c = card(0);
+  OUT.closed_again = [byClass(c, "pin-answer-fold").map(textOf), sent('/api/passages/ps1').length];
+  c = card(1);
+  OUT.not_covered = [textOf(c), byClass(c, "pin-answer-fold").length,
+                     byClass(c, "pin-answer-line").map(textOf)];
+  c = card(2);
+  OUT.old_closed = textOf(c);
+  await press(byClass(c, "pin-answer-fold")[0]);
+  OUT.old_open = byClass(card(2), "pin-answer-fold").map(textOf);
+  var b = board();
+  OUT.story_pin = [byClass(b, "plain-row").length, byClass(b, "pin-answer").length];
+
+  // --- the pane's Pin carries the cost
+  CONV = DATA.conv; fresh();
+  REPLIES['/api/boards'] = [200, {boards: [{board_id: "b1", name: "B"}]}];
+  REPLIES['/api/pin'] = [200, {pin_id: "p9"}];
+  var t7 = turns()[6];
+  await press(byClass(t7, "btn-save")[0]);
+  var menuB = nodesOf(byClass(t7, "pin-menu")[0], "button")
+    .filter(function (x) { return textOf(x).indexOf("B ") === 0; })[0];
+  if (menuB) await press(menuB);
+  OUT.pin_payload = sent('/api/pin').map(function (x) { return x[2].payload.cost_usd; });
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": conv, "conv": conv, "with_kid": with_kid, "days": days, "sonnet": sonnet,
+      "rows": [{"text_hash": "h1", "headline": "First", "paper": "The Hindu", "date": "2026-11-04",
+                "kind": "news", "page_link": None, "snippet": ""},
+               {"text_hash": "h2", "headline": "Second", "paper": "Mint", "date": "2026-11-04",
+                "kind": "news", "page_link": None, "snippet": ""}],
+      "pins": [
+          {"pin_id": "p1", "item_type": "answer", "source": {},
+           "payload": {"answer_id": "a1", "question": "Q one?", "model": "haiku",
+                       "cost_usd": 0.0008,
+                       "snapshot": {"question": "Q one?", "model": "haiku",
+                                    "passage_set_id": "ps1", "not_covered": False,
+                                    "sentences": [{"text": "One.", "cites": ["h1"]},
+                                                  {"text": "Two.", "cites": ["h2", "h1"]},
+                                                  {"text": "Three.", "cites": []}]}}},
+          {"pin_id": "p2", "item_type": "answer", "source": {},
+           "payload": {"answer_id": "a2", "question": "Q two?", "model": "haiku",
+                       "cost_usd": 0.0008,
+                       "snapshot": {"question": "Q two?", "model": "haiku", "sentences": [],
+                                    "passage_set_id": "ps2", "not_covered": True}}},
+          {"pin_id": "p3", "item_type": "answer", "source": {},
+           "payload": {"answer_id": "a3", "question": "Q three?", "model": "haiku",
+                       "sentences": [{"text": "Old one.", "cites": []}], "cited": []}},
+          {"pin_id": "p4", "item_type": "story", "source": {},
+           "payload": {"story_id": "s1", "headline": "A story"}}]})
+    check("F8 · the page's async checks ran to the end", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    top = ["f1", "f2", "f3", "f4", "f5", "f6", "f7"]
+    check("[page] F8 · R5-1 · a Think harder answer K3 lists last is drawn under its own "
+          "question; the latest answer is still the last question's",
+          [got["order"], got["latest"]],
+          [["f1", "f2", "f3", "f8", "f4", "f5", "f6", "f7"], ["f7"]])
+    check("[page] F8 · R5-1 · Think harder on an older answer streams under its question, "
+          "and its stored answer stands there when done",
+          [got["live_order"], got["done_order"]],
+          [["f1", "f2", "f3", "live", "f4", "f5", "f6", "f7"],
+           ["f1", "f2", "f3", "f8", "f4", "f5", "f6", "f7"]])
+    check("[page] F8 · R5-1 · the view stays put: no pane event while it streams or after",
+          got["events"], [])
+    check("[page] F8 · R5-1 · on the last answer the live turn is still drawn after it",
+          got["last_order"], top + ["live"])
+    check("[page] F8 · date lines: one per change of day, read only from first answers and "
+          "dividers; the line above the divider",
+          [got["days"], got["day_words"]],
+          [["f1", "f2", "date:2026-11-03", "f3", "f8", "date:2026-11-04",
+            "divider:2026-11-04T08:00:00:s_x", "f4", "f5", "f6", "f7"],
+           ["Tue 3 Nov", "Wed 4 Nov"]])
+    today = got["live_day"][1]
+    check("[page] F8 · date lines: none in a one-day conversation; a new question asked on "
+          "another day gets today's line before it",
+          [got["one_day"], got["live_day"][0]],
+          [0, (["f7", "live"] if today == "2026-11-04" else ["date:" + today, "live"])])
+    tail = "no earlier coverage in your papers since 16 Sep"
+    check("[page] F8 · first-day line: today / another day / thread / unread thread / "
+          "developing / no first paper-day",
+          got["first"],
+          ["First seen today · " + tail, "First seen on Wed 4 Nov · " + tail, None, None,
+           None, "First seen on Wed 4 Nov · no earlier coverage in your papers"])
+    check("[page] F8 · an outside story with no thread draws the line; /api/facets read "
+          "once, not again for the next story",
+          got["first_open"], [["First seen on Wed 4 Nov · " + tail], 1, 1])
+    check("[page] F8 · compact answer pin, closed: the question, the first sentence only, "
+          "'▸ 3 sentences · 2 sources'",
+          ["Q one?" in got["closed"][0], "One." in got["closed"][0],
+           "Two." in got["closed"][0], "Three." in got["closed"][0], got["closed"][1]],
+          [True, True, False, False, ["▸ 3 sentences · 2 sources"]])
+    check("[page] F8 · compact answer pin, opened in place: '▾ Haiku · 0.08¢', every "
+          "sentence, its chips from the passage set (read once)",
+          [got["opened"][0], all(w in got["opened"][1] for w in ("One.", "Two.", "Three.")),
+           got["opened"][2:]],
+          [["▾ Haiku · 0.08¢"], True, [3, 0, 1]])
+    check("[page] F8 · pressed again it closes, and reads nothing more",
+          got["closed_again"], [["▸ 3 sentences · 2 sources"], 1])
+    check("[page] F8 · a not-covered pin says 'Not in this story', its answer line, "
+          "nothing to open",
+          ["Not in this story" in got["not_covered"][0], got["not_covered"][1],
+           got["not_covered"][2]], [True, 0, ["Haiku · 0.08¢"]])
+    check("[page] F8 · a pin made before snapshots reads its payload; no cost -> the model "
+          "alone; a story pin is the plain row",
+          ["Old one." in got["old_closed"], "▸ 1 sentence · 0 sources" in got["old_closed"],
+           got["old_open"], got["story_pin"]],
+          [True, True, ["▾ Haiku"], [1, 3]])
+    check("[page] F8 · the pane's Pin sends the answer's cost with it", got["pin_payload"],
+          [0.0008])
+    css = _css_without_comments()
+    check("[page] F8 · the date line has a thin grey rule on either side",
+          [_look(css, ".date-line::before").get("background"),
+           _look(css, ".date-line::after").get("background"),
+           _look(css, ".date-line::before").get("height")],
+          ["var(--rule-light)", "var(--rule-light)", "1px"])
+
+
 # ------------------------------------------------------------- I9 · every button pressed
 # Brief §4.6. (A) boots the whole page under jsc against the real server's own answers,
 # walks it through each of its states and presses every button it draws, once each, from
@@ -6664,6 +6968,14 @@ function route(method, url, body) {
     if (path.indexOf('/api/pref/') === 0)           /* F2 · a stored pref reads back */
       return [200, {key: tail, value: tail in W.prefs ? W.prefs[tail] : null}];
     if (path.indexOf('/api/passages/') === 0) return [404, {detail: 'no such passage set'}];
+    if (path.indexOf('/api/story/') === 0) {        /* F8 · get_story, from the search rows */
+      var row = ((DATA.search[1] || {}).stories || []).filter(function (r) {
+        return r.story_id === tail; })[0];
+      if (!row) return [404, {detail: 'no such story: ' + tail}];
+      return [200, {story_id: row.story_id, headline: row.headline, dates: row.dates,
+                    papers: row.papers, article_count: (row.articles || []).length,
+                    articles: clone(row.articles || [])}];
+    }
     if (DATA.get[path]) return DATA.get[path];
     MISSING.push(path);
     return [404, {detail: 'not in the I9 server: ' + path}];
@@ -7728,7 +8040,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f7_page, f7_routes, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f7_page, f7_routes, f8_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",

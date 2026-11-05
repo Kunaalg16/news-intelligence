@@ -1521,7 +1521,8 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    ("FOUND · N STORIES", "Closest stories"), DAY / WEEK. In progress ("… is writing",
    "Still working on this") the same, italic. One rule, so no kind can drift. */
 .answer-line, .topic-line, .answer-hint, .answer-weak, .mode-note, .results-fold,
-.mark, .pane .block-label, .kind-label, .answer-working, .still-working, .turn-remove {
+.mark, .pane .block-label, .kind-label, .answer-working, .still-working, .turn-remove,
+.date-line, .first-seen, .pin-answer-line, .pin-answer-fold {
   font-family: var(--sans);
   font-size: var(--s115);
   font-weight: 500;
@@ -1531,6 +1532,20 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
 .still-working { margin: 10px 0 0; }
 .mark-cited { color: var(--ochre); }   /* after the rule above: ochre ink (Kunaal, 5 Nov) */
 .results-fold { display: block; text-align: left; }
+/* F8 · the date line (Q-F2 A): the small grey line, centred, a thin grey rule either side. */
+.date-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0;
+}
+.date-line::before,
+.date-line::after {
+  content: "";
+  flex: 1 0 24px;
+  height: 1px;
+  background: var(--rule-light);
+}
 .results-fold:hover { color: var(--ink); }
 .pane-results.is-folded { margin-top: 6px; }
 
@@ -1554,3 +1569,27 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
   clip-path: none;
   white-space: normal;
 }
+
+/* ------------------------------------------------- F8 · the rest (brief fo-1 §3.6) */
+/* The first-day line sits in the thread section's place, so it keeps that gap below. */
+.first-seen { margin: 0 0 26px; }
+
+/* A compact answer pin on a board: the question as the pane's Q row, the answer in the
+   pane's serif, the fold switch and the answer line the small grey line (one rule). */
+.pin-answer { padding: 11px 0; }
+.pin-answer-q {
+  margin: 0 0 4px;
+  font-size: var(--s16);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink);
+}
+p.pin-answer-text {
+  margin: 0 0 4px;
+  font-family: var(--serif);
+  font-size: var(--s17);
+  line-height: 1.55;
+}
+.pin-answer-fold { display: block; text-align: left; margin: 2px 0 6px; }
+.pin-answer-fold:hover { color: var(--ink); }
+.pin-answer-line { margin: 2px 0 0; }

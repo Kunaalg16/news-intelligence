@@ -32,6 +32,7 @@ const S = {
   sorts: {},                     /* answer_id -> 'relevance' | 'newest' */
   folded: {},                    /* answer_id -> true once Think harder answered */
   resultsOpen: {},               /* answer_id -> true: an older answer's results opened (F5) */
+  pinOpen: {},                   /* pin_id -> true: a compact answer pin opened in place (F8) */
   estimates: {},                 /* kind -> cost_usd, read once at boot */
   reloadDivider: null,           /* "CONVERSATION FROM <Day HH:MM>" (state 8) */
   suggestions: {},               /* story_id -> its suggestion set, once asked for */
@@ -181,6 +182,7 @@ const api = {
             + (answerId ? '&answer_id=' + encodeURIComponent(answerId) : '')),
   conversation: () => getJSON('/api/conversation'),
   passages: (setId) => getJSON('/api/passages/' + encodeURIComponent(setId)),
+  story: (id) => getJSON('/api/story/' + encodeURIComponent(id)),
   newConversation: () => postJSON('/api/conversation/new', {}),
   divider: (conversationId, storyId, headline) =>
     postJSON('/api/conversation/divider', { conversation_id: conversationId,
@@ -1189,7 +1191,7 @@ function renderStory(pane, story) {
   const theme = themeLine(story);
   if (theme) pane.append(theme);
 
-  const thread = threadSection(story);
+  const thread = threadSection(story) || firstSeenLine(story);
   if (thread) pane.append(thread);
   /* §8.4: below the thread, or where the thread would have been when the story has
      none -- a story with no thread is exactly the one a connection would help. */
@@ -1408,6 +1410,26 @@ function graphView(thread) {
   return el('div', {}, el('div', { class: 'graph-scroll' }, canvas), selected);
 }
 
+/* F8 · call 12 B, sheet item 11 A · a story with no thread says so in one grey line, in
+   the thread section's place: "First seen today · no earlier coverage in your papers since
+   16 Sep". The date is the archive's first paper-day (`facets().date_min`), never typed
+   in. When the story's first date is not today: "First seen on Wed 4 Nov · …" (technical
+   call). No first paper-day read -> the line ends at "your papers". Not drawn while the
+   thread is unread, nor on a story K3 calls developing (it has earlier coverage). */
+const FIRST_SEEN = { today: 'First seen today', on: 'First seen on ',
+                     none: 'no earlier coverage in your papers', since: ' since ' };
+
+function firstSeenLine(story) {
+  if (!(story.story_id in S.threads) || S.threads[story.story_id]) return null;
+  if (story.developing || (story.story_so_far || {}).shown) return null;
+  const first = (story.dates || [])[0];
+  if (!first) return null;
+  const min = (S.facets || {}).date_min;
+  return el('p', { class: 'first-seen',
+    text: (first === todayISO() ? FIRST_SEEN.today : FIRST_SEEN.on + dateWithDay(first))
+          + ' · ' + FIRST_SEEN.none + (min ? FIRST_SEEN.since + dateShort(min) : '') });
+}
+
 function threadSection(story) {
   const thread = S.threads[story.story_id];
   if (!thread) return null;                 /* H3: no thread, no section at all */
@@ -1519,6 +1541,7 @@ function boardsScreen(pane) {
       return;
     }
     pane.append(el('ul', { class: 'plain-list' }, pins.map((p) => {
+      if (p.item_type === 'answer') return el('li', {}, answerPinCard(p));
       const payload = p.payload || {};
       const source = p.source || {};
       const bits = [source.paper, source.date ? dateWithDay(source.date) : null,
@@ -1549,6 +1572,71 @@ function boardsScreen(pane) {
         text: count(b.pin_count, 'pin')
               + (b.last_used_at ? ' · last used ' + dateWithDay(b.last_used_at)
                                 : '') }))))));
+}
+
+/* F8 · calls 1 B, 3 A · a compact answer pin, read from `payload.snapshot` (K3's copy of
+   the answer as it was pinned). Closed: the question, the first sentence, and the fold
+   switch "▸ N sentences · M sources" (M = distinct articles cited). Opened in place: the
+   answer line "▾ Haiku · 0.08¢" and EVERY sentence with its chips, read from
+   `passages(snapshot.passage_set_id)`. A not-covered answer says "Not in this story" and
+   has nothing to open. Story and article pins are unchanged. A pin made before K3 kept
+   snapshots carries the answer in its payload itself, and that is read instead; a pin
+   with no cost says the model alone; a cite whose article is not read is a dead chip. */
+const PIN_ANSWER_WORDS = { model: { haiku: 'Haiku', sonnet: 'Sonnet' } };
+
+function pinAnswer(p) {
+  const payload = p.payload || {};
+  const snap = payload.snapshot || payload;
+  return { question: snap.question || payload.question || '',
+           sentences: snap.sentences || [], model: snap.model || payload.model,
+           passage_set_id: snap.passage_set_id || null, not_covered: Boolean(snap.not_covered),
+           cost_usd: payload.cost_usd };
+}
+
+function pinAnswerWords(a) {
+  const model = PIN_ANSWER_WORDS.model[a.model] || 'Answer';
+  return typeof a.cost_usd === 'number' ? model + ' · ' + moneyFine(a.cost_usd) : model;
+}
+
+async function togglePinAnswer(p) {
+  const open = !S.pinOpen[p.pin_id];
+  S.pinOpen[p.pin_id] = open;
+  const set = pinAnswer(p).passage_set_id;
+  if (open && set && !(set in S.passages)) {
+    const got = await api.passages(set);
+    if (got) S.passages[set] = got.passages || [];
+  }
+  render();
+}
+
+function answerPinCard(p) {
+  const a = pinAnswer(p);
+  const card = el('div', { class: 'pin-answer' },
+    el('p', { class: 'pin-answer-q', text: a.question }));
+  if (a.not_covered) {
+    card.append(el('p', { class: 'pin-answer-text' },
+                      el('strong', { text: NOT_COVERED_WORDS.head })));
+    card.append(el('p', { class: 'pin-answer-line', text: pinAnswerWords(a) }));
+    return card;
+  }
+  const open = Boolean(S.pinOpen[p.pin_id]);
+  const sources = new Set(a.sentences.flatMap((x) => x.cites || [])).size;
+  if (!open && a.sentences.length) {
+    card.append(el('p', { class: 'pin-answer-text', text: a.sentences[0].text }));
+  }
+  card.append(el('button', {
+    class: 'reset pin-answer-fold', type: 'button', 'aria-expanded': open ? 'true' : 'false',
+    onclick: () => togglePinAnswer(p),
+  }, open ? '▾ ' + pinAnswerWords(a)
+          : '▸ ' + count(a.sentences.length, 'sentence') + ' · ' + count(sources, 'source')));
+  if (!open) return card;
+  const byHash = paneHashes();
+  const text = el('div', { class: 'answer-text pin-answer-text' });
+  for (const sentence of a.sentences) {
+    text.append(el('p', {}, sentence.text, ' ', chipsFor(sentence.cites, byHash)));
+  }
+  card.append(text);
+  return card;
 }
 
 /* I6 · opening a board bumps its `last_used_at` (touch_board), so the pin menu's
@@ -1757,9 +1845,9 @@ function render() {
 
 /* K-8 option A (Kunaal, 4 Nov): a story that is in no digest in memory opens as a
    plain, free page -- headline, dates, papers, its articles, its thread if it has one.
-   It is read through a browse search limited to that one story, the only per-story read
-   the data layer has; that search names a story's best-placed few articles (K3's
-   `articles_per_story`) and counts them all, so the page says "3 of 7". */
+   F8 · call 8 A: it is read through K3's `get_story` (`/api/story/<id>`), which lists
+   EVERY article in the story, best-placed first; the page lists them all in that order
+   ("Articles · N"), so the old "best-placed 3 of N" line is gone. */
 const OUTSIDE_WORDS = {
   label: 'Not in this digest',
   note: 'A plain page: this story has no write-up because it is not in the digest on screen.',
@@ -1767,14 +1855,13 @@ const OUTSIDE_WORDS = {
 };
 
 async function loadOutsideStory(storyId) {
-  const got = await api.search(searchQueryString('', { story_ids: [storyId] }, 'newest', 1));
-  const row = got && (got.stories || []).find((s) => s.story_id === storyId);
-  if (!row) return null;
-  return Object.assign({}, row, { outside: true, total_articles: got.total_articles });
+  const got = await api.story(storyId);
+  if (!got || got.story_id !== storyId) return null;
+  return Object.assign({}, got, { outside: true });
 }
 
-/* The pane asks about it by its story id alone: a scope's text_hashes narrow the search
-   to exactly those articles, and the page knows only the few it was shown. */
+/* The pane asks about it by its story id alone, as before F8: a scope's text_hashes
+   narrow the search to exactly those articles, and the story id already means all. */
 function outsideScope(story) {
   S.scope.story_id = story.story_id;
   S.scope.headline = story.headline;
@@ -1790,24 +1877,21 @@ function outsideDates(dates) {
 
 function renderOutsideStory(pane, story) {
   const articles = story.articles || [];
-  const total = story.total_articles || articles.length;
+  const total = story.article_count || articles.length;
   pane.append(el('p', { class: 'block-label', text: OUTSIDE_WORDS.label }));
   pane.append(el('h2', { class: 'story-headline', text: story.headline }));
   pane.append(el('p', { class: 'outside-meta',
     text: [outsideDates(story.dates || []), count(story.papers, 'paper'),
            count(total, 'article')].filter(Boolean).join(' · ') }));
   pane.append(el('p', { class: 'outside-note', text: OUTSIDE_WORDS.note }));
-  pane.append(el('p', { class: 'block-label',
-    text: articles.length < total
-      ? 'Articles · the best-placed ' + articles.length + ' of ' + total
-      : 'Articles' }));
+  pane.append(el('p', { class: 'block-label', text: 'Articles · ' + articles.length }));
   pane.append(el('ul', { class: 'outside-articles' }, articles.map((a) => el('li', {},
     el('button', { class: 'reset outside-open', type: 'button',
                    onclick: () => openArticle(a.text_hash) }, a.headline),
     el('p', { class: 'outside-meta' }, paperCode(a.paper) + ' ',
       pageLink(a.page_link, a.page_link ? a.page_link.label : ''),
       ' · ' + dateWithDay(a.date))))));
-  const thread = threadSection(story);
+  const thread = threadSection(story) || firstSeenLine(story);
   if (thread) pane.append(thread);
   pane.append(el('p', { class: 'page-footer',
     text: "Charts and photos aren't read. Use the page link to see them." }));
@@ -1848,6 +1932,8 @@ async function openStory(storyId) {
     const got = await api.thread(storyId);
     S.threads[storyId] = (got && got.entries) ? got : null;
   }
+  /* F8 · the first-day line names the archive's first paper-day, read once */
+  if ((story || outside) && !S.threads[storyId] && !S.facets) S.facets = await api.facets();
   const ssfKey = 'ssf_seen:' + storyId;
   if (story && (story.story_so_far || {}).shown && !(ssfKey in S.prefs)) {
     const pref = await api.pref(ssfKey);
@@ -2301,8 +2387,10 @@ const PANE_PIN = 'Pin';
 
 function answerPinButton(answer) {
   return pinControl('answer', () => ({
+    /* F8 · cost_usd rides along for the pin's answer line: K3's snapshot has no cost */
     payload: { answer_id: answer.answer_id, question: answer.question,
-               sentences: answer.sentences, cited: answer.cited, model: answer.model },
+               sentences: answer.sentences, cited: answer.cited, model: answer.model,
+               cost_usd: answer.cost_usd },
     source: { conversation_id: answer.conversation_id },
   }), { class: 'btn btn-save', text: PANE_PIN });
 }
@@ -3086,7 +3174,49 @@ function paneTurns(conversation) {
     }
     out.push(shown);
   }
+  return underParents(out);
+}
+
+/* F8 · R5-1 (Kunaal, 4 Nov) · a Think harder answer stands under its own question. K3
+   keeps it where it was written, which for an older question is the end of the pane,
+   after later questions; the page moves it to follow its parent (and any earlier Think
+   harder answer to it). A parent that is not shown leaves it where it is. Only top-level
+   answers are parents, so nothing nested can be dropped. */
+function underParents(turns) {
+  const tops = new Set(turns.filter((t) => t.kind === 'answer' && !t.answer.parent_answer_id)
+    .map((t) => t.answer.answer_id));
+  const kidOf = (t) => (t.kind === 'answer' && tops.has(t.answer.parent_answer_id)
+                        ? t.answer.parent_answer_id : null);
+  const kids = {};
+  for (const t of turns) {
+    const parent = kidOf(t);
+    if (parent) (kids[parent] = kids[parent] || []).push(t);
+  }
+  const out = [];
+  for (const t of turns) {
+    if (kidOf(t)) continue;
+    out.push(t);
+    if (t.kind === 'answer') out.push(...(kids[t.answer.answer_id] || []));
+  }
   return out;
+}
+
+/* F8 · date lines (Q-F2 A) · where two turns in a row fall on different local days, one
+   grey line with the later day ("Wed 4 Nov") between them; a divider at that place comes
+   after it. The day is read only from turns that stand where they were written: a
+   question's first answer and a divider. A re-asked answer stands in its first answer's
+   place and a Think harder answer under its question, so their own times say nothing
+   about the place, and they are passed over. A new question streaming is asked today. */
+function turnDay(turn) {
+  if (turn.kind === 'divider') return turn.at ? String(turn.at).slice(0, 10) : null;
+  if (turn.kind !== 'answer') return null;
+  const a = turn.answer;
+  if (a.parent_answer_id || a.replaces_answer_id || !a.at) return null;
+  return String(a.at).slice(0, 10);
+}
+
+function dateLine(day) {
+  return anchored(el('p', { class: 'date-line', text: dateWithDay(day) }), 'date:' + day);
 }
 
 /* Re-ask in place: the same stream as a question, drawn where the answer was. One at a
@@ -3298,7 +3428,25 @@ function renderAssistant() {
   let placed = false;
   let firstSeen = false;
   const latest = latestAnswerId(S.conversation);
+  /* F8 · R5-1 · a running Think harder streams under its own question: after the parent
+     and any answer already under it, before the next question. */
+  const under = S.live && S.live.parentOf;
+  let liveDue = false;
+  const putLive = () => {
+    liveDue = false;
+    placed = true;
+    const live = liveTurn();
+    if (live) body.append(anchored(live, liveKey()));
+  };
+  let lastDay = null;
+  const dayMark = (day) => {
+    if (!day) return;
+    if (lastDay && day !== lastDay) body.append(dateLine(day));
+    lastDay = day;
+  };
   for (const turn of paneTurns(S.conversation)) {
+    if (liveDue && !(turn.kind === 'answer' && turn.answer.parent_answer_id === under)) putLive();
+    dayMark(turnDay(turn));
     if (turn.kind === 'divider') {
       body.append(anchored(el('p', { class: 'pane-divider ask-divider',
                                      text: 'Now asking about · ' + turn.headline }),
@@ -3322,9 +3470,12 @@ function renderAssistant() {
         }
         firstSeen = true;
         if (here) { const live = liveTurn(); if (live) body.append(anchored(live, liveKey())); }
+        if (under && answer.answer_id === under) liveDue = true;
       }
     }
   }
+  if (liveDue) putLive();
+  if (!placed && S.live && !S.live.parentOf && !S.live.replaces) dayMark(todayISO());
   const live = placed ? null : liveTurn();
   if (live) body.append(anchored(live, liveKey()));
   body.append(el('div', { class: 'pane-spacer', 'aria-hidden': 'true' }));
@@ -4379,6 +4530,9 @@ const EXPORTS = {
   versionNotice, renderVersionLine, checkVersion, VERSION_WORDS, VERSION_CHECK_MINUTES,
   paneScrollRule, PANE_SCROLL_LATEST, liveKey, holdPane, placePane,
   isRead, isFollowed, stamp, unreadCount, storyHashes, S,
+  /* F8 */
+  paneTurns, underParents, turnDay, todayISO, runThinkHarder, firstSeenLine, FIRST_SEEN,
+  answerPinCard, pinAnswer, togglePinAnswer, boardsScreen,
 };
 
 if (typeof window !== 'undefined') {
