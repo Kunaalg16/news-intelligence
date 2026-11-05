@@ -1522,7 +1522,7 @@ a:hover { color: var(--ink); text-decoration-thickness: 2px; }
    "Still working on this") the same, italic. One rule, so no kind can drift. */
 .answer-line, .topic-line, .answer-hint, .answer-weak, .mode-note, .results-fold,
 .mark, .pane .block-label, .kind-label, .answer-working, .still-working, .turn-remove,
-.date-line, .first-seen, .pin-answer-line, .pin-answer-fold {
+.date-line, .first-seen, .pin-answer-line, .pin-answer-fold, .pane-divider.reload-divider {
   font-family: var(--sans);
   font-size: var(--s115);
   font-weight: 500;

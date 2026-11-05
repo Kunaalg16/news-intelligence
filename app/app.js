@@ -3418,7 +3418,8 @@ function renderAssistant() {
 
   const body = el('div', { class: 'pane-body' });
   if (S.reloadDivider) {
-    body.append(anchored(el('p', { class: 'pane-divider',
+    /* F9 · grey capitals are a label (§4.2): the small grey line's size and weight */
+    body.append(anchored(el('p', { class: 'pane-divider reload-divider',
                                    text: 'Conversation from ' + S.reloadDivider }),
                          'reload-divider'));
   }

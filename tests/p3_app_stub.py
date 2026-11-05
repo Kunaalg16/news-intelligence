@@ -93,6 +93,53 @@ FOLLOWUP_TURNS = [
 FOLLOWUP_CONVERSATION = {"conversation_id": "c_stub", "started_at": "2026-11-04T09:00:00",
                          "turns": [{"kind": "answer", "answer": a} for a in FOLLOWUP_TURNS]}
 
+# ---------------------------------------------------------------- F9 · consistency
+# fo-1 F9 (brief §5): one conversation with every kind of line the style rule (§4.2)
+# names, for the consistency check: three days (two date lines, one above a divider), a
+# folded Haiku answer with its Sonnet answer, a follow-up with its topic label, a story
+# answer that is not covered, a word-search-only answer, a weak match on all papers, a
+# background block, "one search" (its "Search as two topics"), and a latest answer with
+# CITED / FOUND rows. Eleven turns. The check adds the in-progress lines in memory.
+
+def _c(answer_id, at, question, topic, **extra):
+    return _answer(answer_id, question, topic, conversation_id="c_f9", at=at, **extra)
+
+
+_STORY = {"story_id": "s_epfo", "text_hashes": ["h_e1", "h_e2"], "filters": {}}
+CONSISTENCY_TURNS = [
+    _c("c1", "2026-11-02T08:00:00", "What did the EPFO change about pension payouts?", "first",
+       results_total=2, results=[_row("s_epfo", "EPFO revises pension formula"),
+                                 _row("s_unions", "Unions protest EPFO move")]),
+    _c("c1s", "2026-11-02T08:05:00", "What did the EPFO change about pension payouts?", None,
+       parent_answer_id="c1", model="sonnet", cost_usd=0.021,
+       sentences=[{"text": "A Sonnet sentence.", "cites": []}]),
+    _c("c2", "2026-11-03T09:00:00", "and what did the unions say", "follow_up",
+       carried_from="c1", earlier_label="EPFO pensions",
+       search_query="EPFO pension payout change unions reaction"),
+    _c("c3", "2026-11-03T09:10:00", "did the minister resign", "new_topic", scope=_STORY,
+       not_covered=True, verdict="empty", sentences=[], passage_set_id="ps_c3"),
+    _c("c4", "2026-11-03T09:20:00", "Manipur police firing inquiry", "new_topic",
+       mode="fts_only", verdict="thin", found_count=1),
+    {"kind": "divider", "story_id": "s_gst", "headline": "GST Council cuts rates",
+     "at": "2026-11-04T08:00:00"},
+    _c("c5", "2026-11-04T08:01:00", "Musk and the Tesla pay vote", "one_search",
+       results_total=1, results=[_row("s_tesla", "Tesla holders back Musk pay")]),
+    _c("c6", "2026-11-04T08:10:00", "what is the GST compensation cess", "new_topic",
+       background="A background line, not from the papers."),
+    _c("c7", "2026-11-04T08:20:00", "and the RBI repo decision", "follow_up",
+       carried_from="c6", earlier_label="GST cess"),
+    _c("c8", "2026-11-04T08:30:00", "GST rate cut and the RBI repo decision", "two_searches",
+       search_query=["GST rate cut", "RBI repo decision"], results_total=3,
+       cited=["s_gst"],
+       results=[dict(_row("s_rbi", "RBI holds repo rate", "RBI repo decision")),
+                dict(_row("s_gst", "GST Council cuts rates", "GST rate cut"), mark="cited"),
+                _row("s_gst2", "States split on GST compensation", "GST rate cut")]),
+]
+CONSISTENCY_CONVERSATION = {
+    "conversation_id": "c_f9", "started_at": "2026-11-02T08:00:00",
+    "turns": [t if t.get("kind") == "divider" else {"kind": "answer", "answer": t}
+              for t in CONSISTENCY_TURNS]}
+
 # What a re-ask under each mode says it did (§11.2: `mode` overrides the rewriter; no
 # mode lets it decide, which for f5 is two searches again). A table, not a rule.
 REASK_TOPIC = {"as_typed": "new_topic", "carry": "follow_up", "one_search": "one_search",

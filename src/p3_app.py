@@ -140,10 +140,10 @@ FLAGS = {
     # --- K1 integration, brief §4.5 ------------------------------------------
     # The grey "what was done" line after an answer with its one correction, re-ask in
     # place, the scope undo and Remove. K3's final pass landed `reask`, `hide_turn`,
-    # `unhide_turn` and the answer's `topic`, and the routes call them (fo-1 F4); the flag
-    # stays OFF until fo-1 F9 turns it on, and stays a flag so it can go off again.
+    # `unhide_turn` and the answer's `topic`, and the routes call them (fo-1 F4). ON since
+    # fo-1 F9 (v1); it stays a flag, so it can go off again (False = the I8 flag-off page).
     # The Q/A turn layout does not hang on it (brief: always).
-    "followup_rewrite": False,
+    "followup_rewrite": True,
 }
 
 app = FastAPI(title="News Intelligence", version=APP_VERSION, docs_url=None,

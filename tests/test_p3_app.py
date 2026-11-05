@@ -3009,7 +3009,8 @@ def contrast():
 F5_GREY_KINDS = (".answer-line", ".topic-line", ".answer-hint", ".answer-weak", ".mode-note",
                  ".results-fold", ".mark", ".pane .block-label", ".kind-label",
                  ".answer-working", ".still-working", ".turn-remove",
-                 ".date-line", ".first-seen", ".pin-answer-line", ".pin-answer-fold")
+                 ".date-line", ".first-seen", ".pin-answer-line", ".pin-answer-fold",
+                 ".pane-divider.reload-divider")
 
 
 def _look(css, selector):
@@ -5784,11 +5785,11 @@ def i8_routes():
       carries every other answer's topic and search_query (they survive a reload); an
       unknown answer is 404.
     - (Retired in fo-1 F4: "the real reader answers 501"; f4_routes covers the real one.)
-    - The flag ships off.
+    - The flag ships ON (fo-1 F9) and is still a flag.
     """
     import p3_app as A
-    check("[page] I8 · followup_rewrite ships off until K3's final pass",
-          A.FLAGS["followup_rewrite"], False)
+    check("[page] F9 · followup_rewrite ships on (v1), and is still a flag",
+          [A.FLAGS.get("followup_rewrite"), "followup_rewrite" in A.FLAGS], [True, True])
     A.data = S
     S.reset()
     status, _h, raw = _http("POST", "/api/reask", b"",
@@ -6707,6 +6708,138 @@ main().then(function () { print(JSON.stringify(OUT)); },
           ["var(--rule-light)", "var(--rule-light)", "1px"])
 
 
+# ------------------------------------------------------------- F9 · the consistency check
+# Brief fo-1 §5 / §4.2: one style per kind of line. Each kind: the selectors that draw it
+# and what the rule says they compute to. The suite reads the CSS (jsc has no layout);
+# the browser pane measures the same kinds' COMPUTED values on the real page
+# (`_work/k1_fo_out/f9_consistency.js`), which is what sees the cascade between rules of
+# different names.
+F9_SANS4 = ["var(--sans)", "var(--s115)", "500", "var(--text-muted)"]
+# Pane classes the stub conversation must draw: every kind of line §4.2 names that lives
+# in the pane (DAY / WEEK, the first-day line and the pin's lines live on other screens:
+# F2's and F8's checks, and the browser measurement, read them there).
+F9_PANE_KINDS = {
+    "question": ["pane-you"], "answer": ["answer-text"],
+    "small grey line": ["answer-line", "answer-fold", "topic-line", "answer-hint",
+                        "answer-weak", "mode-note", "results-fold", "mark-cited",
+                        "mark-found", "block-label", "date-line", "reload-divider"],
+    "in progress": ["answer-working", "still-working"],
+    "action inside a line": ["topic-act", "topic-price", "turn-remove"],
+    "capitals": ["ask-divider", "block-label", "mark"],
+    "buttons": ["btn-paid", "btn-free", "btn-save"],
+}
+
+
+def f9_page():
+    """fo-1 F9 · the consistency check (brief §5), in the suite's half: the stub
+    conversation draws every kind, and each kind's CSS is the style rule (§4.2).
+
+    Pass lines, written before the run:
+    - The stub's consistency conversation (p3_app_stub.CONSISTENCY_CONVERSATION: three
+      days, ten answers and a divider), drawn by the real renderAssistant with the flag
+      on, a reload divider, one answer waiting ("Still working on this") and a new
+      question streaming: at least 8 turns, and every class of F9_PANE_KINDS drawn at
+      least once.
+    - Remove: one per stored top-level question (8) plus the Sonnet answer's line (1) =
+      9; none on the folded Haiku line, none on the streaming question.
+    - One check per kind of §4.2, reading the CSS:
+      question = `.pane-you` 16 / 600 / ink, no font-family of its own (the page's sans);
+      answer = `.answer-text p` Newsreader 17 / 1.55;
+      small grey line = every F5_GREY_KINDS class sans / 11.5 / 500 / muted, not italic;
+      in progress = `.answer-working`, `.still-working` the same four and italic;
+      action inside a line = `.topic-act` ochre / 600 / underlined, its size inherited;
+        `.topic-price` sets no colour, size or weight (the line's grey); Remove underlined,
+        no colour, size or weight of its own outside `:hover`;
+      capitals = "NOW ASKING ABOUT" ink, upper case, an ink rule either side; grey labels
+        upper case (`.pane .block-label` by CSS; CITED / FOUND / DAY / WEEK drawn so);
+      buttons = `.btn` 30 px, and the three roles each have their rule.
+    What would pass while broken: a kind the stub never draws (the presence check); a
+    later rule of the same name overriding (`_look` merges every rule naming it); a rule
+    of ANOTHER name winning in the cascade (not modelled here: the browser measurement).
+    """
+    S.reset()
+    got = _jsc(I6_HARNESS + I8_HARNESS + r"""
+async function main() {
+  CONV = DATA.conv; fresh();
+  ST.passages = {ps_c3: [{text_hash: "h_e1"}, {text_hash: "h_e2"}, {text_hash: "h_e1"}]};
+  ST.reloadDivider = "Mon 2 Nov";
+  ST.stillRunning = {c6: true};
+  ST.live = {question: "and the cess on tobacco", sentences: [], results: null, error: null};
+  var p = pane(), seen = {};
+  (function go(n) { if (!n || typeof n !== 'object') return;
+    String(n.className || '').split(/\s+/).forEach(function (c) { if (c) seen[c] = true; });
+    (n.children || []).forEach(go); })(p);
+  OUT.seen = seen;
+  OUT.turns = turns().length;
+  OUT.removes = turns().map(function (t) {
+    return [t.attrs["data-anchor"], byClass(t, "turn-remove").length]; });
+  OUT.folded_line = byClass(p, "answer-fold").map(function (n) {
+    return byClass(n, "turn-remove").length; });
+  OUT.caps = byClass(p, "mark").map(textOf);
+  OUT.kind_words = [APP.DIGEST_KIND_LABEL.day, APP.DIGEST_KIND_LABEL.week];
+}
+main().then(function () { print(JSON.stringify(OUT)); },
+            function (e) { print(JSON.stringify({crash: String(e) + " " + (e.stack || "")})); });
+""", {"conversation": S.CONSISTENCY_CONVERSATION, "conv": S.CONSISTENCY_CONVERSATION})
+    check("F9 · the consistency render ran", got.get("crash"), None)
+    if got.get("crash"):
+        return
+    check("[page] F9 · the consistency conversation draws at least 8 turns",
+          got["turns"] >= 8, True)
+    check("[page] F9 · and every kind of line in the pane at least once",
+          {k: [c for c in v if not got["seen"].get(c)] for k, v in F9_PANE_KINDS.items()},
+          {k: [] for k in F9_PANE_KINDS})
+    removes = dict(got["removes"])
+    check("[page] F9 · Remove: one on each stored question and the Sonnet answer, none "
+          "on the folded Haiku line or the streaming question",
+          [sum(removes.values()), sorted(k for k, v in removes.items() if v != 1),
+           got["folded_line"]],
+          [9, ["live"], [0]])
+    css = _css_without_comments()
+    q = _look(css, ".pane-you")
+    check("[page] F9 · kind 'question': Plex 16 / 600, ink, the page's own sans",
+          [q.get(k) for k in ("font-family", "font-size", "font-weight", "color")]
+          + [_look(css, "html").get("font-family") or _look(css, "body").get("font-family")],
+          [None, "var(--s16)", "600", "var(--ink)", "var(--sans)"])
+    a = _look(css, ".answer-text p")
+    check("[page] F9 · kind 'answer': Newsreader 17 / 1.55",
+          [a.get(k) for k in ("font-family", "font-size", "line-height", "font-style")],
+          ["var(--serif)", "var(--s17)", "1.55", None])
+    grey = [k for k in F5_GREY_KINDS if k not in (".answer-working", ".still-working")]
+    check("[page] F9 · kind 'small grey line': every one Plex 11.5 / 500 / #5A5852, upright",
+          {k: [_look(css, k).get(p) for p in ("font-family", "font-size", "font-weight",
+                                              "color", "font-style")] for k in grey},
+          {k: F9_SANS4 + [None] for k in grey})
+    check("[page] F9 · kind 'small grey line, in progress': the same, italic",
+          {k: [_look(css, k).get(p) for p in ("font-family", "font-size", "font-weight",
+                                              "color", "font-style")]
+           for k in (".answer-working", ".still-working")},
+          {k: F9_SANS4 + ["italic"] for k in (".answer-working", ".still-working")})
+    act, price, rem = (_look(css, k) for k in (".topic-act", ".topic-price", ".turn-remove"))
+    check("[page] F9 · kind 'action inside a line': ochre 600 underlined at its line's "
+          "size; the price and Remove in the line's own grey, Remove underlined",
+          [[act.get(k) for k in ("color", "font-weight", "text-decoration", "font-size")],
+           [price.get(k) for k in ("color", "font-size", "font-weight")],
+           [rem.get("text-decoration")] + [rem.get(k) for k in ("font-size", "font-weight",
+                                                                "color")]],
+          [["var(--ochre)", "600", "underline", "inherit"], [None, None, None],
+           ["underline", "var(--s115)", "500", "var(--text-muted)"]])
+    before, after, div = (_look(css, k) for k in (".pane-divider.ask-divider::before",
+                                                   ".pane-divider.ask-divider::after",
+                                                   ".pane-divider.ask-divider"))
+    check("[page] F9 · kind 'capitals': NOW ASKING ABOUT ink between two ink rules; the "
+          "grey labels in capitals",
+          [div.get("color"), _look(css, ".pane-divider").get("text-transform"),
+           before.get("background"), after.get("background"),
+           _look(css, ".block-label").get("text-transform"),
+           [w == w.upper() for w in got["caps"] + got["kind_words"]]],
+          ["var(--ink)", "uppercase", "var(--ink)", "var(--ink)", "uppercase",
+           [True] * (len(got["caps"]) + len(got["kind_words"]))])
+    check("[page] F9 · kind 'buttons': 30 px, paid / free / save each with its rule",
+          [_look(css, ".btn").get("height"),
+           [bool(_look(css, k)) for k in (".btn-paid", ".btn-free", ".btn-save")]],
+          ["30px", [True, True, True]])
+
 # ------------------------------------------------------------- I9 · every button pressed
 # Brief §4.6. (A) boots the whole page under jsc against the real server's own answers,
 # walks it through each of its states and presses every button it draws, once each, from
@@ -6738,7 +6871,9 @@ I9_ESTIMATES = {"ask": 0.0008, "think_harder": 0.0213, "background": 0.0004,
 # state, where it asks anew (T-28; with the flag on it is priced). The topic-line
 # corrections stay listed: their price is printed BESIDE the link, in its line ("· ≈
 # 0.08¢"), not on it -- F6's own check reads the line.
-I9_UNPRICED_PAID = ["Ask", "Ask all papers instead",
+# F9 (5 Nov): the flag is served ON, so no swept state draws the flag-off "Ask all papers
+# instead" any more; it leaves the list (I8's flag-off checks still cover that page).
+I9_UNPRICED_PAID = ["Ask",
                     "Ask in the “What did the EPFO…” topic instead",
                     "Ask in the “what about the floods” topic instead",
                     "Search as one question", "Search as two topics", "Treat as new topic"]
@@ -7072,18 +7207,23 @@ function buttons() {
   collectFrom(document.body, 'body', out);
   return out;
 }
+function hasClass(n, c) { return (' ' + (n.className || '') + ' ').indexOf(' ' + c + ' ') >= 0; }
 function collectFrom(root, name, out) {
-  (function go(n, form) {
+  /* F9 · `older` = the anchor of the quiet older answer whose hover-revealed button row
+     (`.answer-actions`, clipped by CSS until hover / focus) holds the button, else null. */
+  (function go(n, form, turn, older) {
     if (!n || typeof n !== 'object' || isHidden(n)) return;
     if (n.tagName === 'FORM') form = n;
+    if (hasClass(n, 'pane-turn')) turn = hasClass(n, 'is-older') ? n.attrs['data-anchor'] : null;
+    if (turn && hasClass(n, 'answer-actions')) older = turn;
     if (n.tagName === 'BUTTON') {
       var label = (textOf(n).trim() || (n.attrs['aria-label'] || '') || (n.attrs.title || ''));
-      out.push({node: n, root: name, form: form, label: label,
+      out.push({node: n, root: name, form: form, label: label, older: older || null,
                 sig: name + '|' + n.className + '|' + label,
                 disabled: n.attrs.disabled !== undefined || n.disabled === true});
     }
-    kidsOf(n).forEach(function (c) { go(c, form); });
-  })(root, null);
+    kidsOf(n).forEach(function (c) { go(c, form, turn, older); });
+  })(root, null, null, null);
 }
 function byLabel(list, start, root) {
   return list.filter(function (b) { return b.label.indexOf(start) === 0
@@ -7286,7 +7426,7 @@ def i9_every_button():
         got = _jsc(I6_HARNESS + I8_HARNESS + I9_HARNESS + I9_STATES + r"""
 async function main() {
   OUT.states = []; OUT.presses = []; OUT.errors = []; OUT.mismatch = [];
-  OUT.moves = 0; OUT.disabled = 0; OUT.nohandler = [];
+  OUT.moves = 0; OUT.disabled = 0; OUT.nohandler = []; OUT.olderRows = []; OUT.olderPressed = [];
   for (var s = 0; s < STATES.length; s++) {
     var st = STATES[s];
     try { await enter(st); } catch (e) {
@@ -7294,6 +7434,7 @@ async function main() {
     if (REJECTED.length) OUT.errors.push([st.name, '(building the state)', REJECTED.join('; ')]);
     var base = buttons();
     OUT.states.push([st.name, base.length]);
+    base.forEach(function (b) { if (b.older && !b.disabled) OUT.olderRows.push([st.name, b.older, b.label]); });
     for (var i = 0; i < base.length; i++) {
       if (base[i].disabled) { OUT.disabled += 1; continue; }
       await enter(st);
@@ -7301,6 +7442,7 @@ async function main() {
       if (!now[i] || now[i].sig !== base[i].sig) { OUT.mismatch.push([st.name, base[i].label]); continue; }
       var res = await pressB(now[i]);
       OUT.presses.push([st.name, now[i].label, res.paid]);
+      if (now[i].older) OUT.olderPressed.push([st.name, now[i].older, now[i].label]);
       if (!res.handlers) OUT.nohandler.push([st.name, now[i].label]);
       res.errs.forEach(function (e) { OUT.errors.push([st.name, now[i].label, e]); });
       var after = buttons(), left = {};
@@ -7353,6 +7495,17 @@ main().then(function () { print(JSON.stringify(OUT)); },
           got["missing"], [])
     check("[page] I9 A · every button pressed has a click (or its form's submit) handler",
           got["nohandler"], [])
+    # F9 (brief §5): an older answer's button row is in the page but clipped until hover
+    # or keyboard focus (F5); the sweep presses it like any other. What would pass while
+    # broken: no older answer drawn at all -> the row count is checked too.
+    rows = {(st, turn) for st, turn, _l in got["olderRows"]}
+    check("[page] F9 · I9: the quiet older answers' hover-revealed rows were drawn, in "
+          "both conversation states, and every button in them pressed once",
+          [{"ask · conversation, every flag on", "ask · conversation, flags as served"}
+           <= {st for st, _t in rows}, len(rows) >= 4,
+           sorted(map(tuple, got["olderRows"])) == sorted(map(tuple, got["olderPressed"]))],
+          [True, True, True])
+    I9_OLDER.append((len(got["olderPressed"]), len(rows)))
     unpriced = sorted({p[1].split(" › ")[-1] for p in got["presses"]
                        if p[2] and "≈" not in p[1].split(" › ")[-1]})
     check("[page] I9 A · a button that reaches a paid route prints its price, or is one "
@@ -7363,6 +7516,7 @@ main().then(function () { print(JSON.stringify(OUT)); },
 
 
 I9_COUNTS = []
+I9_OLDER = []
 
 
 def i9_paid_and_saved():
@@ -8040,7 +8194,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         run_section(mock, tmp)
     for section in (real, v01_search, v01_ask, v01b_contract, routes, v01_routes,
-                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f7_page, f7_routes, f8_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
+                    v01_states, pdf_guard, one_page, chips_reload, i6_page, i6_routes, l4_outside, i8_page, i8_routes, f4_routes, f5_page, f6_page, f7_page, f7_routes, f8_page, f9_page, f2_page, i9_every_button, i9_paid_and_saved, js_logic, contrast, look_i7, markup, script_guard,
                     asgi, page_contract, s5_server, ownership):
         run_section(section)
     check("the real intel.db is byte-for-byte what it was before the run",
@@ -8067,6 +8221,8 @@ def main():
               f"menu paths) over "
               f"{states} states; {found} drawn at first, {disabled} disabled (not pressed), "
               f"{moves} presses moved to another screen (not crawled)")
+    for pressed, rows in I9_OLDER:
+        print(f"F9 hover-revealed rows: {pressed} presses in {rows} older answers' rows")
     for was, now, cites, n in CHIPS_RELOAD:
         print(f"I5 chips after a reload, {n} stored answers: {was}/{cites} cites resolved "
               f"before the passage sets, {now}/{cites} after")
