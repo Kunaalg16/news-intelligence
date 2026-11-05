@@ -38,3 +38,13 @@ Kunaal's personal pipeline: daily newspaper PDFs → articles → tags → vecto
 
 ## 5. Map
 `_docs/03_ARCHITECTURE.md` (folders, files, daily run order; being rebuilt, the old one is `_docs/_archive_core/`) · `_docs/status/00_INDEX.md` (where things stand) · code map of 5 Nov: `_work/code_map_2026-11-05.txt` (path, line count, first comment line of every code file; ask Kunaal to regenerate it if it looks behind) · earlier build reports and hand-offs: `_docs/reports/` · Phase 3 design: `_docs/drafts/` (S5, S5b, S6 closeout, B·4 note, roadmap, v1 plan decisions, S7 notes).
+
+## 6. Start and end of every session (the next session, in any account, starts from files only)
+Start: after the reading order in section 1, also read the newest `_work/*_handoff.md`. It may hold doc updates Kunaal has not yet copied into `_docs/`.
+End:
+1. Write `_work/<name>_report.md` and `_work/<name>_handoff.md`.
+2. Put the full new text of your strand's status file and of your line in `status/00_INDEX.md` in `_work/proposed_docs/`, and say which `_docs/` file each replaces.
+3. Add the Shipsy block (at most 10 lines) for `_docs/history/shipsy_sync_log.md`.
+4. Tell Kunaal: "Time to update the project files", which files to copy into `_docs/`, and the starter line for the next session.
+Nothing that matters may exist only in the conversation.
+5. one build-log row for 02_PLAN.md (_docs/ is read-only here: write the row at the top of the hand-off; Kunaal pastes it).
