@@ -1,35 +1,29 @@
-# News Intelligence — rules for Claude Code (read every session)
+# CLAUDE.md — News Intelligence (rules for Claude Code, rewritten 5 Nov 2026)
 
-Kunaal's personal pipeline: daily newspaper PDFs → articles → tags → vectors → story groups → digest + ask window. You work here on **build-and-run tasks** only. Decisions, design, codebooks, anything blind and the STATUS files live in the claude.ai Project "News Intelligence – Phase 3"; you never decide those alone.
+You are working inside `~/news-intel/`, Kunaal's personal newspaper pipeline (PDFs → articles → digest/search/ask). Kunaal dictates by voice; read generously and confirm your understanding in one line.
 
-## 1. Where the truth is
-- **The claude.ai Project is the source of truth.** `_docs/` holds **read-only, dated snapshots** of its files (see `_docs/SNAPSHOT_DATE.txt`). If a snapshot looks older than the work at hand, or two documents disagree, **stop and ask Kunaal**. `02_STATUS.md` wins over every other document.
-- **Git and the Mac are the truth for code and data.** Start each session with `git log --oneline -3 && git status --short` and compare with `_docs/02_STATUS.md` › Next 0.
-- **Your notes go in `_work/`** (gitignored, writable): one dated running note per session (`_work/<date>_<task>.md`): what changed, commits, numbers, decisions asked, open points. Kunaal uploads it to the Project. Update it after each milestone, so nothing is lost if the session ends.
+## Read first
+1. `_docs/01_README.md` → `_docs/status/00_INDEX.md` → your strand's `_docs/status/<strand>.md` (K1, K2, K3 or B2.4; the brief names it). `_docs/03_ARCHITECTURE.md` only for builds. `_docs/ARCHIVE_INDEX.md` says what exists in the old claude.ai Projects: **name the exact file you need and ask Kunaal; never guess a path.**
+2. A **code change needs a brief** in `_docs/` (or `_docs/reports/`). No brief, no code change: say so and stop.
 
-## 2. Hard rules (never bent; the settings file enforces most of them)
-1. **Blind rule.** Never read, open, print, parse or summarise any `labels_*.json` (in `review/pairs/` or `review/threads/`), by any tool or script. Scoring commands that read them (`p2_dev_judgetest.py score`, `p3_dev_tracksheet.py score|agree`, `p2_dev_boundary.py`, `p2_dev_pairscore.py`) are **run by Kunaal in his own Terminal**; you may write the command for him.
-2. **No paid calls (option A).** You never run anything that calls an API or costs money: `p1_archive_paper.py`, `p2_extract.py` (its referee calls Haiku), `p2_tag.py run|sample|submit|collect|status`, `p2_dev_judgetest.py haiku`, any judge / digest-writer / search-answer call, `pip install`. Give Kunaal the exact command, one line on what it does and costs, and a one-line prediction of its output; he runs it.
-3. **Secrets.** Never read, print or look for API keys. The key file is outside the project and fenced off.
-4. **Data.** `data/news.db` and `data/vectors.db` are opened **read-only** by Phase 3 code (`file:…?mode=ro`); Phase 3 writes only `data/intel.db`. Never edit `archive/`, `eval/`, `data/pairs/`, `data/snapshots/`, `review/tag_audit/`, hand-made sheets or keys.
-5. **Git.** `git status --short` before every commit; `git add <file>` by name, never `git add .`; commit only after Kunaal approves; **Kunaal pushes**. The repo is **public**: no PDFs, article text, databases, JSON data or project docs ever go into it.
-6. **Never change** `CLAUDE.md`, `.claude/`, `_docs/` or the frozen extraction code (git tag `exam-v1`: `p2_extract*.py`, `p2_screen.py`).
-7. **One owner per file.** Files built in another chat (e.g. B·2.4's `p2_dev_*` tools) are not edited here unless Kunaal says so. Frozen test tools stay unchanged after their run.
+## The fence (set 1 Nov, `d5e685e`)
+- You cannot write `_docs/**`, `CLAUDE.md` or `.claude/**`. You can write `_work/` (reports, hand-offs) and code/tests inside the repo. If a doc needs changing, put the proposed text in `_work/` and tell Kunaal which file it replaces; he applies it.
+- Manual permission mode; strict sandbox. Do not look for ways around a denial.
+- **Free and local steps only.** Never run a paid API call (Anthropic, Voyage) and never score Kunaal's labels: **Kunaal types every paid call and every label scoring himself.** Give him the exact command and a one-line prediction.
+- Secrets: never `cat`, `source` or print the key file; never put a key on a command line.
+- `data/` is the owner's: `news.db` and `vectors.db` are read-only; Phase 3 writes only `data/intel.db` (and derived `data/search.db`, `data/digests/`). Never write a digest JSON into `_work/` (K1's app globs `_work/*.json`).
+- While a test suite runs, nothing touches the app on port 8765.
 
-## 3. How to work
-- **Explain before acting.** Plain words first, then the technical term with a 2–3 line explanation of the concept behind each step. Kunaal must understand every script.
-- **Before every command: one line predicting the output.** No raw output dumps: summarise numbers.
-- **Test before real data:** build a small mock (synthetic `news.db` / `intel.db`) and test there first; then run on the real data; report **tested · result · not tested**.
-- **Status words, exact:** RAN ON MAC · TESTED (mock) · WRITTEN, NOT RUN · PLANNED · REJECTED. Never round up.
-- **Knobs:** every setting chosen without strong evidence is a named constant in one config block, with its reason and the measurement that would change it.
-- **Pass lines before results:** any check that decides something gets its pass line written down before the result is seen. A failed line is answered by error analysis, not by moving the line.
-- **Decisions are Kunaal's.** For any open design point, explain the options in prose (what the question is, options, examples, risks, your view and how sure you are, in words), then wait. One decision at a time.
-- **Confidence in words** (fairly sure · unsure · guessing), never invented percentages.
+## How to report
+- Every item gets exactly one status word: **RAN ON MAC · TESTED IN CHAT · WRITTEN NOT RUN · PLANNED · REJECTED.** Never round up.
+- Pass lines are written **before** results. A failed line is analysed by cause; the line is not moved.
+- Hand-off file in `_work/<name>_report.md` and `_name_handoff.md`: what was built, commit ids, each pass line with its number, **tested · result · not tested**, decisions you made and a check that fails if each is wrong, and "Waiting for Kunaal" at the top if anything needs him.
+- Name every concept by its correct technical term with a 2–3 line mechanism. Name every setting chosen without strong evidence as a knob (one config block, reason, the measurement that would change it).
+- Keep sessions short; end with the hand-off. One owner per file; do not edit another strand's files. `git status --short` before every commit; `git add <file>` by name; commit messages say what and why.
 
-## 4. Environment
-- Run from `~/news-intel`. Two Python environments: `.venv/bin/python` (pipeline + Phase 3) and `.venv-embed/bin/python` (embeddings only). No `activate`.
-- Standard library first; a new package needs Kunaal's yes (he installs it).
-- The sandbox blocks network, writes outside this folder, and reads of labels and keys. If a command fails with "Operation not permitted", **do not work around it**: tell Kunaal what was blocked and why the command needed it.
+## Model and API facts
+- A model id is used only after its request shape is checked against the API docs plus one live call (typed by Kunaal). Sonnet 5.5 refuses forced tool calls that Haiku 5.5 accepts.
+- Python: `.venv/` for the pipeline and Phase 3; `.venv-embed/` for embeddings only.
 
-## 5. Map
-`_docs/03_ARCHITECTURE.md` (folders, files, daily run order) · `_docs/02_STATUS.md` (where things stand, Next) · `news_intel_inventory` in `_docs/` if present · Phase 3 design: `_docs/drafts/` (S5, S5b, S6 closeout, B·4 note, roadmap + v1 plan decisions, S7 notes).
+## Where to look
+`_docs/reports/` holds every earlier build report and hand-off (k1_*, k3_*). Code map of 5 Nov: `_work/code_map_2026-11-05.txt` (path, line count, first comment line of every code file). If it or `_docs/03_ARCHITECTURE.md` looks behind, ask Kunaal to regenerate it; do not guess file contents.
