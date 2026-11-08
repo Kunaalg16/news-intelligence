@@ -176,3 +176,7 @@ launch/start.sh                                # starts the embedding service an
 - **Search:** a near-miss question set to measure the `thin` threshold; rewriter tuning on a new blind set; a judged related-story set; a graded answer-quality eval.
 - **Pipeline:** scheduled morning runs, chart reading (vision), OCR for image-only PDFs, entity resolution, extraction fixes for Times of India and Mint tested on fresh held-out pages.
 - **App:** fixes from the first week of use; full boards.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
