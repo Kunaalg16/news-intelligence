@@ -16,3 +16,4 @@ _docs/
 _work/
 CLAUDE.md
 .claude/skills/
+.claude/settings.json
